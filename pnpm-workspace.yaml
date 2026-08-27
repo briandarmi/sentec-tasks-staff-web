@@ -1,0 +1,7 @@
+# Inert while this repo sits inside the root Sentec Tasks workspace — pnpm reads
+# only the root file there, which carries the same entries. Kept because this is
+# its own git repository: a standalone clone needs these to install.
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  vue-demi: true

@@ -1,0 +1,19 @@
+# Staff-facing console. Indexing is refused in three places:
+#
+#   1. <meta name="robots" content="noindex, nofollow"> in the prerendered
+#      shell (see app.head.meta in nuxt.config.ts)
+#   2. the X-Robots-Tag response header at CloudFront
+#   3. this file
+#
+# Disallow blocks CRAWLING, not INDEXING. A crawler that is not allowed to
+# fetch a page also never reads the noindex on it, so a URL linked from
+# anywhere else can still be listed -- without a description, but listed.
+#
+# So: if any URL of this app is ALREADY in a search index, comment out the
+# Disallow below until the noindex has been picked up and the URL dropped.
+# Blocking first freezes the stale entry in place instead of removing it.
+# The X-Robots-Tag header is the only one of the three that survives that
+# trade-off, which is why it is worth setting.
+
+User-Agent: *
+Disallow: /

@@ -1,0 +1,34 @@
+db/
+
+node_modules/
+
+# Nuxt build artifacts
+.nuxt/
+.output/
+.nitro/
+dist
+
+# Caches
+.cache/
+coverage/
+*.tsbuildinfo
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Deployment and platform folders
+.vercel/
+.netlify/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
