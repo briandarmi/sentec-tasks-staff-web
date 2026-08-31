@@ -63,6 +63,15 @@ export default defineNuxtConfig({
       {
         name: 'Quicksand',
         provider: 'google',
+        /**
+         * The design system uses the full Quicksand family: Bold for headlines
+         * and regular/medium/semibold/bold plus a Light for body copy. Without
+         * this list @nuxt/fonts fetches weight 400 only, and the browser fakes
+         * the rest — synthetic bold on a rounded geometric like Quicksand
+         * smears the terminals and reads as a different typeface, which is
+         * exactly what the brand mandates against.
+         */
+        weights: [300, 400, 500, 600, 700],
       },
     ],
   },

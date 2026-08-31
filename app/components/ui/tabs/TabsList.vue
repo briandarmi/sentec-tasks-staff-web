@@ -5,6 +5,15 @@ import { reactiveOmit } from "@vueuse/core"
 import { TabsList } from "reka-ui"
 import { cn } from "@/lib/utils"
 
+/**
+ * Sentinel Tech Design System tab list.
+ *
+ * Ported from the design system's React kit (`components/navigation/Tabs.jsx`),
+ * which is an underlined rail — a hairline rule the full width of the strip,
+ * with the active trigger sitting on it — not shadcn's segmented pill. The two
+ * are different components wearing the same name, so this replaces the pill
+ * outright. Nothing in these consoles used Tabs yet, so nothing regresses.
+ */
 const props = defineProps<TabsListProps & { class?: HTMLAttributes["class"] }>()
 
 const delegatedProps = reactiveOmit(props, "class")
@@ -15,7 +24,7 @@ const delegatedProps = reactiveOmit(props, "class")
     data-slot="tabs-list"
     v-bind="delegatedProps"
     :class="cn(
-      'bg-muted text-muted-foreground inline-flex h-9 w-fit items-center justify-center rounded-lg p-[3px]',
+      'border-border inline-flex h-auto w-full items-center justify-start gap-1 border-b bg-transparent p-0',
       props.class,
     )"
   >

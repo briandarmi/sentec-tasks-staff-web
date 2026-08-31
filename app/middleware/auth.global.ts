@@ -14,6 +14,18 @@ import { useSession } from '~/composables/useSession'
  * hand-typed URL gains nothing.
  */
 export default defineNuxtRouteMiddleware((to) => {
+  // The design-system preview is deliberately public — no login, in dev and in
+  // production alike. It renders component specimens against static props and
+  // touches no session, no tenant and no API, so there is nothing behind it to
+  // protect. It is meant to be linkable to anyone working on the brand.
+  //
+  // Worth knowing before treating this as a hole: these consoles are static
+  // SPAs (`ssr: false`), so every page's code already ships to any visitor who
+  // loads the bundle. This middleware is a UX redirect, not a security
+  // boundary — the API is what actually refuses data.
+  if (to.path === '/design-system')
+    return
+
   const session = useSession()
 
   if (to.path === '/login') {

@@ -6,6 +6,21 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Apply hover everywhere, not only where the primary pointer can hover.
+
+   Tailwind gates `hover:` behind `@media (hover: hover)` by default, so every
+   hover state in these apps silently disappears in any context whose PRIMARY
+   pointer cannot hover — a touchscreen laptop, a tablet, or a browser sitting
+   in device-emulation mode. The design system's hover behaviour is meant to
+   read the same everywhere, so the variant is redefined without the gate.
+
+   The trade-off Tailwind's default buys, accepted here deliberately: on a genuine
+   touch device `:hover` latches after a tap and holds until the next tap
+   elsewhere, so a tapped button keeps its hover fill for a moment. That is a
+   cosmetic quirk; a hover state nobody can see is the worse failure. Press
+   states are unaffected — `active:` was never gated. */
+@custom-variant hover (&:hover);
+
 @theme inline {
     --font-sans: 'Quicksand', sans-serif;
     --font-heading: var(--font-sans);
@@ -42,81 +57,297 @@
     --color-card: var(--card);
     --color-foreground: var(--foreground);
     --color-background: var(--background);
+    --color-primary-hover: var(--primary-hover);
+    --color-primary-active: var(--primary-active);
+    --color-neutral-tint: var(--neutral-tint);
+    --color-neutral-tint-foreground: var(--neutral-tint-foreground);
+    --color-primary-tint: var(--primary-tint);
+    --color-primary-tint-foreground: var(--primary-tint-foreground);
+    --color-success-tint: var(--success-tint);
+    --color-success-tint-foreground: var(--success-tint-foreground);
+    --color-warning: var(--warning);
+    --color-warning-foreground: var(--warning-foreground);
+    --color-warning-tint: var(--warning-tint);
+    --color-warning-tint-foreground: var(--warning-tint-foreground);
+    --color-danger-tint: var(--danger-tint);
+    --color-danger-tint-foreground: var(--danger-tint-foreground);
+    --color-info: var(--info);
+    --color-info-tint: var(--info-tint);
+    --color-info-tint-foreground: var(--info-tint-foreground);
+    --color-destructive-hover: var(--destructive-hover);
+    --color-destructive-active: var(--destructive-active);
+    --color-success-hover: var(--success-hover);
+    --color-success-active: var(--success-active);
+    --color-secondary-hover: var(--secondary-hover);
+    --color-secondary-active: var(--secondary-active);
+    --color-warning-hover: var(--warning-hover);
+    --color-warning-active: var(--warning-active);
+    /* tokens/effects.css --ease-standard. Also inferred, not GSM-sourced. */
+    --ease-ds: cubic-bezier(.2, .8, .2, 1);
+    --shadow-ds-sm: var(--ds-shadow-sm);
+    --shadow-ds-md: var(--ds-shadow-md);
+    --shadow-ds-lg: var(--ds-shadow-lg);
     --radius-sm: calc(var(--radius) - 4px);
     --radius-md: calc(var(--radius) - 2px);
     --radius-lg: var(--radius);
     --radius-xl: calc(var(--radius) + 4px);
 }
 
+/* ── Sentinel Tech brand scale ─────────────────────────────────────────────────
+   Verbatim from the Sentinel Tech Design System (`tokens/colors.css`, derived
+   from the GSM 2025). This is the ONLY place brand hexes appear; the shadcn
+   semantic tokens below are all expressed in terms of these.
+
+   The design system's own semantic alias layer (`--color-*`, `--text-*`,
+   `--surface-*`) is deliberately NOT imported. In Tailwind 4 `--color-*` is the
+   colour-utility namespace and `--text-*` the font-size namespace, and the
+   `@theme inline` block above already claims both — importing that layer would
+   collide with it. The `--st-*` scale is namespaced and cannot.
+   ──────────────────────────────────────────────────────────────────────────── */
 :root {
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: #027BFF;
-    --primary-foreground: oklch(1 0 0);
-    --secondary: oklch(0.93 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --success: #34C759;
-    --success-foreground: oklch(1 0 0);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
+    --st-blue-700: #0f5f96;
+    --st-blue-600: #1483cc;
+    --st-blue-500: #27A5F7; /* Sentinel Blue — the brand primary */
+    --st-blue-400: #5cbdf9;
+    --st-blue-300: #94d3fb;
+    --st-blue-200: #c3e6fc;
+    --st-blue-100: #e6f5fe;
+    --st-grey-900: #2B2D31; /* Sentinel Grey */
+    --st-grey-800: #3a3d43;
+    --st-grey-700: #4b4e56;
+    --st-grey-600: #63666f;
+    --st-grey-500: #7d818a;
+    --st-grey-400: #a2a5ac;
+    --st-grey-300: #c3c5ca;
+    --st-grey-200: #dcdee1;
+    --st-grey-100: #eceef0;
+    --st-grey-50: #f6f7f8;
+    /* Magenta is a brand colour but appears on no sourced stationery. The design
+       system says to treat it as a sparing highlight/tag colour, never a base UI
+       colour — so it is exposed here but mapped to no shadcn token. */
+    --st-magenta-600: #b81f85;
+    --st-magenta-500: #E027A6;
+    --st-magenta-100: #fce3f3;
+    --st-black: #000000;
+    --st-white: #ffffff;
+    /* Semantic status colours (design system values). */
+    --st-success: #1c9d6b;
+    --st-warning: #d98c1f;
+    --st-danger: #d93a3a;
+    /* Tint fills for the design system's badge/tag tone pairs
+       (`tokens/colors.css`: --color-success-tint, --color-warning-tint,
+       --color-danger-tint). */
+    --st-success-tint: #e2f6ee;
+    --st-warning-tint: #fbf0dd;
+    --st-danger-tint: #fbe4e4;
+    /* Darkened tone foregrounds, used ONLY as text on the matching tint above.
+       The design system's React kit pairs each tint with the base status colour
+       — and at badge sizes those pairs fail WCAG AA: #1c9d6b on #e2f6ee is
+       3.09:1, #d98c1f on #fbf0dd is 2.41:1, #d93a3a on #fbe4e4 is 3.75:1, all
+       short of 4.5:1. These darkened hues hold the same hue at 4.8-5.6:1. The
+       base --st-* status colours above are unchanged and still correct as fills
+       with white text; this is the same correction already made for white on
+       Sentinel Blue. */
+    --st-success-700: #157952;
+    --st-warning-700: #8a5a10;
+    --st-danger-700: #b02525;
+}
+
+:root {
+    --background: var(--st-white);
+    --foreground: var(--st-grey-900);
+    --card: var(--st-white);
+    --card-foreground: var(--st-grey-900);
+    --popover: var(--st-white);
+    --popover-foreground: var(--st-grey-900);
+    /* Sentinel Blue exactly as the brand mandates, with a white foreground on
+       every solid-primary surface — a deliberate brand decision taken on
+       2026-08-27, matching the design system's own React kit.
+
+       Recorded so it is not "fixed" later by someone reading a contrast
+       checker: white on #27A5F7 is 2.69:1, below both WCAG AA (4.5:1) and the
+       3:1 UI threshold. Sentinel Grey would have been 5.13:1. The states around
+       it are pulled as far as they can go instead — see --primary-hover — and
+       --st-blue-700 (#0f5f96, 6.77:1 with white) remains available for any
+       surface that needs a compliant blue fill. */
+    --primary: var(--st-blue-500);
+    --primary-foreground: var(--st-white);
+    --secondary: var(--st-grey-100);
+    --secondary-foreground: var(--st-grey-900);
+    --muted: var(--st-grey-50);
+    --muted-foreground: var(--st-grey-500);
+    /* shadcn's `accent` is the neutral hover/subtle surface, NOT a brand accent.
+       Mapping brand magenta here would turn every hover state magenta. */
+    --accent: var(--st-grey-100);
+    --accent-foreground: var(--st-grey-900);
+    --destructive: var(--st-danger);
+    --success: var(--st-success);
+    --success-foreground: var(--st-white);
+    --border: var(--st-grey-200);
+    --input: var(--st-grey-200);
+    --ring: var(--st-blue-500);
+    /* ── Design-system component tokens ────────────────────────────────────
+       Ported from the Sentinel Tech Design System React kit
+       (the kit's per-component .jsx files), which styles against its semantic
+       alias layer (--color-primary-tint, --text-muted, --surface-card...).
+       That layer is deliberately not imported here (see the note above), so
+       the values it carried are re-expressed as shadcn-style tokens, each with
+       a .dark counterpart — the DS components are light-only and hardcode
+       var(--st-white), which would break dark mode if ported literally.
+       ──────────────────────────────────────────────────────────────────────── */
+    /* Hover and press DARKEN, as the DS kit does. This tracks the white
+       foreground: lightening would drop white text further (white on blue-400
+       is 2.08:1), whereas darkening lifts it — 4.12:1 on blue-600 and 6.77:1
+       on blue-700. So the interactive states are the most legible part of a
+       primary button, and the resting state the least. */
+    --primary-hover: var(--st-blue-600);
+    --primary-active: var(--st-blue-700);
+    --neutral-tint: var(--st-grey-100);
+    --neutral-tint-foreground: var(--st-grey-700);
+    --primary-tint: var(--st-blue-100);
+    --primary-tint-foreground: var(--st-blue-700);
+    --success-tint: var(--st-success-tint);
+    --success-tint-foreground: var(--st-success-700);
+    --warning: var(--st-warning);
+    --warning-foreground: var(--st-white);
+    --warning-tint: var(--st-warning-tint);
+    --warning-tint-foreground: var(--st-warning-700);
+    --danger-tint: var(--st-danger-tint);
+    --danger-tint-foreground: var(--st-danger-700);
+    /* Info is a real design-system tone (its `colors-semantic` card shows four,
+       not three), and unlike the others it has no hue of its own: the card
+       draws it as --color-primary-tint under --st-blue-700. So these alias the
+       blue family rather than introducing a fourth colour.
+
+       It also needs no AA correction. The same card pairs success/warning/danger
+       tints with their BASE colour, which is what lands at 2.4-3.8:1 and forced
+       the darkened --st-*-700 text hues above; blue-700 on blue-100 is 6.16:1,
+       so the design system's own info pairing already passes.
+
+       Defined once, in :root only. `var()` resolves at use, so --info-tint
+       follows --primary-tint into .dark automatically. */
+    --info: var(--st-blue-500);
+    --info-tint: var(--primary-tint);
+    --info-tint-foreground: var(--primary-tint-foreground);
+    /* Interaction states for the remaining filled buttons, following the design
+       system kit's rule: hover and press DARKEN the fill. shadcn's stock
+       opacity-blend hover (a /90 modifier) blends toward the PAGE behind
+       instead, which on a light ground
+       makes the button paler as you approach it — the wrong direction, and it
+       costs contrast against the white label. Same correction already made for
+       --primary-hover.
+
+       Danger takes the kit's exact values; success has no kit button, so it
+       steps by the same proportion. */
+    --destructive-hover: #c53434;
+    --destructive-active: #b82f2f;
+    --success-hover: color-mix(in oklab, var(--st-success) 92%, black);
+    --success-active: color-mix(in oklab, var(--st-success) 84%, black);
+    /* The neutral filled button. The kit's own neutral button is white-on-border
+       and steps grey-50 -> grey-100; this is the filled cousin, so it steps one
+       further down the same scale. */
+    --secondary-hover: var(--st-grey-200);
+    --secondary-active: var(--st-grey-300);
+    /* Warning behaves exactly as primary does: a white label on the brand hue,
+       darkening on hover and press. Same deliberate trade as Sentinel Blue —
+       white on #d98c1f is 2.72:1 at rest, below AA, and used anyway by decision
+       (2026-08-27). Do not "fix" it back to a dark label.
+
+       The two steps are tuned to land on primary's own progression, so the two
+       buttons feel identical under the pointer: white reaches 4.08:1 on hover
+       (#af7017 — primary's blue-600 is 4.08:1) and 6.74:1 on press (#81510e —
+       primary's blue-700 is 6.78:1). As with primary, the interactive states are
+       the legible ones and the resting state the least. */
+    --warning-hover: color-mix(in oklab, var(--st-warning) 85%, black);
+    --warning-active: color-mix(in oklab, var(--st-warning) 68%, black);
+    /* The DS effects scale (tokens/effects.css). Flagged there as inferred, not
+       GSM-sourced — hence the --ds-* prefix rather than --st-*. */
+    --ds-shadow-sm: 0 1px 2px rgb(43 45 49 / 6%);
+    --ds-shadow-md: 0 4px 12px rgb(43 45 49 / 8%);
+    --ds-shadow-lg: 0 12px 32px rgb(43 45 49 / 12%);
+    /* No chart palette exists in the design system; these are the shadcn
+       defaults, left untouched and flagged as unbranded. */
     --chart-1: oklch(0.646 0.222 41.116);
     --chart-2: oklch(0.6 0.118 184.704);
     --chart-3: oklch(0.398 0.07 227.392);
     --chart-4: oklch(0.828 0.189 84.429);
     --chart-5: oklch(0.769 0.188 70.08);
+    /* 0.625rem = 10px, which already equals the design system's --radius-md. */
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: #027BFF;
-    --sidebar-primary-foreground: oklch(1 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
+    --sidebar: var(--st-grey-50);
+    --sidebar-foreground: var(--st-grey-900);
+    --sidebar-primary: var(--st-blue-500);
+    --sidebar-primary-foreground: var(--st-white);
+    --sidebar-accent: var(--st-grey-100);
+    --sidebar-accent-foreground: var(--st-grey-900);
+    --sidebar-border: var(--st-grey-200);
+    --sidebar-ring: var(--st-blue-500);
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: #027BFF;
-    --primary-foreground: oklch(1 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
+    /* The design system defines no dark mode — tokens/colors.css is :root only.
+       These are derived from the Sentinel Grey scale rather than invented:
+       grey-900 ground, grey-800 raised surfaces, grey-700 subtle fills. */
+    --background: var(--st-grey-900);
+    --foreground: var(--st-grey-50);
+    --card: var(--st-grey-800);
+    --card-foreground: var(--st-grey-50);
+    --popover: var(--st-grey-800);
+    --popover-foreground: var(--st-grey-50);
+    --primary: var(--st-blue-500);
+    --primary-foreground: var(--st-white);
+    --secondary: var(--st-grey-700);
+    --secondary-foreground: var(--st-grey-50);
+    --muted: var(--st-grey-800);
+    --muted-foreground: var(--st-grey-400);
+    --accent: var(--st-grey-700);
+    --accent-foreground: var(--st-grey-50);
+    --destructive: var(--st-danger);
+    --success: var(--st-success);
+    --success-foreground: var(--st-white);
+    --border: rgb(255 255 255 / 10%);
+    --input: rgb(255 255 255 / 15%);
+    /* blue-400 rather than 500: a brighter ring reads better on a dark ground. */
+    --ring: var(--st-blue-400);
+    /* Dark counterparts for the DS component tokens. The tints become low-alpha
+       washes of the same hue over the grey-900 ground; each foreground lifts
+       toward white so the pair keeps its AA margin on a dark surface. */
+    --primary-hover: var(--st-blue-600);
+    --primary-active: var(--st-blue-700);
+    --neutral-tint: var(--st-grey-700);
+    --neutral-tint-foreground: var(--st-grey-100);
+    --primary-tint: color-mix(in oklab, var(--st-blue-500) 22%, var(--st-grey-900));
+    --primary-tint-foreground: var(--st-blue-300);
+    --success-tint: color-mix(in oklab, var(--st-success) 22%, var(--st-grey-900));
+    --success-tint-foreground: color-mix(in oklab, var(--st-success) 55%, var(--st-white));
+    --warning: var(--st-warning);
+    --warning-foreground: var(--st-white);
+    --warning-tint: color-mix(in oklab, var(--st-warning) 22%, var(--st-grey-900));
+    --warning-tint-foreground: color-mix(in oklab, var(--st-warning) 55%, var(--st-white));
+    --danger-tint: color-mix(in oklab, var(--st-danger) 22%, var(--st-grey-900));
+    --danger-tint-foreground: color-mix(in oklab, var(--st-danger) 55%, var(--st-white));
+    /* On a dark ground the neutral fill must step the other way — away from the
+       background — or hover reads as the button receding. */
+    --secondary-hover: var(--st-grey-600);
+    --secondary-active: var(--st-grey-500);
+    /* Shadows need a true-black base on a dark ground; the grey-900-tinted
+       light values are invisible there. */
+    --ds-shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+    --ds-shadow-md: 0 4px 12px rgb(0 0 0 / 45%);
+    --ds-shadow-lg: 0 12px 32px rgb(0 0 0 / 55%);
     --chart-1: oklch(0.488 0.243 264.376);
     --chart-2: oklch(0.696 0.17 162.48);
     --chart-3: oklch(0.769 0.188 70.08);
     --chart-4: oklch(0.627 0.265 303.9);
     --chart-5: oklch(0.645 0.246 16.439);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: #027BFF;
-    --sidebar-primary-foreground: oklch(1 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --sidebar: var(--st-grey-800);
+    --sidebar-foreground: var(--st-grey-50);
+    --sidebar-primary: var(--st-blue-500);
+    --sidebar-primary-foreground: var(--st-white);
+    --sidebar-accent: var(--st-grey-700);
+    --sidebar-accent-foreground: var(--st-grey-50);
+    --sidebar-border: rgb(255 255 255 / 10%);
+    --sidebar-ring: var(--st-blue-400);
 }
 
 @layer base {

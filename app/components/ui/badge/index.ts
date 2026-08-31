@@ -3,21 +3,40 @@ import { cva } from "class-variance-authority"
 
 export { default as Badge } from "./Badge.vue"
 
+/**
+ * Sentinel Tech Design System badge.
+ *
+ * Ported from the design system's React kit (`components/feedback/Badge.jsx`):
+ * a pill of tinted fill with tone-matched text, 3/10px padding, 12px semibold
+ * with 0.02em tracking. This replaces shadcn's solid fills — the kit's tone
+ * pairs ARE the badge's design language, not a colour swap on top of it.
+ *
+ * Variant names keep their shadcn meaning so existing call sites read the same;
+ * only the visual language changes. `warning` is new (the kit has the tone, the
+ * shadcn set had no variant for it). `outline` has no kit equivalent and stays
+ * as the bordered form — for a removable chip, use Tag instead.
+ *
+ * Each tone's foreground is the darkened `--st-*-700` hue rather than the kit's
+ * base status colour: at 12px the kit's own pairs land at 2.4-3.8:1, below AA.
+ * See the note on those tokens in `app/assets/css/tailwind.css`.
+ */
 export const badgeVariants = cva(
-  "inline-flex items-center justify-center rounded-full border px-2 py-0.5 text-xs font-medium w-fit whitespace-nowrap shrink-0 [&>svg]:size-3 gap-1 [&>svg]:pointer-events-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive transition-[color,box-shadow] overflow-hidden",
+  "inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden whitespace-nowrap rounded-full border border-transparent px-2.5 py-[3px] text-xs font-semibold tracking-[0.02em] transition-[color,background-color,box-shadow] [&>svg]:pointer-events-none [&>svg]:size-3 focus-visible:border-ring focus-visible:ring-primary-tint focus-visible:ring-[3px] aria-invalid:border-destructive aria-invalid:ring-danger-tint",
   {
     variants: {
       variant: {
         default:
-          "border-transparent bg-primary text-primary-foreground [a&]:hover:bg-primary/90",
+          "bg-primary-tint text-primary-tint-foreground [a&]:hover:bg-primary-tint/70",
         secondary:
-          "border-transparent bg-secondary text-secondary-foreground [a&]:hover:bg-secondary/90",
+          "bg-neutral-tint text-neutral-tint-foreground [a&]:hover:bg-neutral-tint/70",
         destructive:
-         "border-transparent bg-destructive text-white [a&]:hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
-        outline:
-          "text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
+          "bg-danger-tint text-danger-tint-foreground [a&]:hover:bg-danger-tint/70 focus-visible:ring-danger-tint",
         success:
-          "border-transparent bg-success text-success-foreground [a&]:hover:bg-success/90",
+          "bg-success-tint text-success-tint-foreground [a&]:hover:bg-success-tint/70",
+        warning:
+          "bg-warning-tint text-warning-tint-foreground [a&]:hover:bg-warning-tint/70",
+        outline:
+          "border-border text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
       },
     },
     defaultVariants: {

@@ -52,7 +52,7 @@ const createActive = computed(() => route.path === '/tasks/new')
       >
         <span
           class="-mt-5 flex h-12 w-12 items-center justify-center rounded-full border-4 border-background shadow-lg transition-colors"
-          :class="createActive ? 'bg-primary/90 text-primary-foreground' : 'bg-primary text-primary-foreground active:bg-primary/90'"
+          :class="createActive ? 'bg-primary-hover text-primary-foreground' : 'bg-primary text-primary-foreground active:bg-primary-active'"
         >
           <PlusIcon class="h-6 w-6" />
         </span>

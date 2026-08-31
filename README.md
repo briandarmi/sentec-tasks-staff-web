@@ -167,7 +167,8 @@ server concern — so what is modelled here is the shape, not the protection.
 
 Copied wholesale from the Butler consoles so the apps stay visually one product:
 Nuxt 4 SPA (`ssr: false`), shadcn-vue (`new-york`, `neutral` base, Tabler
-icons), Tailwind 4 with the same token set, Quicksand, `#027BFF` primary.
+icons), Tailwind 4 with the same token set, Quicksand, Sentinel Blue
+`#27A5F7` primary.
 `app/components/ui/` is the unmodified shadcn set. Every status and SLA colour is
 a semantic token, never a literal — a test in the core layer asserts that, so
 light and dark cannot drift apart.
@@ -177,6 +178,14 @@ Mobile-first is the whole point of this app: interactive targets are at least
 a second pane, so the layout that gets tested on a phone is the one seen on a
 laptop.
 
+
+The colour layer comes from the **Sentinel Tech Design System** on
+claude.ai/design: `app/assets/css/tailwind.css` carries the `--st-*` brand scale
+verbatim from that project's `tokens/colors.css`, and every shadcn token is
+expressed in terms of it. The design system's own `--color-*` / `--text-*` alias
+layer is deliberately not imported — those are Tailwind 4's colour and font-size
+utility namespaces, which `@theme inline` already claims. Dark mode is derived
+from the Sentinel Grey scale because the design system defines none.
 ## Not verified yet
 
 Stated plainly rather than implied:
