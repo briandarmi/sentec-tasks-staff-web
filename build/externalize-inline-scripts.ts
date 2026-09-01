@@ -221,7 +221,10 @@ async function assertNoVirtualSpecifiers(assetsDir: string) {
   for (const file of files) {
     const code = await readFile(join(assetsDir, file), 'utf8')
     const found = new Set<string>()
-    for (const match of code.matchAll(/(?:from|import)\s*\(?\s*(["'`])(#[^"'`]+)\1/g)) found.add(match[2])
+    for (const match of code.matchAll(/(?:from|import)\s*\(?\s*(["'`])(#[^"'`]+)\1/g)) {
+      const specifier = match[2]
+      if (specifier) found.add(specifier)
+    }
     if (found.size) offenders.push(`${file}: ${[...found].join(', ')}`)
   }
   if (offenders.length) {
