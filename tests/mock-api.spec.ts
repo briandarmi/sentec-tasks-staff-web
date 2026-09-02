@@ -86,7 +86,7 @@ describe('finding 1 — claiming never steals an assignment', () => {
   it('assigns an unheld task without touching its status', () => {
     const admin = login('admin', 'admin123')
     const staff = login('staff', 'staff123')
-    const created = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels for 1408' }, headers: h(admin, '1') }).data
+    const created = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels for 1408', location: '1408' }, headers: h(admin, '1') }).data
     const claimed = call('/v1/tasks/claim', { method: 'POST', body: { taskId: created.id }, headers: h(staff, '1') }).data
     expect(claimed.assignment.userId).toBe('10')
     // There is no CLAIMED status; claiming is an assignment, not a transition.
@@ -139,7 +139,7 @@ describe('staff task visibility', () => {
   it('shows staff their own work plus their department\'s unclaimed queue', () => {
     const leader = login('leader', 'leader123')
     const staff = login('staff', 'staff123')
-    const fresh = call('/v1/tasks', { method: 'POST', body: { itemId: '3', title: 'Turndown floor 14' }, headers: h(leader, '1') }).data
+    const fresh = call('/v1/tasks', { method: 'POST', body: { itemId: '3', title: 'Turndown floor 14', location: 'Floor 14' }, headers: h(leader, '1') }).data
     const visible = call('/v1/tasks', { headers: h(staff, '1'), query: { limit: 100 } }).data
     // The Butler-era rule hid unclaimed work from the very people meant to claim it.
     expect(visible.some((t: any) => t.id === fresh.id && !t.assignment)).toBe(true)
@@ -166,25 +166,29 @@ describe('routing rules and SLA stamping', () => {
   it('prefers the most specific rule and stamps that SLA', () => {
     const admin = login('admin', 'admin123')
     // Item 4 (AC fault) has its own rule → Maintenance on the Urgent SLA (5/20).
-    const task = call('/v1/tasks', { method: 'POST', body: { itemId: '4', title: 'AC dead', location: '1501' }, headers: h(admin, '1') }).data
+    // A fixed activation inside Engineering's open hours (Wed 09:00 WIB) keeps
+    // the schedule-aware deadline math deterministic: both budgets count from
+    // activation, resolution is NOT stacked on response.
+    const start = '2026-08-26T02:00:00.000Z'
+    const task = call('/v1/tasks', { method: 'POST', body: { itemId: '4', title: 'AC dead', location: '1501', activationDate: start }, headers: h(admin, '1') }).data
     expect(task.departmentId).toBe('2')
     expect(task.slaId).toBe('2')
     const activation = Date.parse(task.activationDate)
     expect(Date.parse(task.responseDueAt) - activation).toBe(5 * 60_000)
-    expect(Date.parse(task.resolutionDueAt) - activation).toBe(25 * 60_000)
+    expect(Date.parse(task.resolutionDueAt) - activation).toBe(20 * 60_000)
     expect(task.column.status).toBe('NEW')
   })
 
   it('falls back to the category rule when no item rule matches', () => {
     const admin = login('admin', 'admin123')
-    const task = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels' }, headers: h(admin, '1') }).data
+    const task = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels', location: '1408' }, headers: h(admin, '1') }).data
     expect(task.departmentId).toBe('1')
   })
 
   it('keeps a quantity only for items that take one', () => {
     const admin = login('admin', 'admin123')
-    expect(call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'T', quantity: 3 }, headers: h(admin, '1') }).data.quantity).toBe(3)
-    expect(call('/v1/tasks', { method: 'POST', body: { itemId: '2', title: 'C', quantity: 9 }, headers: h(admin, '1') }).data.quantity).toBeNull()
+    expect(call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'T', location: '1408', quantity: 3 }, headers: h(admin, '1') }).data.quantity).toBe(3)
+    expect(call('/v1/tasks', { method: 'POST', body: { itemId: '2', title: 'C', location: '1408', quantity: 9 }, headers: h(admin, '1') }).data.quantity).toBeNull()
   })
 
   it('requires a title', () => {
@@ -196,7 +200,7 @@ describe('routing rules and SLA stamping', () => {
 describe('status transitions', () => {
   it('records response and resolution timings against the SLA', () => {
     const admin = login('admin', 'admin123')
-    const task = call('/v1/tasks', { method: 'POST', body: { itemId: '4', title: 'AC 1502' }, headers: h(admin, '1') }).data
+    const task = call('/v1/tasks', { method: 'POST', body: { itemId: '4', title: 'AC 1502', location: '1502' }, headers: h(admin, '1') }).data
     const started = call('/v1/tasks/status', { method: 'PATCH', body: { taskId: task.id, columnId: '2' }, headers: h(admin, '1') }).data
     expect(started.status).toBe('IN_PROGRESS')
     expect(started.responseDuration).not.toBeNull()
@@ -225,7 +229,7 @@ describe('status transitions', () => {
     expect(countEvents()).toBe(beforePartner + 1)
 
     // A task raised inside Tasks has no partner to notify.
-    const native = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Native' }, headers: h(admin, '1') }).data
+    const native = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Native', location: '0705' }, headers: h(admin, '1') }).data
     const beforeNative = countEvents()
     call('/v1/tasks/status', { method: 'PATCH', body: { taskId: native.id, columnId: '2' }, headers: h(admin, '1') })
     expect(countEvents()).toBe(beforeNative)
@@ -279,7 +283,8 @@ describe('list filters and cursor pagination', () => {
     const q = (query: Record<string, unknown>) => call('/v1/tasks', { headers: h(admin, '1'), query: { limit: 100, ...query } }).data
     expect(q({ status: 'NEW' }).every((t: any) => t.status === 'NEW')).toBe(true)
     expect(q({ status: 'FINISHED,VERIFIED' }).every((t: any) => ['FINISHED', 'VERIFIED'].includes(t.status))).toBe(true)
-    expect(q({ scope: 'unclaimed' }).every((t: any) => !t.assignment)).toBe(true)
+    // Unclaimed = owned by no individual: unassigned, or sitting in a pool.
+    expect(q({ scope: 'unclaimed' }).every((t: any) => !t.assignment || t.assignment.kind !== 'STAFF')).toBe(true)
     expect(q({ scope: 'breached' }).every((t: any) => t.responseSlaStatus === 'BREACHED' || t.resolutionSlaStatus === 'BREACHED')).toBe(true)
     expect(q({ partnerId: 'native' }).every((t: any) => !t.partnerId)).toBe(true)
     expect(q({ q: 'towel' }).length).toBeGreaterThan(0)
@@ -306,9 +311,11 @@ describe('property configuration is admin-only', () => {
       .toBe('BAD_REQUEST')
   })
 
-  it('requires a routing rule to match on something, within the property', () => {
+  it('allows at most one matcher on a routing rule, within the property', () => {
     const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/routing-rules/upsert', { method: 'POST', body: { departmentId: '1', slaId: '1' }, headers: h(admin, '1') })))
+    // No matcher at all is the catch-all tier — legal. Two matchers is not:
+    // a rule cannot sit in two specificity tiers at once.
+    expect(errCode(() => call('/v1/routing-rules/upsert', { method: 'POST', body: { departmentId: '1', slaId: '1', matchCategoryId: '1', matchPriority: 'URGENT' }, headers: h(admin, '1') })))
       .toBe('BAD_REQUEST')
     // Department 7 belongs to a different property.
     expect(errCode(() => call('/v1/routing-rules/upsert', { method: 'POST', body: { departmentId: '7', slaId: '1', matchCategoryId: '1' }, headers: h(admin, '1') })))
@@ -338,7 +345,7 @@ describe('operator surface', () => {
     const created = call('/v1/operator/tenants', { method: 'POST', body: { name: 'Harper Malioboro', code: 'HRP-MLB', tenantGroupId: '1' }, headers: h(operator) }).data
     expect(created.code).toBe('HRP-MLB')
     // Onboarding is done by us, so the property must arrive usable.
-    expect(call('/v1/board', { headers: h(operator, created.id) }).data.columns).toHaveLength(5)
+    expect(call('/v1/board', { headers: h(operator, created.id) }).data.columns).toHaveLength(6)
     expect(call('/v1/slas', { headers: h(operator, created.id) }).data.some((s: any) => s.isDefault)).toBe(true)
     expect(errCode(() => call('/v1/operator/tenants', { method: 'POST', body: { name: 'Dup', code: 'HRP-MLB' }, headers: h(operator) })))
       .toBe('DUPLICATE_CODE')

@@ -33,17 +33,13 @@ function submit() {
         <DialogDescription>Link a file that is already hosted somewhere.</DialogDescription>
       </DialogHeader>
 
-      <!--
-        Deliberately not a file picker. The API accepts a URL to an
-        already-hosted file and nothing else — there is no multipart, presigned
-        or base64 path yet, pending a storage decision. Offering a browse button
-        that then failed would be worse than saying so plainly, so this says so.
-      -->
+      <!-- The by-URL path lives on alongside uploads: a file that already has
+           a home (a partner's photo, a shared drive) needs a link, not a copy. -->
       <Alert>
         <InfoIcon />
-        <AlertTitle>Photo upload isn't available yet</AlertTitle>
+        <AlertTitle>For files that are already online</AlertTitle>
         <AlertDescription>
-          Taking a photo straight from your phone needs file storage that isn't built yet. For now, paste a link to a file that's already online.
+          Photos from your phone go through the upload button instead — this is for linking a file that already has a URL.
         </AlertDescription>
       </Alert>
 

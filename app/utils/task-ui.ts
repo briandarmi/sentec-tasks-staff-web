@@ -1,4 +1,4 @@
-import type { SlaStatus, TaskStatus } from '~/utils/clientFakeApi'
+import type { SlaStatus, TaskPriority, TaskStatus } from '~/utils/clientFakeApi'
 
 // Shared presentation metadata for tasks. Every colour is a semantic design
 // token from tailwind.css — no hardcoded hex — so light and dark both resolve
@@ -15,6 +15,7 @@ export interface StatusMeta {
 export const TASK_STATUS_META: Record<TaskStatus, StatusMeta> = {
   NEW: { label: 'New', dot: 'bg-muted-foreground/40', badge: 'bg-muted text-muted-foreground' },
   IN_PROGRESS: { label: 'In Progress', dot: 'bg-primary', badge: 'bg-primary/10 text-primary' },
+  SUBMITTED: { label: 'Submitted', dot: 'bg-primary/70', badge: 'bg-primary/15 text-primary' },
   PENDING: { label: 'On Hold', dot: 'bg-primary/50', badge: 'bg-secondary text-secondary-foreground' },
   FINISHED: { label: 'Finished', dot: 'bg-success/70', badge: 'bg-success/10 text-success' },
   VERIFIED: { label: 'Verified', dot: 'bg-success', badge: 'bg-success/15 text-success' },
@@ -25,11 +26,41 @@ export function statusMeta(status: TaskStatus): StatusMeta {
   return TASK_STATUS_META[status] ?? TASK_STATUS_META.NEW
 }
 
-/** Statuses that still need someone's attention. */
-export const OPEN_STATUSES: TaskStatus[] = ['NEW', 'IN_PROGRESS', 'PENDING']
+export interface PriorityMeta {
+  label: string
+  /** Soft badge surface + matching text colour. */
+  badge: string
+}
+
+/** Ordered least → most urgent, which is also the order pickers offer them in. */
+export const TASK_PRIORITIES: TaskPriority[] = ['LOW', 'NORMAL', 'HIGH', 'URGENT']
+
+export const TASK_PRIORITY_META: Record<TaskPriority, PriorityMeta> = {
+  LOW: { label: 'Low', badge: 'bg-muted text-muted-foreground' },
+  NORMAL: { label: 'Normal', badge: 'bg-secondary text-secondary-foreground' },
+  HIGH: { label: 'High', badge: 'bg-primary/10 text-primary' },
+  URGENT: { label: 'Urgent', badge: 'bg-destructive/10 text-destructive' },
+}
+
+export function priorityMeta(priority: TaskPriority): PriorityMeta {
+  return TASK_PRIORITY_META[priority] ?? TASK_PRIORITY_META.NORMAL
+}
+
+/**
+ * Statuses that still need someone's attention. SUBMITTED is open — the
+ * attention has just moved from the assignee to the reviewer.
+ */
+export const OPEN_STATUSES: TaskStatus[] = ['NEW', 'IN_PROGRESS', 'SUBMITTED', 'PENDING']
 
 export function isOpen(status: TaskStatus) {
   return OPEN_STATUSES.includes(status)
+}
+
+/** Statuses a task can be claimed in: real work, not yet under review. */
+export const CLAIMABLE_STATUSES: TaskStatus[] = ['NEW', 'IN_PROGRESS']
+
+export function isClaimable(status: TaskStatus) {
+  return CLAIMABLE_STATUSES.includes(status)
 }
 
 /**

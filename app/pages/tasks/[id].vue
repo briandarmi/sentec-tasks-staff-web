@@ -3,11 +3,11 @@ import { computed, onMounted, ref } from 'vue'
 import {
   ArrowLeftIcon,
   ArrowRightLeftIcon,
-  ExternalLinkIcon,
   HandIcon,
   InfoIcon,
+  ListChecksIcon,
   MapPinIcon,
-  PaperclipIcon,
+  RotateCcwIcon,
   SendIcon,
   UserRoundIcon,
   UserRoundPlusIcon,
@@ -16,7 +16,7 @@ import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
 import type { BoardColumn, TaskDetail } from '~/utils/clientFakeApi'
-import { fullName, initials, isOpen, relativeTime, taskRef } from '~/utils/task-ui'
+import { fullName, initials, isClaimable, priorityMeta, relativeTime, taskRef } from '~/utils/task-ui'
 
 definePageMeta({ title: 'Task' })
 
@@ -33,26 +33,66 @@ const isLoading = ref(false)
 const errorMessage = ref('')
 /** Set when the task itself cannot be shown at all (403 / 404), not a failed action. */
 const loadFailed = ref(false)
+/**
+ * A child's post-success refetch failing is NOT a page failure — the action
+ * already landed and the task is fully rendered, so this shows as a small
+ * notice instead of replacing the view.
+ */
+const refreshError = ref('')
 const acting = ref(false)
 const moveOpen = ref(false)
 const assignOpen = ref(false)
-const attachOpen = ref(false)
 const comment = ref('')
 
-const assignee = computed(() => task.value?.assignment?.user ?? null)
-const isMine = computed(() => Boolean(task.value?.assignment && task.value.assignment.userId === session.userId.value))
-const heldBySomeoneElse = computed(() => Boolean(task.value?.assignment) && !isMine.value)
+const assignment = computed(() => task.value?.assignment ?? null)
+const assignee = computed(() => assignment.value?.user ?? null)
+const isMine = computed(() => assignment.value?.kind === 'STAFF' && assignment.value.userId === session.userId.value)
+const isHelper = computed(() => Boolean(task.value?.collaborators.some(c => c.userId === session.userId.value)))
+const heldBySomeoneElse = computed(() => assignment.value?.kind === 'STAFF' && !isMine.value)
+/** The pool this task sits in, when it does — what the Claim button names. */
+const poolName = computed(() => {
+  const a = assignment.value
+  if (!a || a.kind === 'STAFF') return null
+  return a.kind === 'TEAM' ? a.team?.name ?? 'a team' : a.department?.name ?? 'a department'
+})
 
 /**
- * Claim is offered only when the task is genuinely unheld.
- *
- * This is finding 1 on the UI side: the button used to appear even when someone
- * else held the task, and the old backend honoured it — so a leader tapping
- * Claim quietly took the task off whoever was working it. Handing over is now
- * an explicit Assign, and the button below says so.
+ * Claim is offered when nobody personally holds the task: unassigned, or
+ * sitting in a pool (whose membership the server checks — a non-member gets
+ * the real 403 naming the pool). A person's assignment is never stolen via
+ * Claim; hand-over is an explicit Assign.
  */
-const canClaim = computed(() => Boolean(task.value && caps.canWork.value && !task.value.assignment && isOpen(task.value.status)))
-const canMove = computed(() => Boolean(task.value && columns.value.length && (caps.isLeader.value || isMine.value)))
+const canClaim = computed(() => Boolean(
+  task.value
+  && caps.canWork.value
+  && isClaimable(task.value.status)
+  && assignment.value?.kind !== 'STAFF',
+))
+const claimLabel = computed(() => (poolName.value ? `Claim from ${poolName.value}` : 'Claim'))
+
+/** Return goes back to the pool with a reason: holder only, open work only. */
+const canReturn = computed(() => Boolean(
+  task.value && isMine.value && (task.value.status === 'NEW' || task.value.status === 'IN_PROGRESS'),
+))
+const returnOpen = ref(false)
+const returnReason = ref('')
+const isReturning = ref(false)
+const returnError = ref('')
+
+/**
+ * The move sheet mirrors the server's guards: NEW is unreachable (that is what
+ * return-to-pool is for), and VERIFIED is leader sign-off.
+ */
+const moveColumns = computed(() => columns.value.filter(column =>
+  column.status !== 'NEW' && (column.status !== 'VERIFIED' || caps.isLeader.value),
+))
+const canMove = computed(() => Boolean(task.value && moveColumns.value.length && (caps.isLeader.value || isMine.value)))
+
+/** Helper changes close with the task — but SUBMITTED still takes them. */
+const HELPER_CLOSED = new Set(['FINISHED', 'VERIFIED', 'CANCELLED'])
+const canManageHelpers = computed(() => Boolean(
+  task.value && !HELPER_CLOSED.has(task.value.status) && (isMine.value || caps.isLeader.value),
+))
 
 async function load() {
   isLoading.value = true
@@ -112,11 +152,23 @@ function assign(payload: { userId: string, remark: string | null }) {
   })
 }
 
-function attach(payload: { url: string }) {
-  return act(async () => {
-    await api.attachUrl({ taskId: id.value, url: payload.url })
-    attachOpen.value = false
-  })
+async function returnToPool() {
+  const reason = returnReason.value.trim()
+  if (!reason || isReturning.value) return
+  isReturning.value = true
+  returnError.value = ''
+  try {
+    task.value = await api.returnTask(id.value, reason)
+    // Only success closes the dialog — a failure must not eat the typed reason.
+    returnOpen.value = false
+    returnReason.value = ''
+  }
+  catch (e) {
+    returnError.value = (e as Error).message
+  }
+  finally {
+    isReturning.value = false
+  }
 }
 
 function sendComment() {
@@ -128,6 +180,29 @@ function sendComment() {
   })
 }
 
+/** A child already succeeded; only the refresh can fail here. */
+async function refresh() {
+  refreshError.value = ''
+  try {
+    task.value = await api.getTask(id.value)
+  }
+  catch (e) {
+    refreshError.value = (e as Error).message
+  }
+}
+
+function applyDetail(detail: TaskDetail) {
+  task.value = detail
+  refreshError.value = ''
+}
+
+/** Absolute due times: staff plan the corridor route around the clock time, not a countdown. */
+function formatAbsolute(iso: string | null | undefined) {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
 onMounted(load)
 </script>
 
@@ -135,7 +210,7 @@ onMounted(load)
   <div class="space-y-4">
     <button
       type="button"
-      class="flex min-h-11 items-center gap-1 text-sm font-medium text-muted-foreground active:text-foreground"
+      class="flex min-h-11 items-center gap-1 rounded text-sm font-medium text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       @click="router.back()"
     >
       <ArrowLeftIcon class="h-4 w-4" /> Back
@@ -156,13 +231,34 @@ onMounted(load)
       <Card>
         <CardHeader class="gap-2">
           <div class="flex items-center justify-between gap-2">
-            <StatusPill :status="task.status" />
+            <div class="flex items-center gap-1.5">
+              <StatusPill :status="task.status" />
+              <span
+                v-if="task.priority !== 'NORMAL'"
+                class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                :class="priorityMeta(task.priority).badge"
+              >
+                {{ priorityMeta(task.priority).label }}
+              </span>
+            </div>
             <SlaBadge :task="task" :status="task.status" show-countdown />
           </div>
           <CardTitle class="text-lg leading-snug">{{ task.title }}</CardTitle>
-          <p class="text-xs font-medium text-muted-foreground">
-            {{ taskRef(task.id) }} · opened {{ relativeTime(task.createDate) }}
-            <template v-if="task.partner"> · via {{ task.partner.name }}</template>
+          <!-- The request itself is what the person walking there needs first —
+               it lives with the title, not buried under the metadata rows. -->
+          <p v-if="task.description" class="text-sm leading-relaxed text-foreground/85">{{ task.description }}</p>
+          <p class="flex flex-wrap items-center gap-x-1 text-xs font-medium text-muted-foreground">
+            <span>{{ taskRef(task.id) }} · opened {{ relativeTime(task.createDate) }}</span>
+            <span v-if="task.partner" class="inline-flex items-center gap-1">
+              · via
+              <span
+                v-if="task.partner.badgeColor"
+                class="h-1.5 w-1.5 rounded-full"
+                :style="{ backgroundColor: task.partner.badgeColor }"
+                aria-hidden="true"
+              />
+              {{ task.partner.name }}
+            </span>
           </p>
         </CardHeader>
         <CardContent class="flex flex-wrap gap-1.5">
@@ -176,11 +272,22 @@ onMounted(load)
         </CardContent>
       </Card>
 
-      <!-- Actions. Claim only shows when nothing holds the task; when something
-           does, the hand-over path is named explicitly instead. -->
+      <!-- A child's action landed but the follow-up refresh failed: keep the
+           page, say so quietly, offer a refresh. -->
+      <Alert v-if="refreshError">
+        <InfoIcon />
+        <AlertTitle>That worked, but the view may be stale</AlertTitle>
+        <AlertDescription class="space-y-2">
+          <p>{{ refreshError }}</p>
+          <Button size="sm" variant="outline" @click="refresh">Refresh</Button>
+        </AlertDescription>
+      </Alert>
+
+      <!-- Actions. Claim shows when no PERSON holds the task; a pool claim
+           names the pool it is taking from. -->
       <div class="flex flex-wrap gap-2">
         <Button v-if="canClaim" class="min-h-11 flex-1" :disabled="acting" @click="claim">
-          <HandIcon class="h-4 w-4" /> Claim
+          <HandIcon class="h-4 w-4" /> {{ claimLabel }}
         </Button>
         <Button
           v-if="caps.canAssign.value"
@@ -190,7 +297,7 @@ onMounted(load)
           @click="assignOpen = true"
         >
           <UserRoundPlusIcon class="h-4 w-4" />
-          {{ task.assignment ? 'Reassign' : 'Assign' }}
+          {{ assignment?.kind === 'STAFF' ? 'Reassign' : 'Assign' }}
         </Button>
         <Button
           v-if="canMove"
@@ -201,6 +308,16 @@ onMounted(load)
         >
           <ArrowRightLeftIcon class="h-4 w-4" /> Move
         </Button>
+        <Button
+          v-if="canReturn"
+          variant="outline"
+          class="min-h-11 flex-1"
+          :disabled="acting"
+          :aria-expanded="returnOpen"
+          @click="returnOpen = true"
+        >
+          <RotateCcwIcon class="h-4 w-4" /> Return to pool
+        </Button>
       </div>
 
       <!--
@@ -208,13 +325,17 @@ onMounted(load)
         already handling need to know the route exists (ask a leader) rather
         than assume the screen is broken.
       -->
-      <Alert v-if="heldBySomeoneElse && !caps.canAssign.value">
+      <Alert v-if="heldBySomeoneElse && !caps.canAssign.value && !isHelper">
         <InfoIcon />
         <AlertTitle>{{ fullName(assignee) }} is handling this</AlertTitle>
         <AlertDescription>
           Only a team leader can hand it over. Ask yours if it needs to move to you.
         </AlertDescription>
       </Alert>
+
+      <!-- The leader's review lives right under the actions when it applies. -->
+      <ReviewPanel :task="task" @updated="applyDetail" />
+      <SubmitPanel :task="task" :can-submit="isMine || isHelper" @updated="applyDetail" />
 
       <Card>
         <CardContent class="space-y-3 pt-6 text-sm">
@@ -229,11 +350,12 @@ onMounted(load)
                 <span class="truncate">{{ fullName(assignee) }}</span>
                 <span v-if="isMine" class="text-xs text-muted-foreground">(you)</span>
               </template>
+              <span v-else-if="poolName" class="truncate text-muted-foreground">{{ poolName }} pool</span>
               <span v-else class="text-muted-foreground">Unclaimed</span>
             </span>
           </div>
-          <div v-if="task.assignment?.remark" class="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-            “{{ task.assignment.remark }}”
+          <div v-if="assignment?.remark" class="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+            “{{ assignment.remark }}”
           </div>
           <div v-if="task.requestedFor" class="flex items-center gap-2">
             <span class="h-4 w-4" />
@@ -245,41 +367,52 @@ onMounted(load)
             <span class="text-muted-foreground">SLA</span>
             <span class="ml-auto font-medium">{{ task.sla.name }}</span>
           </div>
+          <!-- The countdown badge says how long; these say WHEN — what someone
+               planning the next hour actually reasons in. -->
+          <div v-if="task.responseDueAt" class="flex items-center gap-2">
+            <span class="h-4 w-4" />
+            <span class="text-muted-foreground">Respond by</span>
+            <span
+              class="ml-auto font-medium tabular-nums"
+              :class="task.responseSlaStatus === 'BREACHED' ? 'text-destructive' : ''"
+            >{{ formatAbsolute(task.responseDueAt) }}</span>
+          </div>
+          <div v-if="task.resolutionDueAt" class="flex items-center gap-2">
+            <span class="h-4 w-4" />
+            <span class="text-muted-foreground">Resolve by</span>
+            <span
+              class="ml-auto font-medium tabular-nums"
+              :class="task.resolutionSlaStatus === 'BREACHED' ? 'text-destructive' : ''"
+            >{{ formatAbsolute(task.resolutionDueAt) }}</span>
+          </div>
           <div v-if="task.externalRef" class="flex items-center gap-2">
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">Partner reference</span>
             <span class="ml-auto truncate font-mono text-xs">{{ task.externalRef }}</span>
           </div>
-          <p v-if="task.description" class="rounded-lg bg-muted/60 px-3 py-2 text-foreground">{{ task.description }}</p>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader class="flex-row items-center justify-between gap-2 pb-2">
+      <!-- Checklist steps are labels, not tick-boxes: proof of completion is
+           the photo/note gate at submission, not self-ticked boxes. -->
+      <Card v-if="task.checklist.length">
+        <CardHeader class="pb-2">
           <CardTitle class="flex items-center gap-2 text-sm">
-            <PaperclipIcon class="h-4 w-4" /> Attachments
+            <ListChecksIcon class="h-4 w-4" /> Checklist
           </CardTitle>
-          <Button variant="outline" size="sm" :disabled="acting" @click="attachOpen = true">Attach</Button>
         </CardHeader>
-        <CardContent class="space-y-2">
-          <a
-            v-for="attachment in task.attachments"
-            :key="attachment.id"
-            :href="attachment.url"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="flex min-h-11 items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm active:bg-accent"
-          >
-            <PaperclipIcon class="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span class="min-w-0 flex-1 truncate">{{ attachment.filename }}</span>
-            <Badge variant="secondary" class="shrink-0 text-[10px]">{{ attachment.filetype }}</Badge>
-            <ExternalLinkIcon class="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-          </a>
-          <p v-if="task.attachments.length === 0" class="py-2 text-xs text-muted-foreground">
-            No attachments. Files are linked by URL — direct photo upload isn't built yet.
-          </p>
+        <CardContent>
+          <ol class="list-decimal space-y-1 pl-5 text-sm text-foreground">
+            <li v-for="(step, index) in task.checklist" :key="index">{{ step }}</li>
+          </ol>
         </CardContent>
       </Card>
+
+      <DelegateCard :task="task" @updated="refresh" />
+
+      <HelpersCard :task="task" :can-manage="canManageHelpers" @updated="refresh" />
+
+      <AttachmentsCard :task="task" @updated="refresh" />
 
       <Card>
         <CardHeader class="pb-2"><CardTitle class="text-sm">Activity</CardTitle></CardHeader>
@@ -308,7 +441,7 @@ onMounted(load)
 
       <StatusMoveSheet
         v-model:open="moveOpen"
-        :columns="columns"
+        :columns="moveColumns"
         :current-column-id="task.columnId"
         :busy="acting"
         @move="move"
@@ -318,12 +451,38 @@ onMounted(load)
         v-model:open="assignOpen"
         :department-id="task.departmentId"
         :department-name="task.department?.name ?? null"
-        :current-assignee-id="task.assignment?.userId ?? null"
+        :current-assignee-id="assignment?.userId ?? null"
         :busy="acting"
         @assign="assign"
       />
 
-      <AttachUrlDialog v-model:open="attachOpen" :busy="acting" @attach="attach" />
+      <Dialog v-model:open="returnOpen">
+        <DialogContent class="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Return to pool</DialogTitle>
+            <DialogDescription>
+              The task goes back to your team or department to pick up. The reason travels with it.
+            </DialogDescription>
+          </DialogHeader>
+
+          <Alert v-if="returnError" variant="destructive">
+            <AlertTitle>Could not return the task</AlertTitle>
+            <AlertDescription>{{ returnError }}</AlertDescription>
+          </Alert>
+
+          <div class="space-y-2">
+            <Label for="return-reason">Why are you returning this task?</Label>
+            <Textarea id="return-reason" v-model="returnReason" rows="3" maxlength="500" class="resize-none" />
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" :disabled="isReturning" @click="returnOpen = false">Cancel</Button>
+            <Button :disabled="!returnReason.trim() || isReturning" :aria-busy="isReturning" @click="returnToPool">
+              {{ isReturning ? 'Returning…' : 'Return task' }}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </template>
   </div>
 </template>

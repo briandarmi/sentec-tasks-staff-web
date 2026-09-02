@@ -1,0 +1,133 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+import { UserRoundMinusIcon, UsersRoundIcon } from '@lucide/vue'
+import { useTasksApi } from '~/composables/useTasksApi'
+import { useSession } from '~/composables/useSession'
+import type { TaskDetail } from '~/utils/clientFakeApi'
+import { fullName } from '~/utils/task-ui'
+
+const props = defineProps<{
+  task: TaskDetail
+  /**
+   * Whether the viewer may add/remove helpers: leader, admin, or the current
+   * assignee — AND the task is not closed. The parent folds the closed-status
+   * blacklist in, so a leader on a finished task never sees a form that can
+   * only 409. Leaving needs no rank and is offered separately.
+   */
+  canManage: boolean
+}>()
+
+const emit = defineEmits<{ updated: [] }>()
+
+const api = useTasksApi()
+const session = useSession()
+
+const addUserId = ref('')
+const errorMessage = ref('')
+/**
+ * One id at a time: every row's button disables the moment any removal is in
+ * flight, so two concurrent removals are impossible by construction.
+ */
+const removingUserId = ref('')
+const isAdding = ref(false)
+
+const helpers = computed(() => props.task.collaborators)
+const excluded = computed(() => [
+  ...helpers.value.map(h => h.userId),
+  ...(props.task.assignment?.userId ? [props.task.assignment.userId] : []),
+])
+
+function canLeave(userId: string) {
+  return userId === session.userId.value
+}
+
+async function add() {
+  if (!addUserId.value || isAdding.value) return
+  isAdding.value = true
+  errorMessage.value = ''
+  try {
+    await api.addHelper(props.task.id, addUserId.value)
+    addUserId.value = ''
+    emit('updated')
+  }
+  catch (e) {
+    errorMessage.value = (e as Error).message
+  }
+  finally {
+    isAdding.value = false
+  }
+}
+
+async function remove(userId: string) {
+  if (removingUserId.value) return
+  removingUserId.value = userId
+  errorMessage.value = ''
+  try {
+    await api.removeHelper(props.task.id, userId)
+    emit('updated')
+  }
+  catch (e) {
+    errorMessage.value = (e as Error).message
+  }
+  finally {
+    removingUserId.value = ''
+  }
+}
+</script>
+
+<template>
+  <Card v-if="helpers.length || canManage">
+    <CardHeader class="pb-2">
+      <CardTitle class="flex items-center gap-2 text-sm">
+        <UsersRoundIcon class="h-4 w-4" /> Helpers
+      </CardTitle>
+      <CardDescription class="text-xs">
+        Helpers can attach proof and submit the work — the task still belongs to its assignee.
+      </CardDescription>
+    </CardHeader>
+    <CardContent class="space-y-2">
+      <Alert v-if="errorMessage" variant="destructive">
+        <AlertTitle>That didn't work</AlertTitle>
+        <AlertDescription>{{ errorMessage }}</AlertDescription>
+      </Alert>
+
+      <p v-if="helpers.length === 0" class="py-1 text-xs text-muted-foreground">No helpers.</p>
+      <div
+        v-for="helper in helpers"
+        :key="helper.userId"
+        class="flex min-h-11 items-center justify-between gap-2 rounded-lg border bg-card px-3 py-2"
+      >
+        <span class="min-w-0 truncate text-sm font-medium">{{ fullName(helper.user) || `User ${helper.userId}` }}</span>
+        <Button
+          v-if="canManage || canLeave(helper.userId)"
+          size="sm"
+          variant="ghost"
+          class="text-muted-foreground hover:text-destructive"
+          :disabled="Boolean(removingUserId)"
+          :aria-busy="removingUserId === helper.userId"
+          :aria-label="`${canLeave(helper.userId) && !canManage ? 'Leave' : 'Remove'} ${fullName(helper.user) || helper.userId}`"
+          @click="remove(helper.userId)"
+        >
+          <UserRoundMinusIcon class="h-4 w-4" />
+          {{ removingUserId === helper.userId
+            ? (canLeave(helper.userId) && !canManage ? 'Leaving…' : 'Removing…')
+            : (canLeave(helper.userId) && !canManage ? 'Leave' : 'Remove') }}
+        </Button>
+      </div>
+
+      <div v-if="canManage" class="flex items-end gap-2 pt-1">
+        <div class="min-w-0 flex-1">
+          <StaffSelect
+            v-model="addUserId"
+            :exclude="excluded"
+            placeholder="Add a helper"
+            :aria-label="`Staff member to add as a helper on ${task.title}`"
+          />
+        </div>
+        <Button :disabled="!addUserId || isAdding" :aria-busy="isAdding" @click="add">
+          {{ isAdding ? 'Adding…' : 'Add' }}
+        </Button>
+      </div>
+    </CardContent>
+  </Card>
+</template>

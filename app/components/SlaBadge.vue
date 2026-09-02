@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { ClockIcon } from '@lucide/vue'
 import type { SlaStatus } from '~/utils/clientFakeApi'
 import { dueIn, slaState } from '~/utils/task-ui'
+import { useNow } from '~/composables/useNow'
 
 const props = defineProps<{
   task: {
@@ -19,16 +20,20 @@ const props = defineProps<{
 
 const state = computed(() => slaState(props.task))
 
+/** Shared ticking clock, so every badge counts down live and in step. */
+const now = useNow()
+
 /**
  * Which clock is actually running: until the task is picked up it is the
  * response target, after that the resolution target. Showing the wrong one is
- * worse than showing none, so a finished task shows no countdown at all.
+ * worse than showing none, so a finished or submitted task shows no countdown
+ * at all — submitted work's clock stopped at submission.
  */
 const countdown = computed(() => {
   if (!props.showCountdown) return null
   if (props.status && !['NEW', 'IN_PROGRESS', 'PENDING'].includes(props.status)) return null
   const due = props.status === 'NEW' ? props.task.responseDueAt : props.task.resolutionDueAt
-  return dueIn(due ?? null)
+  return dueIn(due ?? null, now.value)
 })
 
 const meta = computed(() => {

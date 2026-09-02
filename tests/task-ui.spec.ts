@@ -23,6 +23,7 @@ describe('statusMeta', () => {
   it('labels every status a column can set', () => {
     expect(statusMeta('NEW').label).toBe('New')
     expect(statusMeta('IN_PROGRESS').label).toBe('In Progress')
+    expect(statusMeta('SUBMITTED').label).toBe('Submitted')
     expect(statusMeta('PENDING').label).toBe('On Hold')
     expect(statusMeta('FINISHED').label).toBe('Finished')
     expect(statusMeta('VERIFIED').label).toBe('Verified')
@@ -30,7 +31,7 @@ describe('statusMeta', () => {
   })
 
   it('uses design tokens rather than literal colours, so dark mode follows', () => {
-    const classes = (['NEW', 'IN_PROGRESS', 'PENDING', 'FINISHED', 'VERIFIED', 'CANCELLED'] as const)
+    const classes = (['NEW', 'IN_PROGRESS', 'SUBMITTED', 'PENDING', 'FINISHED', 'VERIFIED', 'CANCELLED'] as const)
       .flatMap(status => [statusMeta(status).dot, statusMeta(status).badge])
       .join(' ')
     expect(classes).not.toMatch(/#[0-9a-f]{3,6}/i)
@@ -45,9 +46,11 @@ describe('statusMeta', () => {
 
 describe('open vs closed', () => {
   it('treats work still needing attention as open', () => {
-    expect(OPEN_STATUSES).toEqual(['NEW', 'IN_PROGRESS', 'PENDING'])
+    expect(OPEN_STATUSES).toEqual(['NEW', 'IN_PROGRESS', 'SUBMITTED', 'PENDING'])
     expect(isOpen('NEW')).toBe(true)
     expect(isOpen('PENDING')).toBe(true)
+    // Submitted work is open: the attention has moved to the reviewer, not away.
+    expect(isOpen('SUBMITTED')).toBe(true)
     expect(isOpen('FINISHED')).toBe(false)
     expect(isOpen('CANCELLED')).toBe(false)
   })

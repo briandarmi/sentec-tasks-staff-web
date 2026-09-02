@@ -98,7 +98,7 @@ async function submit() {
             <AlertDescription>{{ errorMessage }}</AlertDescription>
           </Alert>
 
-          <Button class="w-full" type="submit" :disabled="isSubmitting">
+          <Button class="min-h-11 w-full" type="submit" :disabled="isSubmitting">
             {{ isSubmitting ? 'Signing in…' : 'Sign In' }}
           </Button>
         </form>

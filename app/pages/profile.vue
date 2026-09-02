@@ -48,7 +48,7 @@ async function logout() {
           v-for="property in properties"
           :key="property.id"
           type="button"
-          class="flex min-h-11 w-full items-center gap-3 rounded-lg border px-3 py-3 text-left text-sm active:bg-accent"
+          class="flex min-h-11 w-full items-center gap-3 rounded-lg border px-3 py-3 text-left text-sm active:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           :class="property.id === session.tenantId.value ? 'border-primary/40 bg-primary/5' : 'bg-card'"
           @click="session.setTenantId(property.id)"
         >

@@ -44,13 +44,23 @@ pnpm typecheck    # vue-tsc across app + templates, including the shared layer
 pnpm build        # static SPA into .output/public
 ```
 
-`pnpm test` covers the mock API contract and the presentation helpers — 70 tests
-over this repo's own copy of both, so a standalone clone verifies itself.
+`pnpm test` covers the mock API contract, the admin configuration surface it
+carries, the staff flows (pool claim and return, delegation offers, helpers,
+submit-for-review, presigned uploads, the create/preview pipeline — ported from
+the [`sentec-tasks-web`](https://github.com/SentinelTech-com/sentec-tasks-web)
+repo, each rule pinned in [`tests/staff-flows.spec.ts`](tests/staff-flows.spec.ts)),
+the platform-overview compliance rules (the frozen-SUBMITTED lifecycle guards,
+schedule-aware SLA deadlines, specificity-tiered routing, the source-app
+registry — pinned in
+[`tests/overview-compliance.spec.ts`](tests/overview-compliance.spec.ts)),
+and the presentation helpers — 152 tests over this repo's own copy of all of it,
+so a standalone clone verifies itself. `pnpm check:shared` verifies the
+hand-duplicated files below are byte-identical with the admin console when it
+is checked out beside this repo, and skips in a standalone clone.
 
 ## Kept in step by hand
 
-Eight files are **duplicated** between this app and the admin console, and
-nothing enforces that they stay identical:
+Eight files are **duplicated** between this app and the admin console:
 
 | File                             | Why both apps need it              |
 | -------------------------------- | ---------------------------------- |
@@ -63,14 +73,16 @@ nothing enforces that they stay identical:
 | `app/utils/task-ui.ts`           | Same status and SLA presentation   |
 | `app/utils/select-empty.ts`      | Reka UI's reserved-empty-value fix |
 
-Plus `tests/mock-api.spec.ts` and `tests/task-ui.spec.ts`, which are duplicated
-for a reason: each repo tests the copy it ships, so neither can drift silently
-into a green suite somewhere else.
+Plus `tests/mock-api.spec.ts`, `tests/admin-config.spec.ts`,
+`tests/staff-flows.spec.ts`, `tests/overview-compliance.spec.ts` and
+`tests/task-ui.spec.ts`, which are duplicated for a reason: each repo tests the
+copy it ships, so neither can drift silently into a green suite somewhere else.
 
 This is the deliberate trade for two repositories that build independently —
 the same one the Butler consoles make with their own `clientFakeApi.ts`. A change
-to any file above belongs in both apps in the same review. `diff -r` between the
-two `app/composables` and `app/utils` directories is the cheap check.
+to any file above belongs in both apps in the same review, and
+`pnpm check:shared` fails when the copies differ (it skips when the sibling
+repo is not checked out, so a standalone clone still builds).
 
 ## Screens
 
@@ -78,9 +90,10 @@ two `app/composables` and `app/utils` directories is the cheap check.
 | ------------- | --------------------------------------------------------------- |
 | `/`           | My work — assigned to me, plus my department's unclaimed queue   |
 | `/tasks`      | Full list, filterable; filters live in the URL, paging is cursor |
-| `/tasks/[id]` | Detail: claim, assign, move status, comment, attach              |
-| `/tasks/new`  | Raise a task from the catalog                                    |
+| `/tasks/[id]` | Detail: claim (pool-aware), assign, return to pool, delegate, helpers, submit for review / review, move status, comment, attach & upload |
+| `/tasks/new`  | Raise a task: catalog, location, priority, checklist, assignee — with a live routing preview |
 | `/board`      | Board view of the property's columns                            |
+| `/offers`     | Delegation offers waiting on my accept or decline               |
 | `/profile`    | Identity, property switch, theme, sign out                      |
 | `/login`      | The only public route                                            |
 
@@ -196,8 +209,8 @@ Stated plainly rather than implied:
   either. Touch-target sizes and screen-reader behaviour were reviewed in CSS,
   not measured in a browser. `pnpm build` and `pnpm typecheck` pass, which
   covers templates and types but not runtime rendering.
-- **Attachment upload does not exist.** The API takes a URL to an
-  already-hosted file — no multipart, no presigned, no base64 — so the UI asks
-  for a URL and says why instead of offering a file picker that would fail.
-  Housekeeping cannot photograph damage from a phone yet. Blocked on a storage
-  decision (local disk vs S3 vs presigned).
+- **Uploads are contract-only in the mock.** The presigned-upload flow
+  (validation, storage keys, the attach-by-key path, the 30-attachment cap) is
+  the real API contract and is tested, but the mock has no object store — the
+  "uploaded" file's bytes go nowhere, and its URL is a placeholder. The by-URL
+  attach path remains for files that already have a home.

@@ -4,7 +4,7 @@ import { HandIcon, RefreshCwIcon, SquareKanbanIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useCaps } from '~/composables/useCaps'
 import type { BoardWithColumns, TaskListItem } from '~/utils/clientFakeApi'
-import { statusMeta } from '~/utils/task-ui'
+import { isClaimable, statusMeta } from '~/utils/task-ui'
 
 definePageMeta({ title: 'Board' })
 
@@ -30,6 +30,21 @@ const countByColumn = computed(() => {
 })
 
 const activeTasks = computed(() => tasks.value.filter(task => task.columnId === activeColumnId.value))
+
+/**
+ * Claimable straight off the card: nothing personal holds it — unassigned, or
+ * sitting in a pool (whose membership the server checks on the tap).
+ */
+function canClaimCard(task: TaskListItem) {
+  return caps.canWork.value && isClaimable(task.status) && task.assignment?.kind !== 'STAFF'
+}
+
+function claimLabel(task: TaskListItem) {
+  const a = task.assignment
+  if (a?.kind === 'TEAM') return `Claim from ${a.team?.name ?? 'the team'}`
+  if (a?.kind === 'DEPARTMENT') return `Claim from ${a.department?.name ?? 'the department'}`
+  return 'Claim this'
+}
 
 async function load() {
   isLoading.value = true
@@ -119,7 +134,7 @@ onMounted(load)
           v-for="column in columns"
           :key="column.id"
           type="button"
-          class="flex min-h-9 shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors"
+          class="flex min-h-9 shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           :class="column.id === activeColumnId ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
           @click="activeColumnId = column.id"
         >
@@ -133,15 +148,16 @@ onMounted(load)
         <div v-for="task in activeTasks" :key="task.id" class="space-y-2">
           <TaskCard :task="task" />
           <Button
-            v-if="!task.assignment && caps.canWork.value"
+            v-if="canClaimCard(task)"
             variant="outline"
             size="sm"
             class="min-h-11 w-full"
             :disabled="claimingId === task.id"
+            :aria-busy="claimingId === task.id"
             @click="claim(task)"
           >
             <HandIcon class="h-4 w-4" />
-            {{ claimingId === task.id ? 'Claiming…' : 'Claim this' }}
+            {{ claimingId === task.id ? 'Claiming…' : claimLabel(task) }}
           </Button>
         </div>
       </div>

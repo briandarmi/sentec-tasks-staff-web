@@ -50,7 +50,7 @@ function clearFilters() {
 function currentQuery() {
   return {
     status: status.value,
-    scope: scope.value as '' | 'mine' | 'unclaimed' | 'breached',
+    scope: scope.value as '' | 'mine' | 'unclaimed' | 'breached' | 'helping',
     departmentId: departmentId.value,
     q: search.value.trim(),
     limit: PAGE_SIZE,
@@ -117,7 +117,16 @@ const STATUS_TABS = [
   { value: '', label: 'All' },
   { value: 'NEW', label: 'New' },
   { value: 'IN_PROGRESS', label: 'Active' },
+  // Leaders read this as their review queue; staff as "waiting on review".
+  { value: 'SUBMITTED', label: 'In review' },
   { value: 'FINISHED,VERIFIED', label: 'Closed' },
+]
+
+const SCOPE_TABS = [
+  { value: 'unclaimed', label: 'To claim' },
+  { value: 'mine', label: 'Mine' },
+  { value: 'helping', label: 'Helping' },
+  { value: 'breached', label: 'Breached' },
 ]
 </script>
 
@@ -146,7 +155,7 @@ const STATUS_TABS = [
         v-for="tab in STATUS_TABS"
         :key="tab.value"
         type="button"
-        class="min-h-9 shrink-0 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors"
+        class="min-h-9 shrink-0 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="status === tab.value ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
         @click="setFilter('status', tab.value)"
       >
@@ -154,10 +163,10 @@ const STATUS_TABS = [
       </button>
       <span class="w-px shrink-0 self-stretch bg-border" aria-hidden="true" />
       <button
-        v-for="s in [{ value: 'unclaimed', label: 'To claim' }, { value: 'mine', label: 'Mine' }, { value: 'breached', label: 'Breached' }]"
+        v-for="s in SCOPE_TABS"
         :key="s.value"
         type="button"
-        class="min-h-9 shrink-0 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors"
+        class="min-h-9 shrink-0 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="scope === s.value ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
         @click="setFilter('scope', scope === s.value ? '' : s.value)"
       >

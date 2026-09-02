@@ -13,7 +13,12 @@ const switcherOpen = ref(false)
 </script>
 
 <template>
-  <header class="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b bg-background/90 px-4 backdrop-blur">
+  <!-- min-h + safe-area padding, not a fixed height: on a notched phone the
+       system status bar must not sit on top of the title. -->
+  <header
+    class="sticky top-0 z-30 flex min-h-14 shrink-0 items-center gap-3 border-b bg-background/90 px-4 backdrop-blur"
+    style="padding-top: env(safe-area-inset-top)"
+  >
     <AppLogo class="h-8 w-8 shrink-0 text-primary" />
 
     <div class="min-w-0 flex-1">
@@ -21,7 +26,7 @@ const switcherOpen = ref(false)
       <button
         v-if="activeProperty"
         type="button"
-        class="flex max-w-full items-center gap-1 text-[11px] font-medium text-muted-foreground"
+        class="flex max-w-full items-center gap-1 rounded text-[11px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="canSwitch ? 'active:text-foreground' : 'cursor-default'"
         :disabled="!canSwitch"
         @click="canSwitch && (switcherOpen = true)"

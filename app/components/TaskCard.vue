@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { ChevronRightIcon, MapPinIcon } from '@lucide/vue'
 import type { TaskListItem } from '~/utils/clientFakeApi'
-import { fullName, initials, relativeTime, slaAccent, taskRef } from '~/utils/task-ui'
+import { fullName, initials, priorityMeta, relativeTime, slaAccent, taskRef } from '~/utils/task-ui'
 
 const props = defineProps<{
   task: TaskListItem
@@ -12,6 +12,12 @@ const props = defineProps<{
 
 const accent = computed(() => slaAccent(props.task))
 const assignee = computed(() => props.task.assignment?.user ?? null)
+/** A pool task is assigned but owned by nobody: the chip names the pool. */
+const poolLabel = computed(() => {
+  const a = props.task.assignment
+  if (!a || a.kind === 'STAFF') return null
+  return a.kind === 'TEAM' ? a.team?.name ?? 'Team pool' : a.department?.name ?? 'Department pool'
+})
 </script>
 
 <template>
@@ -21,7 +27,17 @@ const assignee = computed(() => props.task.assignment?.user ?? null)
     :class="accent"
   >
     <div class="flex items-start justify-between gap-2">
-      <StatusPill :status="task.status" />
+      <div class="flex items-center gap-1.5">
+        <StatusPill :status="task.status" />
+        <!-- Only when it deviates: a NORMAL badge on every card is noise. -->
+        <span
+          v-if="task.priority !== 'NORMAL'"
+          class="inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold"
+          :class="priorityMeta(task.priority).badge"
+        >
+          {{ priorityMeta(task.priority).label }}
+        </span>
+      </div>
       <span class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ relativeTime(task.createDate) }}</span>
     </div>
 
@@ -36,8 +52,17 @@ const assignee = computed(() => props.task.assignment?.user ?? null)
       <Badge v-if="task.department" variant="outline" class="text-[10px]">{{ task.department.name }}</Badge>
       <Badge v-if="task.quantity && task.quantity > 1" variant="outline" class="text-[10px]">×{{ task.quantity }}</Badge>
       <!-- Where the task came from. A partner name matters operationally:
-           a Butler task has a guest waiting on the other end of it. -->
-      <Badge v-if="task.partner" variant="outline" class="text-[10px] text-muted-foreground">{{ task.partner.name }}</Badge>
+           a Butler task has a guest waiting on the other end of it. The dot is
+           the source app's registry colour — data, not a theme token. -->
+      <Badge v-if="task.partner" variant="outline" class="gap-1 text-[10px] text-muted-foreground">
+        <span
+          v-if="task.partner.badgeColor"
+          class="h-1.5 w-1.5 rounded-full"
+          :style="{ backgroundColor: task.partner.badgeColor }"
+          aria-hidden="true"
+        />
+        {{ task.partner.name }}
+      </Badge>
     </div>
 
     <div class="mt-3 flex items-center justify-between gap-2">
@@ -57,7 +82,7 @@ const assignee = computed(() => props.task.assignment?.user ?? null)
         <span
           v-else
           class="flex h-6 items-center rounded-full border border-dashed px-2 text-[10px] font-medium text-muted-foreground/70"
-        >To claim</span>
+        >{{ poolLabel ?? 'To claim' }}</span>
         <ChevronRightIcon class="h-4 w-4 shrink-0 text-muted-foreground/50" />
       </div>
     </div>

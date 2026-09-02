@@ -36,7 +36,7 @@ const createActive = computed(() => route.path === '/tasks/new')
         v-for="tab in leftTabs"
         :key="tab.to"
         :to="tab.to"
-        class="flex min-h-11 flex-1 flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-semibold transition-colors"
+        class="flex min-h-11 flex-1 flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="tab.match(route.path) ? 'text-primary' : 'text-muted-foreground active:text-foreground'"
         :aria-current="tab.match(route.path) ? 'page' : undefined"
       >
@@ -47,7 +47,7 @@ const createActive = computed(() => route.path === '/tasks/new')
       <NuxtLink
         v-if="canCreateTask"
         to="/tasks/new"
-        class="flex shrink-0 flex-col items-center justify-center px-3"
+        class="flex shrink-0 flex-col items-center justify-center rounded-full px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label="New task"
       >
         <span
@@ -62,7 +62,7 @@ const createActive = computed(() => route.path === '/tasks/new')
         v-for="tab in rightTabs"
         :key="tab.to"
         :to="tab.to"
-        class="flex min-h-11 flex-1 flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-semibold transition-colors"
+        class="flex min-h-11 flex-1 flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="tab.match(route.path) ? 'text-primary' : 'text-muted-foreground active:text-foreground'"
         :aria-current="tab.match(route.path) ? 'page' : undefined"
       >

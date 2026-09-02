@@ -47,7 +47,7 @@ function choose(column: BoardColumn) {
             :key="column.id"
             type="button"
             :disabled="busy || column.id === currentColumnId"
-            class="flex min-h-11 w-full items-center gap-3 rounded-lg border px-3 py-3 text-left text-sm transition-colors disabled:opacity-60 enabled:active:bg-accent"
+            class="flex min-h-11 w-full items-center gap-3 rounded-lg border px-3 py-3 text-left text-sm transition-colors disabled:opacity-60 enabled:active:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             :class="column.id === currentColumnId ? 'border-primary/40 bg-primary/5' : 'bg-card'"
             @click="choose(column)"
           >
