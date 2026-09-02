@@ -83,17 +83,21 @@ export function slaAccent(task: { responseSlaStatus: SlaStatus, resolutionSlaSta
   }
 }
 
-export function initials(user: { firstName: string, lastName: string }): string {
-  return `${user.firstName[0] ?? ''}${user.lastName[0] ?? ''}`.toUpperCase()
+/** Two-letter initials from a single display-name field (the API has no split). */
+export function initials(name: string | null | undefined): string {
+  const parts = (name ?? '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  return `${parts[0]![0] ?? ''}${parts.length > 1 ? parts[parts.length - 1]![0] ?? '' : ''}`.toUpperCase()
 }
 
-export function fullName(user: { firstName: string, lastName: string } | null | undefined): string {
-  return user ? `${user.firstName} ${user.lastName}`.trim() : ''
+/** Render a nullable staffName the API's way: never fabricate a name. */
+export function displayName(name: string | null | undefined, fallback = 'Team member'): string {
+  return (name ?? '').trim() || fallback
 }
 
-/** Human task reference. Shown everywhere an id would otherwise leak. */
+/** Human task reference: the UUID's first block, shown where an id would leak. */
 export function taskRef(id: string) {
-  return `TSK-${id}`
+  return `TSK-${id.slice(0, 8).toUpperCase()}`
 }
 
 /** Compact relative time, e.g. "3h ago", "in 12m". */

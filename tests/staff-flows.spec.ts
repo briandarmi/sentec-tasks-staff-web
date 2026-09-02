@@ -1,413 +1,538 @@
 import { describe, expect, it } from 'vitest'
-import { ApiError, handleFakeApiRequest as call } from '~/utils/clientFakeApi'
+import { ApiError, ERR_ALREADY_CLAIMED, ERR_CROSS_DEPARTMENT, IDS, handleFakeApiRequest as call } from '~/utils/clientFakeApi'
 
-// Behavioural contract for the staff-workspace features ported from the
-// sentec-tasks-web repo (github.com/SentinelTech-com/sentec-tasks-web):
-// server-resolved creation with a write-free preview, pool assignments with
-// claim/return, delegation offers, helpers, submit-for-review with proof
-// gates, and presigned uploads. Each rule here mirrors a fix that repo made
-// after getting it wrong once.
+// The task-lifecycle contract of sentec-tasks-api, pinned against the mock:
+// creation + preview (one resolution pipeline), claim/assign with department
+// sync, the status-route guard chain, submit/review with proof gates, return-
+// to-pool selection, delegation offers, helpers, attachments and uploads —
+// with the REAL routes' exact error strings.
 //
-// Suites in this file share one mock instance and run in order; each notes
-// what it leaves behind.
+// Suites share one mock instance and run in order; each notes what it leaves
+// behind.
 
-type Session = { sessionId: string, csrfToken: string, user: any }
+interface Session { cookie: string, csrf: string, staff: { id: string } }
 
-function login(username: string, password: string): Session {
-  return call('/v1/auth/login', { method: 'POST', body: { username, password } }).data as Session
+function login(email: string, password: string): Session {
+  const res = call('/v1/auth/staff/login', { method: 'POST', query: { delivery: 'cookie' }, body: { email, password } })
+  const data = res.body!.data as { csrfToken: string, staff: { id: string }, _sessionCookie: string }
+  return { cookie: `st_session=${data._sessionCookie}`, csrf: data.csrfToken, staff: data.staff }
 }
 
-function h(session: Session, tenantId?: string) {
-  return { 'x-session-id': session.sessionId, ...(tenantId ? { 'x-tenant-id': tenantId } : {}) }
+function h(session: Session, hotelId?: string) {
+  return { 'cookie': session.cookie, 'x-csrf-token': session.csrf, ...(hotelId ? { 'x-hotel-id': hotelId } : {}) }
 }
 
-function errCode(fn: () => unknown): string {
+const service = (hotelId?: string) => ({ authorization: 'Bearer service:test', ...(hotelId ? { 'x-hotel-id': hotelId } : {}) })
+
+function errOf(fn: () => unknown): { code: string, message: string } {
   try {
     fn()
-    return 'NO_ERROR'
+    return { code: 'NO_ERROR', message: '' }
   }
   catch (e) {
-    return e instanceof ApiError ? e.code : `UNEXPECTED:${String(e)}`
+    const err = e as ApiError
+    return { code: err.code, message: err.message }
   }
 }
 
-function errMessage(fn: () => unknown): string {
-  try {
-    fn()
-    return 'NO_ERROR'
-  }
-  catch (e) {
-    return (e as Error).message
-  }
+const H = IDS.hotel.simatupang
+const data = <T = any>(res: { body: { data: unknown } | null }): T => res!.body!.data as T
+
+const admin = () => login('admin@aston.example', 'admin123')
+const leader = () => login('leader@aston.example', 'leader123')
+const budi = () => login('staff@aston.example', 'staff123')
+const made = () => login('made@aston.example', 'made12345')
+const joko = () => login('joko@aston.example', 'joko12345')
+
+/** Column ids by status, resolved once — tests never hardcode board layout. */
+function columnFor(session: Session, status: string): string {
+  const board = data<{ columns: Array<{ id: string, status: string | null }> }>(call('/v1/kanban-board', { headers: h(session, H) }))
+  return board.columns.find(c => c.status === status)!.id
 }
 
-describe('task creation resolves server-side', () => {
+describe('creation resolves server-side (staff-create + preview share one pipeline)', () => {
+  // Leaves behind: a handful of NEW tasks at Simatupang.
+
   it('lets an explicit priority win, else the item default, else NORMAL', () => {
-    const admin = login('admin', 'admin123')
-    // Item 8 (late checkout) defaults LOW; an untouched control sends nothing.
-    const fromItem = call('/v1/tasks', { method: 'POST', body: { itemId: '8', title: 'Late checkout 0611' }, headers: h(admin, '1') }).data
-    expect(fromItem.priority).toBe('LOW')
-    const explicit = call('/v1/tasks', { method: 'POST', body: { itemId: '8', title: 'Late checkout VIP', priority: 'URGENT' }, headers: h(admin, '1') }).data
-    expect(explicit.priority).toBe('URGENT')
-    const bare = call('/v1/tasks', { method: 'POST', body: { title: 'Free-form job' }, headers: h(admin, '1') }).data
+    const a = admin()
+    const fromItem = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'AC check', itemRef: IDS.item.acFault, locationRef: IDS.location.room1204 } }))
+    expect(fromItem.priority).toBe('URGENT')
+    const explicit = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'AC check', itemRef: IDS.item.acFault, locationRef: IDS.location.room1204, priority: 'low' } }))
+    expect(explicit.priority).toBe('LOW') // case-insensitive input, stored upper
+    const bare = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Something else' } }))
     expect(bare.priority).toBe('NORMAL')
   })
 
-  it('resolves the requester from the location, and warns when nobody is there', () => {
-    const admin = login('admin', 'admin123')
-    // Room 1204 links a requester and has a current guest.
-    const resolved = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels', locationId: '1' }, headers: h(admin, '1') })
-    expect(resolved.data.requestedFor).toBe('Amelia Chen')
-    expect(resolved.data.location).toBe('Room 1204')
-    expect(resolved.meta.warnings).toEqual([])
-    // Room 1102 links a requester but is empty: a warning, never an error.
-    const empty = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels', locationId: '3' }, headers: h(admin, '1') })
-    expect(empty.data.requestedFor).toBeNull()
-    expect(empty.meta.warnings.some((w: string) => w.includes('no current guest'))).toBe(true)
-    // An explicit name wins and skips the lookup entirely.
-    const explicit = call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels', locationId: '1', requestedFor: 'Mr Big' }, headers: h(admin, '1') })
-    expect(explicit.data.requestedFor).toBe('Mr Big')
+  it('falls back to the item name when the title is blank — the only title validation', () => {
+    const a = admin()
+    const created = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: '', itemRef: IDS.item.towels, locationRef: IDS.location.room1204 } }))
+    expect(created.title).toBe('Extra towels')
+    expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: '   ' } })).message)
+      .toBe('title is required (1-255 chars)')
   })
 
-  it('prepends the item checklist to the creator\'s own steps', () => {
-    const admin = login('admin', 'admin123')
-    const created = call('/v1/tasks', {
-      method: 'POST',
-      body: { itemId: '2', title: 'Deep clean 1109', locationId: '1', checklistLabels: ['Check the balcony', '  '] },
-      headers: h(admin, '1'),
-    }).data
-    expect(created.checklist).toEqual(['Strip and remake the beds', 'Vacuum and mop the floors', 'Restock amenities', 'Check the balcony'])
+  it('requires a location for flagged items — on the staff channel only', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Clean 1204', itemRef: IDS.item.roomCleaning } })).message)
+      .toBe('this item requires a location')
+    // The dispatch path has no locationRef field and is deliberately exempt.
+    const dispatched = data(call('/v1/tasks', { method: 'POST', headers: service(H), body: { source: { product: 'sentec-butler', channel: 'guest' }, itemRef: IDS.item.roomCleaning, item: { name: 'Room cleaning' }, requester: { roomNumber: '0908' } } }))
+    expect(dispatched.status).toBe('NEW')
   })
 
-  it('refuses a location-requiring item with no location', () => {
-    const admin = login('admin', 'admin123')
-    expect(errMessage(() => call('/v1/tasks', { method: 'POST', body: { itemId: '1', title: 'Towels' }, headers: h(admin, '1') })))
-      .toBe('This item requires a location')
+  it('keeps quantity only for quantity-enabled items, defaulting to 1', () => {
+    const a = admin()
+    const counted = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204, quantity: 3 } }))
+    expect(counted.quantity).toBe(3)
+    const uncounted = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Clean', itemRef: IDS.item.roomCleaning, locationRef: IDS.location.room1204, quantity: 9 } }))
+    expect(uncounted.quantity).toBeNull()
   })
 
-  it('runs SLA clocks from a scheduled start', () => {
-    const admin = login('admin', 'admin123')
-    const start = '2026-08-26T09:00:00.000Z'
-    const created = call('/v1/tasks', { method: 'POST', body: { itemId: '4', title: 'AC service', location: '1501', activationDate: start }, headers: h(admin, '1') }).data
-    // Item 4 routes to the Urgent SLA: response 5 minutes from activation.
-    expect(created.activationDate).toBe(start)
-    expect(Date.parse(created.responseDueAt) - Date.parse(start)).toBe(5 * 60_000)
+  it('auto-fills roomNumber and the requester from a guest-linked location', () => {
+    const a = admin()
+    const created = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204 } }))
+    expect(created.roomNumber).toBe('Room 1204')
+    expect(created.guestName).toBe('Amelia Chen')
+    expect(created.locationTypeName).toBe('Guest Room')
   })
 
-  it('assigns at creation: staff only to themselves, teams as a pool', () => {
-    const staff = login('staff', 'staff123')
-    const leader = login('leader', 'leader123')
-    const mine = call('/v1/tasks', { method: 'POST', body: { title: 'Self-assigned', assignee: { kind: 'STAFF', userId: '10' } }, headers: h(staff, '1') }).data
-    expect(mine.assignment.kind).toBe('STAFF')
-    expect(mine.assignment.userId).toBe('10')
-    expect(errCode(() => call('/v1/tasks', { method: 'POST', body: { title: 'For someone else', assignee: { kind: 'STAFF', userId: '12' } }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN')
-    const pooled = call('/v1/tasks', { method: 'POST', body: { title: 'For the on-call crew', assignee: { kind: 'TEAM', teamId: '2' } }, headers: h(leader, '1') }).data
-    expect(pooled.assignment.kind).toBe('TEAM')
-    expect(pooled.assignment.userId).toBeNull()
-  })
-})
-
-describe('preview is a write-free dry run of create', () => {
-  it('resolves routing, SLA and requester without creating anything', () => {
-    const admin = login('admin', 'admin123')
-    const before = call('/v1/tasks', { headers: h(admin, '1'), query: { limit: 100 } }).meta.totalCount
-    const preview = call('/v1/tasks/preview', { method: 'POST', body: { itemId: '4', title: 'AC dead', locationId: '2' }, headers: h(admin, '1') })
-    expect(preview.data.task.slaId).toBe('2')
-    expect(preview.data.task.departmentId).toBe('2')
-    expect(preview.data.task.priority).toBe('URGENT')
-    expect(preview.data.task.requestedFor).toBe('Marcus Reid')
-    expect(preview.data.checklistLabels).toEqual([])
-    const after = call('/v1/tasks', { headers: h(admin, '1'), query: { limit: 100 } }).meta.totalCount
-    expect(after).toBe(before)
+  it('is silent about a vacant room, and an explicit requester skips the lookup', () => {
+    const a = admin()
+    const vacant = call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Clean', itemRef: IDS.item.roomCleaning, locationRef: IDS.location.room1102 } })
+    expect(data(vacant).guestName).toBeNull()
+    // found=false adds NO warning; the meta carries warnings: null.
+    expect(vacant.body!.meta).toEqual({ warnings: null })
+    const explicit = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204, requesterName: 'Walk-in' } }))
+    expect(explicit.guestName).toBe('Walk-in')
   })
 
-  it('runs the same gates as create — an input can never preview clean and fail on create', () => {
-    const staff = login('staff', 'staff123')
-    expect(errMessage(() => call('/v1/tasks/preview', { method: 'POST', body: { itemId: '1', title: 'Towels' }, headers: h(staff, '1') })))
-      .toBe('This item requires a location')
-    expect(errCode(() => call('/v1/tasks/preview', { method: 'POST', body: { title: 'X', assignee: { kind: 'STAFF', userId: '12' } }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN')
-  })
-})
-
-describe('status-route guards', () => {
-  it('never reaches NEW — that is what return-to-pool is for', () => {
-    const leader = login('leader', 'leader123')
-    // Column 1 sets NEW on this board.
-    expect(errCode(() => call('/v1/tasks/status', { method: 'PATCH', body: { taskId: '3', columnId: '1' }, headers: h(leader, '1') })))
-      .toBe('BAD_REQUEST')
+  it('previews the identical resolution without persisting anything', () => {
+    const a = admin()
+    const before = call('/v1/tasks', { headers: h(a, H), query: { limit: 1 } }).body!.meta as { total: number }
+    const body = { title: 'AC dead', itemRef: IDS.item.acFault, locationRef: IDS.location.room0908, activationDate: '2026-08-26T02:00:00.000Z' }
+    const preview = call('/v1/tasks/preview', { method: 'POST', headers: h(a, H), body })
+    const previewTask = data<{ task: any, checklistLabels: string[] }>(preview).task
+    const created = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body }))
+    expect(previewTask.responseDueAt).toBe(created.responseDueAt)
+    expect(previewTask.resolutionDueAt).toBe(created.resolutionDueAt)
+    expect(previewTask.hotelDepartmentId).toBe(created.hotelDepartmentId)
+    const after = call('/v1/tasks', { headers: h(a, H), query: { limit: 1 } }).body!.meta as { total: number }
+    expect(after.total).toBe(before.total + 1) // only the create wrote
   })
 
-  it('keeps verification to leaders and admins', () => {
-    const staff = login('staff', 'staff123')
-    // Task 3 is Budi's own, so only the VERIFIED guard stands in the way.
-    expect(errCode(() => call('/v1/tasks/status', { method: 'PATCH', body: { taskId: '3', columnId: '5' }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN')
-  })
-})
-
-describe('presigned uploads and attachments', () => {
-  it('validates uploads with the server\'s own wording', () => {
-    const staff = login('staff', 'staff123')
-    expect(errMessage(() => call('/v1/uploads', { method: 'POST', body: { filename: '', contentType: 'image/png', sizeBytes: 100 }, headers: h(staff, '1') })))
-      .toBe('filename is required')
-    expect(errMessage(() => call('/v1/uploads', { method: 'POST', body: { filename: 'a.gif', contentType: 'image/gif', sizeBytes: 100 }, headers: h(staff, '1') })))
-      .toBe('contentType must be one of image/jpeg, image/png, image/webp, image/heic, application/pdf')
-    expect(errMessage(() => call('/v1/uploads', { method: 'POST', body: { filename: 'a.png', contentType: 'image/png', sizeBytes: 0 }, headers: h(staff, '1') })))
-      .toBe('sizeBytes must be positive')
-    expect(errMessage(() => call('/v1/uploads', { method: 'POST', body: { filename: 'a.png', contentType: 'image/png', sizeBytes: 11 * 1024 * 1024 }, headers: h(staff, '1') })))
-      .toBe(`sizeBytes exceeds the ${10 * 1024 * 1024} byte limit for image/png`)
+  it('prepends the item checklist to the request\'s own labels', () => {
+    const a = admin()
+    const preview = data<{ checklistLabels: string[] }>(call('/v1/tasks/preview', { method: 'POST', headers: h(a, H), body: { title: 'Clean', itemRef: IDS.item.roomCleaning, locationRef: IDS.location.room1102, checklistLabels: ['Photograph the minibar'] } }))
+    expect(preview.checklistLabels).toEqual(['Strip and remake the beds', 'Vacuum and mop the floors', 'Restock amenities', 'Photograph the minibar'])
   })
 
-  it('attaches by storage key, scoped to the property', () => {
-    const staff = login('staff', 'staff123')
-    const presigned = call('/v1/uploads', { method: 'POST', body: { filename: 'proof.jpg', contentType: 'image/jpeg', sizeBytes: 1024 }, headers: h(staff, '1') }).data
-    expect(presigned.storageKey.startsWith('tenants/1/uploads/')).toBe(true)
-    const attached = call('/v1/tasks/attachments', { method: 'POST', body: { taskId: '4', storageKey: presigned.storageKey, filetype: 'PHOTO' }, headers: h(staff, '1') }).data
-    expect(attached.url).toContain(presigned.storageKey)
-    // A key from another property's partition is refused.
-    expect(errCode(() => call('/v1/tasks/attachments', { method: 'POST', body: { taskId: '4', storageKey: 'tenants/2/uploads/9.jpg', filetype: 'PHOTO' }, headers: h(staff, '1') })))
-      .toBe('BAD_REQUEST')
+  it('refuses a dueAt before the activation date', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'X', activationDate: '2026-09-02T10:00:00.000Z', dueAt: '2026-09-02T09:00:00.000Z' } })).message)
+      .toBe('dueAt cannot be before activationDate')
   })
 
-  it('takes exactly one of url and storageKey', () => {
-    const staff = login('staff', 'staff123')
-    expect(errMessage(() => call('/v1/tasks/attachments', { method: 'POST', body: { taskId: '4' }, headers: h(staff, '1') })))
-      .toBe('Provide either url or storageKey, not both')
-    expect(errMessage(() => call('/v1/tasks/attachments', { method: 'POST', body: { taskId: '4', url: 'https://x.io/a.jpg', storageKey: 'tenants/1/uploads/1.jpg' }, headers: h(staff, '1') })))
-      .toBe('Provide either url or storageKey, not both')
+  it('gates creation-time assignees before any write, identically in preview', () => {
+    const b = budi()
+    const m = made()
+    // Staff may self-assign only.
+    expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(b, H), body: { title: 'X', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.made } } })).message)
+      .toBe('staff may only self-assign at creation')
+    expect(errOf(() => call('/v1/tasks/preview', { method: 'POST', headers: h(b, H), body: { title: 'X', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.made } } })).message)
+      .toBe('staff may only self-assign at creation')
+    // Staff may target only a team they belong to (Budi is not in Engineering).
+    expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(b, H), body: { title: 'X', assignee: { assigneeKind: 'TEAM', assigneeTeamId: IDS.team.engineering } } })).message)
+      .toBe('staff may only assign to a team they belong to')
+    // Made has no createTask claim at all.
+    expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(m, H), body: { title: 'X' } })).message).toBe('forbidden')
+    // DEPARTMENT is rejected at creation for everyone.
+    expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(admin(), H), body: { title: 'X', assignee: { assigneeKind: 'DEPARTMENT' } } })).message)
+      .toBe('assigneeKind=DEPARTMENT is not yet supported at creation — use hotelDepartmentId routing instead')
   })
 
-  it('changes only isRemoved after creation, and restores against the cap', () => {
-    const staff = login('staff', 'staff123')
-    const attached = call('/v1/tasks/attachments', { method: 'POST', body: { taskId: '4', url: 'https://cdn.example.com/before.jpg' }, headers: h(staff, '1') }).data
-    const removed = call('/v1/tasks/attachments/update', { method: 'POST', body: { id: attached.id, isRemoved: true }, headers: h(staff, '1') }).data
-    expect(removed.isRemoved).toBe(true)
-    const restored = call('/v1/tasks/attachments/update', { method: 'POST', body: { id: attached.id, isRemoved: false }, headers: h(staff, '1') }).data
-    expect(restored.isRemoved).toBe(false)
+  it('dispatch is service-only and idempotent on idempotencyKey', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: h(a, H), body: {} })).message).toBe('forbidden')
+    const key = '12345678-0000-4000-8000-000000000042'
+    const first = call('/v1/tasks', { method: 'POST', headers: service(H), body: { idempotencyKey: key, source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'Slippers' }, requester: {} } })
+    expect(first.status).toBe(201)
+    const replay = call('/v1/tasks', { method: 'POST', headers: service(H), body: { idempotencyKey: key, source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'Slippers' }, requester: {} } })
+    expect(replay.status).toBe(200)
+    expect(data(replay).id).toBe(data(first).id)
+    expect(replay.body!.meta).toEqual({ warnings: null })
   })
 
-  it('caps a task at 30 active attachments', () => {
-    const admin = login('admin', 'admin123')
-    const task = call('/v1/tasks', { method: 'POST', body: { title: 'Attachment magnet' }, headers: h(admin, '1') }).data
-    for (let i = 0; i < 30; i += 1) {
-      call('/v1/tasks/attachments', { method: 'POST', body: { taskId: task.id, url: `https://cdn.example.com/f${i}.jpg` }, headers: h(admin, '1') })
-    }
-    expect(errCode(() => call('/v1/tasks/attachments', { method: 'POST', body: { taskId: task.id, url: 'https://cdn.example.com/straw.jpg' }, headers: h(admin, '1') })))
-      .toBe('ATTACHMENT_LIMIT')
+  it('refuses a past activationDate on the guest channel only', () => {
+    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: service(H), body: { source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'X' }, requester: {}, activationDate: '2020-01-01T00:00:00.000Z' } })).message)
+      .toBe('activationDate cannot be in the past')
+    // Staff may backdate freely.
+    const backdated = call('/v1/tasks/staff-create', { method: 'POST', headers: h(admin(), H), body: { title: 'Backdated', activationDate: '2020-01-01T00:00:00.000Z' } })
+    expect(backdated.status).toBe(201)
   })
 })
 
-describe('pool assignments', () => {
-  it('lists pool tasks as unclaimed, but claim respects membership', () => {
-    const admin = login('admin', 'admin123')
-    const leader = login('leader', 'leader123')
-    const unclaimed = call('/v1/tasks', { headers: h(admin, '1'), query: { scope: 'unclaimed', limit: 100 } }).data
-    // Task 10 sits in the Engineering On-Call TEAM pool.
-    expect(unclaimed.some((t: any) => t.id === '10')).toBe(true)
-    // The leader (housekeeping, not on that team) cannot claim out of it.
-    expect(errCode(() => call('/v1/tasks/claim', { method: 'POST', body: { taskId: '10' }, headers: h(leader, '1') })))
-      .toBe('FORBIDDEN')
+describe('claim, assign and department sync', () => {
+  // Leaves behind: the turndown pool task claimed by Made, then returned.
+
+  it('is idempotent for the holder and never steals', () => {
+    const b = budi()
+    const twice = call('/v1/tasks/claim', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels0710 } })
+    expect(data(twice).assignment.staffId).toBe(IDS.staff.budi)
+    const thief = errOf(() => call('/v1/tasks/claim', { method: 'POST', headers: h(made(), H), body: { taskId: IDS.task.towels0710 } }))
+    expect(thief.code).toBe('CONFLICT')
+    expect(thief.message).toBe(ERR_ALREADY_CLAIMED)
   })
 
-  it('converts a pool assignment into a personal one when a member claims', () => {
-    const admin = login('admin', 'admin123')
-    // Put the admin on the team, then claim: the pool row is superseded.
-    call('/v1/teams/2/members/add', { method: 'POST', body: { userId: '13' }, headers: h(admin, '1') })
-    const claimed = call('/v1/tasks/claim', { method: 'POST', body: { taskId: '10' }, headers: h(admin, '1') }).data
+  it('gates pool claims on membership, naming the pool kind', () => {
+    // Joko (Engineering) is not in HK Morning Shift.
+    expect(errOf(() => call('/v1/tasks/claim', { method: 'POST', headers: h(joko(), H), body: { taskId: IDS.task.turndownPool } })).message)
+      .toBe('task is held by a team you are not a member of')
+    // Budi (HK) is not in the Maintenance department.
+    expect(errOf(() => call('/v1/tasks/claim', { method: 'POST', headers: h(budi(), H), body: { taskId: IDS.task.bulbsDeptPool } })).message)
+      .toBe('task is held by a different department')
+    // A member converts the pool row to a personal assignment.
+    const m = made()
+    const claimed = data(call('/v1/tasks/claim', { method: 'POST', headers: h(m, H), body: { taskId: IDS.task.turndownPool } }))
     expect(claimed.assignment.kind).toBe('STAFF')
-    expect(claimed.assignment.userId).toBe('13')
+    expect(claimed.assignment.staffId).toBe(IDS.staff.made)
   })
 
-  it('claims from a department pool as its department\'s staff', () => {
-    const staff = login('staff', 'staff123')
-    // Task 12 sits in tenant 2's Housekeeping DEPARTMENT pool; Budi works there.
-    const claimed = call('/v1/tasks/claim', { method: 'POST', body: { taskId: '12' }, headers: h(staff, '2') }).data
-    expect(claimed.assignment.kind).toBe('STAFF')
-    expect(claimed.assignment.userId).toBe('10')
+  it('returns a claimed pool task to the SAME pool, reason on the remark', () => {
+    const m = made()
+    expect(errOf(() => call('/v1/tasks/return', { method: 'POST', headers: h(m, H), body: { taskId: IDS.task.turndownPool, reason: '' } })).message)
+      .toBe('reason is required (1-500 chars)')
+    const returned = data(call('/v1/tasks/return', { method: 'POST', headers: h(m, H), body: { taskId: IDS.task.turndownPool, reason: 'Shift ending' } }))
+    expect(returned.assignment.kind).toBe('TEAM')
+    expect(returned.assignment.teamId).toBe(IDS.team.hkMorning)
+    expect(returned.assignment.remark).toBe('Shift ending')
+    expect(returned.status).toBe('NEW')
   })
 
-  it('returns a held task to its most recent pool, reason required', () => {
-    const staff = login('staff', 'staff123')
-    expect(errCode(() => call('/v1/tasks/return', { method: 'POST', body: { taskId: '12', reason: '  ' }, headers: h(staff, '2') })))
-      .toBe('BAD_REQUEST')
-    const returned = call('/v1/tasks/return', { method: 'POST', body: { taskId: '12', reason: 'Guest asked to come back after 15:00' }, headers: h(staff, '2') }).data
-    // Rule (a): the task's own most recent pool assignment, recreated.
-    expect(returned.assignment.kind).toBe('DEPARTMENT')
-    expect(returned.assignment.departmentId).toBe('5')
-    expect(returned.assignment.remark).toBe('Guest asked to come back after 15:00')
+  it('syncs departments on assign: adopt, match, admin-bypass, else refuse', () => {
+    const l = leader()
+    const a = admin()
+    // A leader assigning cross-department is refused with the em-dash message.
+    const hkTask = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(l, H), body: { title: 'HK job', itemRef: IDS.item.towels, locationRef: IDS.location.room1204 } }))
+    const crossed = errOf(() => call('/v1/tasks/assign', { method: 'POST', headers: h(l, H), body: { taskId: hkTask.id, staffId: IDS.staff.joko } }))
+    expect(crossed.message).toBe(ERR_CROSS_DEPARTMENT)
+    // An admin may cross; the task's department is left unchanged.
+    const adminAssigned = data(call('/v1/tasks/assign', { method: 'POST', headers: h(a, H), body: { taskId: hkTask.id, staffId: IDS.staff.joko } }))
+    expect(adminAssigned.assignment.staffId).toBe(IDS.staff.joko)
+    expect(adminAssigned.hotelDepartmentId).toBe(IDS.dept.smtpHousekeeping)
+    // A department-less task ADOPTS the assignee's department.
+    const bare = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Deptless' } }))
+    expect(bare.hotelDepartmentId).toBeNull()
+    const adopted = data(call('/v1/tasks/assign', { method: 'POST', headers: h(l, H), body: { taskId: bare.id, staffId: IDS.staff.budi } }))
+    expect(adopted.hotelDepartmentId).toBe(IDS.dept.smtpHousekeeping)
+  })
+})
+
+describe('the status route guard chain', () => {
+  it('derives the status from the column and walks the guards in order', () => {
+    const a = admin()
+    const b = budi()
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: IDS.task.towels1204, columnId: '99999999-0000-4000-8000-000000000009' } })).message)
+      .toBe('column not found or has no linked status')
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(b, H), body: { taskId: IDS.task.towels0710, columnId: columnFor(b, 'VERIFIED') } })).message)
+      .toBe('only leaders or admins can set status to VERIFIED')
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: IDS.task.towels1204, columnId: columnFor(a, 'NEW') } })).message)
+      .toBe('cannot change status back to NEW')
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(b, H), body: { taskId: IDS.task.towels0710, columnId: columnFor(b, 'SUBMITTED') } })).message)
+      .toBe('use the submit action to move a task to SUBMITTED')
+    // Staff must hold the task.
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(made(), H), body: { taskId: IDS.task.towels1204, columnId: columnFor(b, 'IN_PROGRESS') } })).message)
+      .toBe('not assigned to this task')
   })
 
-  it('only the holder can return, and only open work returns', () => {
-    const leader = login('leader', 'leader123')
-    const staff = login('staff', 'staff123')
-    // Task 5 is held by Maya, not the leader.
-    expect(errCode(() => call('/v1/tasks/return', { method: 'POST', body: { taskId: '5', reason: 'x' }, headers: h(leader, '1') })))
-      .toBe('FORBIDDEN')
-    // Task 15 is Budi's, but it is with its reviewer.
-    expect(errCode(() => call('/v1/tasks/return', { method: 'POST', body: { taskId: '15', reason: 'x' }, headers: h(staff, '1') })))
-      .toBe('AWAITING_REVIEW')
-    // A held task parked on hold is closed to returns.
-    const parked = call('/v1/tasks', { method: 'POST', body: { title: 'Parked job', assignee: { kind: 'STAFF', userId: '10' } }, headers: h(staff, '1') }).data
-    call('/v1/tasks/status', { method: 'PATCH', body: { taskId: parked.id, columnId: '3' }, headers: h(staff, '1') })
-    expect(errCode(() => call('/v1/tasks/return', { method: 'POST', body: { taskId: parked.id, reason: 'x' }, headers: h(staff, '1') })))
-      .toBe('TASK_CLOSED')
+  it('freezes a SUBMITTED task for staff; leaders may only park or cancel it', () => {
+    const b = budi()
+    const l = leader()
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(b, H), body: { taskId: IDS.task.cleaningSubmitted, columnId: columnFor(b, 'PENDING') } })).message)
+      .toBe('task is awaiting review')
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(l, H), body: { taskId: IDS.task.cleaningSubmitted, columnId: columnFor(l, 'FINISHED') } })).message)
+      .toBe('use the review action to decide a submitted task')
+    expect(errOf(() => call('/v1/tasks/status', { method: 'PATCH', headers: h(l, H), body: { taskId: IDS.task.cleaningSubmitted, columnId: columnFor(l, 'VERIFIED') } })).message)
+      .toBe('a submitted task is reviewed to FINISHED before it can be VERIFIED')
+    // PENDING from SUBMITTED is allowed for a leader — and back, for review later.
+    const parked = data(call('/v1/tasks/status', { method: 'PATCH', headers: h(l, H), body: { taskId: IDS.task.cleaningSubmitted, columnId: columnFor(l, 'PENDING') } }))
+    expect(parked.status).toBe('PENDING')
+  })
+
+  it('stamps response on first IN_PROGRESS only, and accumulates resolution minutes', () => {
+    const a = admin()
+    const t = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Clock test', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    // NEW → PENDING is a park, not a response.
+    const parked = data(call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: t.id, columnId: columnFor(a, 'PENDING') } }))
+    expect(parked.responseDuration).toBeNull()
+    expect(parked.responseSlaStatus).toBe('EMPTY')
+    const started = data(call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: t.id, columnId: columnFor(a, 'IN_PROGRESS') } }))
+    expect(started.responseDuration).not.toBeNull()
+    expect(started.responseSlaStatus).toBe('ON_TIME')
+    // Leaving IN_PROGRESS accumulates; entering FINISHED (not via review) stamps.
+    const done = data(call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: t.id, columnId: columnFor(a, 'FINISHED') } }))
+    expect(done.resolutionDuration).not.toBeNull()
+    expect(done.resolutionSlaStatus).toBe('ON_TIME')
+  })
+})
+
+describe('submit and review', () => {
+  // Builds a fresh proof-gated task and walks it through the whole loop.
+
+  function freshInProgress(): { id: string } {
+    const l = leader()
+    const b = budi()
+    const t = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(l, H), body: { title: 'Deep clean', itemRef: IDS.item.roomCleaning, locationRef: IDS.location.room1102, assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    call('/v1/tasks/status', { method: 'PATCH', headers: h(b, H), body: { taskId: t.id, columnId: columnFor(b, 'IN_PROGRESS') } })
+    return t
+  }
+
+  function attachPhoto(session: Session, taskId: string) {
+    const upload = data<{ storageKey: string }>(call('/v1/uploads', { method: 'POST', headers: h(session, H), body: { filename: 'proof.jpg', contentType: 'image/jpeg', sizeBytes: 1000 } }))
+    return data(call('/v1/tasks/attachments', { method: 'POST', headers: h(session, H), body: { taskId, filetype: 'PHOTO', storageKey: upload.storageKey } }))
+  }
+
+  it('enforces the proof gates with the exact counting message', () => {
+    const b = budi()
+    const t = freshInProgress()
+    expect(errOf(() => call('/v1/tasks/submit', { method: 'POST', headers: h(b, H), body: { taskId: t.id, completionNote: 'done' } })).message)
+      .toBe('this task type requires at least 1 photo proofs (0 attached)')
+    attachPhoto(b, t.id)
+    expect(errOf(() => call('/v1/tasks/submit', { method: 'POST', headers: h(b, H), body: { taskId: t.id, completionNote: '   ' } })).message)
+      .toBe('this task type requires a completion note')
+    expect(errOf(() => call('/v1/tasks/submit', { method: 'POST', headers: h(b, H), body: { taskId: t.id, completionNote: 'done', attachmentIds: ['88888888-0000-4000-8000-000000000001'] } })).message)
+      .toBe('attachment does not belong to this task')
+    const submitted = data(call('/v1/tasks/submit', { method: 'POST', headers: h(b, H), body: { taskId: t.id, completionNote: 'All done, restocked.' } }))
+    expect(submitted.status).toBe('SUBMITTED')
+    expect(submitted.submittedBy).toBe(IDS.staff.budi)
+    expect(submitted.resolutionSlaStatus).not.toBe('EMPTY') // verdict stamps at submission
+    // Not IN_PROGRESS any more: a second submit conflicts.
+    expect(errOf(() => call('/v1/tasks/submit', { method: 'POST', headers: h(b, H), body: { taskId: t.id } })).message)
+      .toBe('task is not in progress')
+  })
+
+  it('reviews: leader-of-department decides; request-changes needs a note and resets the verdict', () => {
+    const b = budi()
+    const l = leader()
+    const t = freshInProgress()
+    attachPhoto(b, t.id)
+    call('/v1/tasks/submit', { method: 'POST', headers: h(b, H), body: { taskId: t.id, completionNote: 'First pass.' } })
+    expect(errOf(() => call('/v1/tasks/review', { method: 'POST', headers: h(b, H), body: { taskId: t.id, decision: 'APPROVE' } })).message)
+      .toBe('only leaders or admins may review a submitted task')
+    expect(errOf(() => call('/v1/tasks/review', { method: 'POST', headers: h(l, H), body: { taskId: t.id, decision: 'REQUEST_CHANGES' } })).message)
+      .toBe('a note is required when requesting changes')
+    const bounced = data(call('/v1/tasks/review', { method: 'POST', headers: h(l, H), body: { taskId: t.id, decision: 'REQUEST_CHANGES', note: 'Minibar photo missing' } }))
+    expect(bounced.status).toBe('IN_PROGRESS')
+    expect(bounced.resolutionSlaStatus).toBe('EMPTY') // clock reset for the rework
+    // Re-submit overwrites the completion data; approve keeps the new verdict.
+    const resubmitted = data(call('/v1/tasks/submit', { method: 'POST', headers: h(b, H), body: { taskId: t.id, completionNote: 'Second pass.' } }))
+    const verdict = resubmitted.resolutionSlaStatus
+    const approved = data(call('/v1/tasks/review', { method: 'POST', headers: h(l, H), body: { taskId: t.id, decision: 'APPROVE' } }))
+    expect(approved.status).toBe('FINISHED')
+    expect(approved.resolutionSlaStatus).toBe(verdict) // approval never re-stamps
+    expect(approved.completionNote).toBe('Second pass.')
+  })
+
+  it('lets an active helper submit, and a service actor never', () => {
+    const b = budi()
+    const m = made()
+    const t = freshInProgress()
+    call('/v1/tasks/collaborators', { method: 'POST', headers: h(b, H), body: { taskId: t.id, staffId: IDS.staff.made } })
+    attachPhoto(b, t.id)
+    expect(errOf(() => call('/v1/tasks/submit', { method: 'POST', headers: h(joko(), H), body: { taskId: t.id, completionNote: 'x' } })).message)
+      .toBe('only the assignee or a helper can submit this task')
+    expect(errOf(() => call('/v1/tasks/submit', { method: 'POST', headers: service(H), body: { taskId: t.id } })).message).toBe('forbidden')
+    const submitted = data(call('/v1/tasks/submit', { method: 'POST', headers: h(m, H), body: { taskId: t.id, completionNote: 'Helped out.' } }))
+    expect(submitted.submittedBy).toBe(IDS.staff.made)
+  })
+})
+
+describe('return-to-pool selection', () => {
+  it('walks the fallback chain: last pool, latest team, own department, unassigned', () => {
+    const b = budi()
+    const a = admin()
+    // (b) Budi has a team: his own task goes back to HK Morning Shift.
+    const own = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(b, H), body: { title: 'Own job', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    const teamPooled = data(call('/v1/tasks/return', { method: 'POST', headers: h(b, H), body: { taskId: own.id, reason: 'Break' } }))
+    expect(teamPooled.assignment.kind).toBe('TEAM')
+    expect(teamPooled.assignment.teamId).toBe(IDS.team.hkMorning)
+    // (c) The admin has no team: the task's own department takes it.
+    const bulbs = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Bulbs', itemRef: IDS.item.lightBulb, locationRef: IDS.location.floor7, assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.agus } } }))
+    const deptPooled = data(call('/v1/tasks/return', { method: 'POST', headers: h(a, H), body: { taskId: bulbs.id, reason: 'Need the ladder' } }))
+    expect(deptPooled.assignment.kind).toBe('DEPARTMENT')
+    expect(deptPooled.assignment.departmentId).toBe(IDS.dept.smtpMaintenance)
+    // (d) No pool history, no team, no department: fully unassigned.
+    const bare = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Bare', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.agus } } }))
+    const unassigned = data(call('/v1/tasks/return', { method: 'POST', headers: h(a, H), body: { taskId: bare.id, reason: 'Nobody owns this' } }))
+    expect(unassigned.assignment).toBeNull()
+  })
+
+  it('refuses returns off submitted and closed work with distinct 409s', () => {
+    const b = budi()
+    expect(errOf(() => call('/v1/tasks/return', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.transferHold, reason: 'x' } })).message)
+      .toBe('task is closed') // PENDING counts as closed for Return
+    expect(errOf(() => call('/v1/tasks/return', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towelsDone, reason: 'x' } })).message)
+      .toBe('task is closed')
   })
 })
 
 describe('delegation offers', () => {
-  it('shows the target their pending inbox, newest first', () => {
-    const leader = login('leader', 'leader123')
-    const inbox = call('/v1/offers', { headers: h(leader, '1') }).data
-    expect(inbox.some((o: any) => o.taskId === '3' && o.taskTitle === 'Room cleaning')).toBe(true)
+  it('walks the send gates in order, including department compatibility', () => {
+    const b = budi()
+    expect(errOf(() => call('/v1/tasks/offers', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels0710, toStaffId: IDS.staff.budi } })).message)
+      .toBe('cannot offer a task to yourself')
+    expect(errOf(() => call('/v1/tasks/offers', { method: 'POST', headers: h(made(), H), body: { taskId: IDS.task.towels0710, toStaffId: IDS.staff.joko } })).message)
+      .toBe('only the active assignee can offer this task')
+    expect(errOf(() => call('/v1/tasks/offers', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels0710, toStaffId: IDS.staff.joko } })).message)
+      .toBe(ERR_CROSS_DEPARTMENT)
+    const offer = data(call('/v1/tasks/offers', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels0710, toStaffId: IDS.staff.made, note: 'Taking my break' } }))
+    expect(offer.state).toBe('PENDING')
+    expect(errOf(() => call('/v1/tasks/offers', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels0710, toStaffId: IDS.staff.made } })).message)
+      .toBe('an offer is already pending for this task')
+    // The inbox joins the sender name and task title.
+    const inbox = data<any[]>(call('/v1/offers', { headers: h(made(), H) }))
+    const row = inbox.find(o => o.id === offer.id)
+    expect(row.fromStaffName).toBe('Budi Santoso')
+    expect(row.taskTitle).toBe('Extra towels')
+    // Clean up for later suites: cancel (sender-only).
+    expect(errOf(() => call('/v1/offers/cancel', { method: 'POST', headers: h(made(), H), body: { offerId: offer.id } })).message)
+      .toBe("only the offer's sender can cancel it")
+    const cancelled = data(call('/v1/offers/cancel', { method: 'POST', headers: h(b, H), body: { offerId: offer.id } }))
+    expect(cancelled.state).toBe('CANCELLED')
   })
 
-  it('allows one pending offer per task, cancellable only by its sender', () => {
-    const staff = login('staff', 'staff123')
-    const leader = login('leader', 'leader123')
-    expect(errCode(() => call('/v1/tasks/offers', { method: 'POST', body: { taskId: '3', toUserId: '11' }, headers: h(staff, '1') })))
-      .toBe('OFFER_PENDING')
-    expect(errCode(() => call('/v1/offers/cancel', { method: 'POST', body: { offerId: '1' }, headers: h(leader, '1') })))
-      .toBe('FORBIDDEN')
-    // Declining changes nothing about the task; the holder stays.
-    const declined = call('/v1/offers/decline', { method: 'POST', body: { offerId: '1' }, headers: h(leader, '1') }).data
-    expect(declined.state).toBe('DECLINED')
-    const task = call('/v1/tasks/3', { headers: h(staff, '1') }).data
-    expect(task.assignment.userId).toBe('10')
-    expect(task.pendingOffer).toBeNull()
+  it('accepts only while fresh: a reassignment flips the offer stale', () => {
+    const b = budi()
+    const l = leader()
+    const m = made()
+    const t = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(b, H), body: { title: 'Stale test', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    const offer = data(call('/v1/tasks/offers', { method: 'POST', headers: h(b, H), body: { taskId: t.id, toStaffId: IDS.staff.made } }))
+    // Assign supersedes: the pending offer is auto-cancelled…
+    call('/v1/tasks/assign', { method: 'POST', headers: h(l, H), body: { taskId: t.id, staffId: IDS.staff.budi } })
+    const stale = errOf(() => call('/v1/offers/accept', { method: 'POST', headers: h(m, H), body: { offerId: offer.id } }))
+    // …so the accept finds it no longer pending.
+    expect(stale.message).toBe('offer is not pending')
   })
 
-  it('gates sending: holder only, open statuses only, no self, same department', () => {
-    const staff = login('staff', 'staff123')
-    const leader = login('leader', 'leader123')
-    expect(errCode(() => call('/v1/tasks/offers', { method: 'POST', body: { taskId: '5', toUserId: '11' }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN') // held by Maya, not Budi
-    expect(errCode(() => call('/v1/tasks/offers', { method: 'POST', body: { taskId: '3', toUserId: '10' }, headers: h(staff, '1') })))
-      .toBe('BAD_REQUEST') // to yourself
-    expect(errCode(() => call('/v1/tasks/offers', { method: 'POST', body: { taskId: '3', toUserId: '12' }, headers: h(staff, '1') })))
-      .toBe('BAD_REQUEST') // Agus works Maintenance; task 3 is Housekeeping
-    // Offers only travel on open work.
-    const parked = call('/v1/tasks', { method: 'POST', body: { title: 'Parked for offer', assignee: { kind: 'STAFF', userId: '11' } }, headers: h(leader, '1') }).data
-    call('/v1/tasks/status', { method: 'PATCH', body: { taskId: parked.id, columnId: '3' }, headers: h(leader, '1') })
-    expect(errCode(() => call('/v1/tasks/offers', { method: 'POST', body: { taskId: parked.id, toUserId: '14' }, headers: h(leader, '1') })))
-      .toBe('TASK_NOT_OPEN')
-  })
-
-  it('accepting hands the task over; only the target may accept', () => {
-    const staff = login('staff', 'staff123')
-    const leader = login('leader', 'leader123')
-    const task = call('/v1/tasks', { method: 'POST', body: { title: 'Cover my shift job', assignee: { kind: 'STAFF', userId: '10' } }, headers: h(staff, '1') }).data
-    const offer = call('/v1/tasks/offers', { method: 'POST', body: { taskId: task.id, toUserId: '11', note: 'Please take this one' }, headers: h(staff, '1') }).data
-    expect(errCode(() => call('/v1/offers/accept', { method: 'POST', body: { offerId: offer.id }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN')
-    const accepted = call('/v1/offers/accept', { method: 'POST', body: { offerId: offer.id }, headers: h(leader, '1') }).data
-    expect(accepted.assignment.userId).toBe('11')
-    expect(accepted.assignment.assignedBy).toBe('10')
-    // The status never changes on delegation.
-    expect(accepted.status).toBe('NEW')
-  })
-
-  it('a reassignment supersedes the pending offer', () => {
-    const staff = login('staff', 'staff123')
-    const leader = login('leader', 'leader123')
-    const task = call('/v1/tasks', { method: 'POST', body: { title: 'Soon reassigned', assignee: { kind: 'STAFF', userId: '10' } }, headers: h(staff, '1') }).data
-    const offer = call('/v1/tasks/offers', { method: 'POST', body: { taskId: task.id, toUserId: '11' }, headers: h(staff, '1') }).data
-    call('/v1/tasks/assign', { method: 'POST', body: { taskId: task.id, userId: '14' }, headers: h(leader, '1') })
-    expect(errCode(() => call('/v1/offers/accept', { method: 'POST', body: { offerId: offer.id }, headers: h(leader, '1') })))
-      .toBe('OFFER_DECIDED')
+  it('applies an accepted offer: reassigns, drops the helper row, decides the offer', () => {
+    const b = budi()
+    const m = made()
+    const t = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(b, H), body: { title: 'Handover', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    call('/v1/tasks/collaborators', { method: 'POST', headers: h(b, H), body: { taskId: t.id, staffId: IDS.staff.made } })
+    const offer = data(call('/v1/tasks/offers', { method: 'POST', headers: h(b, H), body: { taskId: t.id, toStaffId: IDS.staff.made } }))
+    expect(errOf(() => call('/v1/offers/accept', { method: 'POST', headers: h(b, H), body: { offerId: offer.id } })).message)
+      .toBe("only the offer's target can accept it")
+    const accepted = data(call('/v1/offers/accept', { method: 'POST', headers: h(m, H), body: { offerId: offer.id } }))
+    expect(accepted.assignment.staffId).toBe(IDS.staff.made)
+    // The acceptor's helper row is deactivated — an assignee is not their own helper.
+    expect((accepted.collaborators ?? []).some((c: any) => c.staffId === IDS.staff.made)).toBe(false)
+    expect(errOf(() => call('/v1/offers/decline', { method: 'POST', headers: h(m, H), body: { offerId: offer.id } })).message)
+      .toBe('offer is not pending')
   })
 })
 
 describe('helpers', () => {
-  it('gives a helper the task: visibility, the helping queue, and submit rights', () => {
-    const staff = login('staff', 'staff123')
-    // Budi helps on task 5 — another department's task, readable through it.
-    expect(call('/v1/tasks/5', { headers: h(staff, '1') }).data.id).toBe('5')
-    const helping = call('/v1/tasks', { headers: h(staff, '1'), query: { scope: 'helping', limit: 100 } }).data
-    expect(helping.map((t: any) => t.id)).toEqual(['5'])
-    // A helper can submit the work, exactly like the assignee.
-    const submitted = call('/v1/tasks/submit', { method: 'POST', body: { taskId: '5' }, headers: h(staff, '1') }).data
-    expect(submitted.status).toBe('SUBMITTED')
-    expect(submitted.submittedBy).toBe('10')
-  })
-
-  it('is managed by leaders, admins and the assignee — helpers may always leave', () => {
-    const staff = login('staff', 'staff123')
-    const leader = login('leader', 'leader123')
-    // Staff who neither hold nor lead cannot manage someone else's helpers.
-    expect(errCode(() => call('/v1/tasks/collaborators', { method: 'POST', body: { taskId: '5', userId: '14' }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN')
-    const added = call('/v1/tasks/collaborators', { method: 'POST', body: { taskId: '5', userId: '14' }, headers: h(leader, '1') }).data
-    expect(added.userId).toBe('14')
-    // Adding again is idempotent, not an error.
-    expect(call('/v1/tasks/collaborators', { method: 'POST', body: { taskId: '5', userId: '14' }, headers: h(leader, '1') }).data.id).toBe(added.id)
-    // The assignee cannot also be a helper.
-    expect(errCode(() => call('/v1/tasks/collaborators', { method: 'POST', body: { taskId: '5', userId: '15' }, headers: h(leader, '1') })))
-      .toBe('BAD_REQUEST')
-    // Leaving is a self-remove that needs no rank.
-    call('/v1/tasks/collaborators/remove', { method: 'POST', body: { taskId: '5', userId: '10' }, headers: h(staff, '1') })
-    expect(call('/v1/tasks', { headers: h(staff, '1'), query: { scope: 'helping', limit: 100 } }).data).toEqual([])
-  })
-
-  it('closes helper changes on finished work — but not on submitted work', () => {
-    const leader = login('leader', 'leader123')
-    // Task 7 is FINISHED: closed to helper changes.
-    expect(errCode(() => call('/v1/tasks/collaborators', { method: 'POST', body: { taskId: '7', userId: '14' }, headers: h(leader, '1') })))
-      .toBe('TASK_CLOSED')
-    // Task 15 is SUBMITTED: review can still send it back, so helpers may change.
-    expect(call('/v1/tasks/collaborators', { method: 'POST', body: { taskId: '15', userId: '14' }, headers: h(leader, '1') }).data.userId).toBe('14')
+  it('is human-only, closed-status-guarded, idempotent, and leave is always allowed', () => {
+    const b = budi()
+    const m = made()
+    expect(errOf(() => call('/v1/tasks/collaborators', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels0710, staffId: IDS.staff.made } })).message)
+      .toBe('helpers are human-only')
+    expect(errOf(() => call('/v1/tasks/collaborators', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towelsDone, staffId: IDS.staff.made } })).message)
+      .toBe('task is closed')
+    expect(errOf(() => call('/v1/tasks/collaborators', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels0710, staffId: IDS.staff.budi } })).message)
+      .toBe('assignee cannot be a helper')
+    // The seed already has Made helping — a duplicate add returns the row, 200.
+    const again = call('/v1/tasks/collaborators', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels0710, staffId: IDS.staff.made } })
+    expect(again.status).toBe(200)
+    // helping=1 scopes the list to the caller's active helper rows.
+    const helping = data<any[]>(call('/v1/tasks', { headers: h(m, H), query: { helping: '1' } }))
+    expect(helping!.some(t => t.id === IDS.task.towels0710)).toBe(true)
+    // Leave (self-removal) responds 204 with no body, idempotently.
+    const left = call('/v1/tasks/collaborators/remove', { method: 'POST', headers: h(m, H), body: { taskId: IDS.task.towels0710, staffId: IDS.staff.made } })
+    expect(left.status).toBe(204)
+    expect(left.body).toBeNull()
+    expect(call('/v1/tasks/collaborators/remove', { method: 'POST', headers: h(m, H), body: { taskId: IDS.task.towels0710, staffId: IDS.staff.made } }).status).toBe(204)
   })
 })
 
-describe('submit for review and the review decision', () => {
-  it('enforces the item\'s proof gates at submission', () => {
-    const staff = login('staff', 'staff123')
-    // Task 3 (Room cleaning) needs 2 photos and a completion note.
-    expect(errMessage(() => call('/v1/tasks/submit', { method: 'POST', body: { taskId: '3', completionNote: 'Done' }, headers: h(staff, '1') })))
-      .toContain('proof photo')
-    call('/v1/tasks/attachments', { method: 'POST', body: { taskId: '3', url: 'https://cdn.example.com/proof-1.jpg' }, headers: h(staff, '1') })
-    call('/v1/tasks/attachments', { method: 'POST', body: { taskId: '3', url: 'https://cdn.example.com/proof-2.jpg' }, headers: h(staff, '1') })
-    expect(errMessage(() => call('/v1/tasks/submit', { method: 'POST', body: { taskId: '3' }, headers: h(staff, '1') })))
-      .toBe('This task requires a completion note')
-    const submitted = call('/v1/tasks/submit', { method: 'POST', body: { taskId: '3', completionNote: 'All three steps done, room ready' }, headers: h(staff, '1') }).data
-    expect(submitted.status).toBe('SUBMITTED')
-    // The resolution verdict is stamped at submission, not at approval.
-    expect(submitted.resolutionDuration).not.toBeNull()
-    // Submitting again is a 409, not a duplicate.
-    expect(errCode(() => call('/v1/tasks/submit', { method: 'POST', body: { taskId: '3', completionNote: 'again' }, headers: h(staff, '1') })))
-      .toBe('NOT_IN_PROGRESS')
+describe('uploads and attachments', () => {
+  it('validates uploads with the exact messages, staff identity required', () => {
+    const b = budi()
+    expect(errOf(() => call('/v1/uploads', { method: 'POST', headers: service(H), body: { filename: 'x.jpg', contentType: 'image/jpeg', sizeBytes: 10 } })).message)
+      .toBe('uploads require a staff identity')
+    expect(errOf(() => call('/v1/uploads', { method: 'POST', headers: h(b, H), body: { filename: '', contentType: 'image/jpeg', sizeBytes: 10 } })).message)
+      .toBe('filename is required')
+    expect(errOf(() => call('/v1/uploads', { method: 'POST', headers: h(b, H), body: { filename: 'x', contentType: 'image/jpeg', sizeBytes: 0 } })).message)
+      .toBe('sizeBytes must be positive')
+    expect(errOf(() => call('/v1/uploads', { method: 'POST', headers: h(b, H), body: { filename: 'x', contentType: 'image/gif', sizeBytes: 10 } })).message)
+      .toBe('contentType must be one of image/jpeg, image/png, image/webp, image/heic, application/pdf')
+    expect(errOf(() => call('/v1/uploads', { method: 'POST', headers: h(b, H), body: { filename: 'x.jpg', contentType: 'image/jpeg', sizeBytes: 10485761 } })).message)
+      .toBe('sizeBytes exceeds the 10485760 byte limit for image/jpeg')
+    const upload = data<{ storageKey: string, uploadUrl: string }>(call('/v1/uploads', { method: 'POST', headers: h(b, H), body: { filename: 'anything.png', contentType: 'application/pdf', sizeBytes: 100 } }))
+    // Extension comes from the contentType, never the filename.
+    expect(upload.storageKey.startsWith(`hotels/${H}/uploads/`)).toBe(true)
+    expect(upload.storageKey.endsWith('.pdf')).toBe(true)
   })
 
-  it('review is for leaders of the task\'s department; changes reset the clock', () => {
-    const staff = login('staff', 'staff123')
-    const leader = login('leader', 'leader123')
-    expect(errCode(() => call('/v1/tasks/review', { method: 'POST', body: { taskId: '3', decision: 'APPROVE' }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN')
-    expect(errCode(() => call('/v1/tasks/review', { method: 'POST', body: { taskId: '3', decision: 'REQUEST_CHANGES', note: '' }, headers: h(leader, '1') })))
-      .toBe('BAD_REQUEST')
-    const sentBack = call('/v1/tasks/review', { method: 'POST', body: { taskId: '3', decision: 'REQUEST_CHANGES', note: 'Balcony rail still dusty' }, headers: h(leader, '1') }).data
-    expect(sentBack.status).toBe('IN_PROGRESS')
-    // The next submission re-accumulates from a clean clock.
-    expect(sentBack.resolutionDuration).toBeNull()
-    expect(sentBack.resolutionSlaStatus).toBe('EMPTY')
-
-    const resubmitted = call('/v1/tasks/submit', { method: 'POST', body: { taskId: '3', completionNote: 'Rail wiped down too' }, headers: h(staff, '1') }).data
-    expect(resubmitted.completionNote).toBe('Rail wiped down too')
-    const approved = call('/v1/tasks/review', { method: 'POST', body: { taskId: '3', decision: 'APPROVE' }, headers: h(leader, '1') }).data
-    expect(approved.status).toBe('FINISHED')
+  it('creates by url XOR storageKey, scoped to this hotel, 201/200 statuses', () => {
+    const b = budi()
+    const t = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(b, H), body: { title: 'Attach test', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    expect(errOf(() => call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { taskId: t.id, filetype: 'PHOTO' } })).message)
+      .toBe('provide either url or storageKey, not both')
+    expect(errOf(() => call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { taskId: t.id, filetype: 'PHOTO', url: 'x', storageKey: 'y' } })).message)
+      .toBe('provide either url or storageKey, not both')
+    expect(errOf(() => call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { taskId: t.id, filetype: 'PHOTO', storageKey: `hotels/${IDS.hotel.fave}/uploads/x.jpg` } })).message)
+      .toBe('storageKey does not belong to this hotel')
+    expect(errOf(() => call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { taskId: t.id, filetype: 'GIF', url: 'https://x.example/a.gif' } })).message)
+      .toBe('filetype must be PHOTO or PDF')
+    const created = call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { taskId: t.id, filetype: 'PHOTO', url: 'https://cdn.example/a.jpg' } })
+    expect(created.status).toBe(201)
+    // Update: only isRemoved changes; 200; absence of isRemoved un-removes.
+    const removed = call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { id: data(created).id, taskId: t.id, filetype: 'PHOTO', isRemoved: true } })
+    expect(removed.status).toBe(200)
+    expect(data(removed).isRemoved).toBe(true)
+    const restored = call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { id: data(created).id, taskId: t.id, filetype: 'PHOTO' } })
+    expect(data(restored).isRemoved).toBe(false)
   })
 
-  it('keeps admin-only review for tasks with no department', () => {
-    const leader = login('leader', 'leader123')
-    const admin = login('admin', 'admin123')
-    const task = call('/v1/tasks', { method: 'POST', body: { title: 'Unrouted odd job', assignee: { kind: 'STAFF', userId: '11' } }, headers: h(admin, '1') }).data
-    expect(task.departmentId).toBeNull()
-    call('/v1/tasks/status', { method: 'PATCH', body: { taskId: task.id, columnId: '2' }, headers: h(leader, '1') })
-    call('/v1/tasks/submit', { method: 'POST', body: { taskId: task.id }, headers: h(leader, '1') })
-    expect(errCode(() => call('/v1/tasks/review', { method: 'POST', body: { taskId: task.id, decision: 'APPROVE' }, headers: h(leader, '1') })))
-      .toBe('FORBIDDEN')
-    expect(call('/v1/tasks/review', { method: 'POST', body: { taskId: task.id, decision: 'APPROVE' }, headers: h(admin, '1') }).data.status)
-      .toBe('FINISHED')
+  it('caps a task at 30 active attachments — create only, toggles still work', () => {
+    const b = budi()
+    const t = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(b, H), body: { title: 'Cap test', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    let lastId = ''
+    for (let i = 0; i < 30; i++) {
+      lastId = data(call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { taskId: t.id, filetype: 'PHOTO', url: `https://cdn.example/${i}.jpg` } })).id
+    }
+    const capped = errOf(() => call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { taskId: t.id, filetype: 'PHOTO', url: 'https://cdn.example/31.jpg' } }))
+    expect(capped.code).toBe('CONFLICT')
+    expect(capped.message).toBe('attachment limit reached (30)')
+    // Toggling at the cap still works.
+    expect(call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { id: lastId, taskId: t.id, filetype: 'PHOTO', isRemoved: true } }).status).toBe(200)
+  })
+
+  it('guest attachments are service-only and URL-only', () => {
+    const b = budi()
+    expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })).message)
+      .toBe('forbidden')
+    expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', storageKey: `hotels/${H}/uploads/x.jpg` } })).message)
+      .toBe('guest attachments are URL-only')
+    expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.marcus, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })).message)
+      .toBe('not authorized for this task')
+    const created = call('/v1/tasks/guest-attachments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })
+    expect(created.status).toBe(201)
+    expect(data(created).staffId).toBeNull()
+  })
+})
+
+describe('comments', () => {
+  it('checks length before the service gate, then department truth', () => {
+    const long = 'x'.repeat(501)
+    expect(errOf(() => call('/v1/tasks/comments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels0710, comment: long } })).message)
+      .toBe('comment is required (1-500 chars)')
+    expect(errOf(() => call('/v1/tasks/comments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels0710, comment: 'hi' } })).message)
+      .toBe('comments require a staff identity')
+    // Wrong department denies even a leader; the HK leader cannot comment on Maintenance work.
+    expect(errOf(() => call('/v1/tasks/comments', { method: 'POST', headers: h(leader(), H), body: { taskId: IDS.task.bulbsDeptPool, comment: 'hi' } })).message)
+      .toBe('not authorized to comment on this task')
+    const posted = call('/v1/tasks/comments', { method: 'POST', headers: h(budi(), H), body: { taskId: IDS.task.towels0710, comment: 'On my way up.' } })
+    expect(posted.status).toBe(201)
   })
 })

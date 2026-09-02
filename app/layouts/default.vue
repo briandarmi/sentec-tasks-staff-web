@@ -12,8 +12,8 @@ import { useSession } from '~/composables/useSession'
 const route = useRoute()
 const session = useSession()
 
-/** Re-key on property change so property-scoped data refetches on switch. */
-const pageKey = computed(() => `${route.fullPath}:${session.tenantId.value ?? 'none'}`)
+/** Re-key on property change so hotel-scoped data refetches on switch. */
+const pageKey = computed(() => `${route.fullPath}:${session.hotelId.value ?? 'none'}`)
 const title = computed(() => (route.meta.title as string | undefined) ?? 'Sentec Tasks')
 </script>
 

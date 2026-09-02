@@ -51,7 +51,7 @@ function choose(column: BoardColumn) {
             :class="column.id === currentColumnId ? 'border-primary/40 bg-primary/5' : 'bg-card'"
             @click="choose(column)"
           >
-            <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="statusMeta(column.status).dot" />
+            <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="column.status ? statusMeta(column.status).dot : 'bg-muted-foreground/40'" />
             <span class="min-w-0 flex-1">
               <span class="block font-medium">{{ column.name }}</span>
               <span v-if="column.description" class="block truncate text-xs text-muted-foreground">{{ column.description }}</span>

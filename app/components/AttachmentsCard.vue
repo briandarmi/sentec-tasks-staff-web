@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { ExternalLinkIcon, PaperclipIcon, UploadIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
-import { UPLOAD_MAX_BYTES, type TaskDetail } from '~/utils/clientFakeApi'
+import { UPLOAD_MAX_BYTES, type TaskAttachment, type TaskDetail } from '~/utils/clientFakeApi'
 
 const props = defineProps<{ task: TaskDetail }>()
 
@@ -18,18 +18,33 @@ const api = useTasksApi()
 const attachOpen = ref(false)
 const isAttaching = ref(false)
 const isUploading = ref(false)
-/** One id at a time: every toggle disables while any one is in flight. */
-const togglingId = ref('')
+/** One id at a time: every remove disables while any one is in flight. */
+const removingId = ref('')
 const errorMessage = ref('')
 
-const attachments = computed(() => props.task.attachments)
+/** The detail carries non-removed rows only — a removed attachment is gone. */
+const attachments = computed(() => props.task.attachments ?? [])
+
+/** No filename in the read model: label from the URL's basename, else the type. */
+function attachmentLabel(attachment: TaskAttachment): string {
+  if (attachment.filepath) {
+    try {
+      const base = new URL(attachment.filepath).pathname.split('/').pop()
+      if (base) return decodeURIComponent(base)
+    }
+    catch { /* not a parseable URL — fall through to the type label */ }
+  }
+  return attachment.filetype === 'PDF' ? 'PDF document' : 'Photo'
+}
 
 async function attachByUrl(payload: { url: string }) {
   if (isAttaching.value) return
   isAttaching.value = true
   errorMessage.value = ''
   try {
-    await api.attachUrl({ taskId: props.task.id, url: payload.url })
+    // The API requires an explicit filetype; a .pdf link is the one PDF case.
+    const filetype = /\.pdf(\?|#|$)/i.test(payload.url) ? 'PDF' : 'PHOTO'
+    await api.createAttachment({ taskId: props.task.id, url: payload.url, filetype })
     attachOpen.value = false
     emit('updated')
   }
@@ -55,12 +70,11 @@ async function onFilesPicked(event: Event) {
       if (!UPLOAD_MAX_BYTES[file.type]) {
         throw new Error(`contentType must be one of ${Object.keys(UPLOAD_MAX_BYTES).join(', ')}`)
       }
-      const presigned = await api.createUpload({ filename: file.name, contentType: file.type, sizeBytes: file.size })
-      await api.attachUpload({
+      const presigned = await api.presignUpload({ filename: file.name, contentType: file.type, sizeBytes: file.size })
+      await api.createAttachment({
         taskId: props.task.id,
         storageKey: presigned.storageKey,
         filetype: file.type === 'application/pdf' ? 'PDF' : 'PHOTO',
-        filename: file.name,
       })
     }
     emit('updated')
@@ -73,19 +87,24 @@ async function onFilesPicked(event: Event) {
   }
 }
 
-async function toggleRemoved(attachment: { id: string, isRemoved: boolean }) {
-  if (togglingId.value) return
-  togglingId.value = attachment.id
+/**
+ * Removal is one-way from this screen: the read model only returns active
+ * rows, so a removed attachment disappears rather than lingering as a
+ * restorable ghost. (The API can un-remove by id; the id is gone with the row.)
+ */
+async function remove(attachment: TaskAttachment) {
+  if (removingId.value) return
+  removingId.value = attachment.id
   errorMessage.value = ''
   try {
-    await api.updateAttachment({ id: attachment.id, isRemoved: !attachment.isRemoved })
+    await api.setAttachmentRemoved({ id: attachment.id, taskId: props.task.id, filetype: attachment.filetype, isRemoved: true })
     emit('updated')
   }
   catch (e) {
     errorMessage.value = (e as Error).message
   }
   finally {
-    togglingId.value = ''
+    removingId.value = ''
   }
 }
 </script>
@@ -108,33 +127,34 @@ async function toggleRemoved(attachment: { id: string, isRemoved: boolean }) {
         v-for="attachment in attachments"
         :key="attachment.id"
         class="flex min-h-11 items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm"
-        :class="attachment.isRemoved ? 'opacity-55' : ''"
       >
         <PaperclipIcon class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <template v-if="attachment.isRemoved">
-          <span class="min-w-0 flex-1 truncate line-through">{{ attachment.filename }}</span>
-        </template>
+        <!-- filepath '' means "preview unavailable" (signer off) — say so
+             rather than rendering a dead link. -->
         <a
-          v-else
-          :href="attachment.url"
+          v-if="attachment.filepath"
+          :href="attachment.filepath"
           target="_blank"
           rel="noopener noreferrer"
           class="flex min-w-0 flex-1 items-center gap-1 truncate active:text-primary"
         >
-          <span class="min-w-0 truncate">{{ attachment.filename }}</span>
+          <span class="min-w-0 truncate">{{ attachmentLabel(attachment) }}</span>
           <ExternalLinkIcon class="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         </a>
+        <span v-else class="min-w-0 flex-1 truncate text-muted-foreground">
+          {{ attachmentLabel(attachment) }} · preview unavailable
+        </span>
         <Badge variant="secondary" class="shrink-0 text-[10px]">{{ attachment.filetype }}</Badge>
         <Button
           size="sm"
           variant="ghost"
-          class="shrink-0 text-muted-foreground"
-          :disabled="Boolean(togglingId)"
-          :aria-busy="togglingId === attachment.id"
-          :aria-label="`${attachment.isRemoved ? 'Restore' : 'Remove'} ${attachment.filename}`"
-          @click="toggleRemoved(attachment)"
+          class="shrink-0 text-muted-foreground hover:text-destructive"
+          :disabled="Boolean(removingId)"
+          :aria-busy="removingId === attachment.id"
+          :aria-label="`Remove ${attachmentLabel(attachment)}`"
+          @click="remove(attachment)"
         >
-          {{ togglingId === attachment.id ? '…' : attachment.isRemoved ? 'Restore' : 'Remove' }}
+          {{ removingId === attachment.id ? '…' : 'Remove' }}
         </Button>
       </div>
 

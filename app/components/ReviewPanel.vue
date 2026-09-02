@@ -4,7 +4,7 @@ import { CheckCheckIcon, UndoIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useCaps } from '~/composables/useCaps'
 import type { TaskDetail } from '~/utils/clientFakeApi'
-import { fullName, relativeTime } from '~/utils/task-ui'
+import { displayName, relativeTime } from '~/utils/task-ui'
 
 const props = defineProps<{ task: TaskDetail }>()
 const emit = defineEmits<{ updated: [TaskDetail] }>()
@@ -27,13 +27,14 @@ const visible = computed(() => props.task.status === 'SUBMITTED' && caps.isLeade
 const submitterName = computed(() => {
   const { submittedBy, assignment, collaborators } = props.task
   if (!submittedBy) return ''
-  if (assignment?.kind === 'STAFF' && assignment.userId === submittedBy) return fullName(assignment.user) || submittedBy
-  const helper = collaborators.find(c => c.userId === submittedBy)
-  if (helper) return fullName(helper.user) || submittedBy
-  return `User ${submittedBy}`
+  if (assignment?.kind === 'STAFF' && assignment.staffId === submittedBy) return displayName(assignment.staffName)
+  const helper = collaborators?.find(c => c.staffId === submittedBy)
+  if (helper) return displayName(helper.staffName)
+  return 'a teammate'
 })
 
-const proofPhotos = computed(() => props.task.attachments.filter(a => a.filetype === 'PHOTO' && !a.isRemoved))
+// The detail carries non-removed attachments only.
+const proofPhotos = computed(() => (props.task.attachments ?? []).filter(a => a.filetype === 'PHOTO'))
 
 const isApproving = ref(false)
 const isSending = ref(false)
@@ -102,14 +103,14 @@ async function sendBack() {
       <div v-if="proofPhotos.length" class="space-y-1.5">
         <p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Proof photos</p>
         <a
-          v-for="photo in proofPhotos"
+          v-for="(photo, index) in proofPhotos"
           :key="photo.id"
-          :href="photo.url"
+          :href="photo.filepath || undefined"
           target="_blank"
           rel="noopener noreferrer"
           class="flex min-h-11 items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm active:bg-accent"
         >
-          <span class="min-w-0 flex-1 truncate">{{ photo.filename }}</span>
+          <span class="min-w-0 flex-1 truncate">Proof photo {{ index + 1 }}<template v-if="!photo.filepath"> · preview unavailable</template></span>
         </a>
       </div>
 

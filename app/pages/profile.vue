@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CheckIcon, Building2Icon, LogOutIcon, UsersIcon } from '@lucide/vue'
+import { CheckIcon, Building2Icon, LogOutIcon } from '@lucide/vue'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
 
@@ -13,7 +13,7 @@ const name = computed(() => session.displayName.value || 'Signed in')
 const initials = computed(() =>
   name.value.split(' ').map(part => part[0]).slice(0, 2).join('').toUpperCase(),
 )
-const properties = computed(() => session.tenants.value)
+const properties = computed(() => session.hotels.value)
 
 async function logout() {
   await session.logout()
@@ -49,16 +49,13 @@ async function logout() {
           :key="property.id"
           type="button"
           class="flex min-h-11 w-full items-center gap-3 rounded-lg border px-3 py-3 text-left text-sm active:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          :class="property.id === session.tenantId.value ? 'border-primary/40 bg-primary/5' : 'bg-card'"
-          @click="session.setTenantId(property.id)"
+          :class="property.id === session.hotelId.value ? 'border-primary/40 bg-primary/5' : 'bg-card'"
+          @click="session.setHotelId(property.id)"
         >
           <span class="min-w-0 flex-1">
             <span class="block truncate font-medium">{{ property.name }}</span>
-            <span v-if="property.viaGroupGrant" class="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
-              <UsersIcon class="h-3 w-3" /> via group access
-            </span>
           </span>
-          <CheckIcon v-if="property.id === session.tenantId.value" class="h-4 w-4 shrink-0 text-primary" />
+          <CheckIcon v-if="property.id === session.hotelId.value" class="h-4 w-4 shrink-0 text-primary" />
         </button>
         <p v-if="properties.length === 0" class="px-1 py-2 text-sm text-muted-foreground">No property assignments.</p>
       </CardContent>

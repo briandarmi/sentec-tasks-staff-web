@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { ChevronRightIcon, MapPinIcon } from '@lucide/vue'
 import type { TaskListItem } from '~/utils/clientFakeApi'
-import { fullName, initials, priorityMeta, relativeTime, slaAccent, taskRef } from '~/utils/task-ui'
+import { useSourceApps } from '~/composables/useSourceApps'
+import { initials, priorityMeta, relativeTime, slaAccent, taskRef } from '~/utils/task-ui'
 
 const props = defineProps<{
   task: TaskListItem
@@ -10,13 +11,24 @@ const props = defineProps<{
   mine?: boolean
 }>()
 
+const sourceApps = useSourceApps()
+onMounted(() => { void sourceApps.ensureLoaded() })
+
 const accent = computed(() => slaAccent(props.task))
-const assignee = computed(() => props.task.assignment?.user ?? null)
+const assigneeName = computed(() => {
+  const a = props.task.assignment
+  return a?.kind === 'STAFF' ? a.staffName ?? 'Team member' : null
+})
 /** A pool task is assigned but owned by nobody: the chip names the pool. */
 const poolLabel = computed(() => {
   const a = props.task.assignment
   if (!a || a.kind === 'STAFF') return null
-  return a.kind === 'TEAM' ? a.team?.name ?? 'Team pool' : a.department?.name ?? 'Department pool'
+  return a.kind === 'TEAM' ? a.teamName ?? 'Team pool' : a.departmentName ?? 'Department pool'
+})
+/** Where the task came from — resolved through the source-app registry. */
+const sourceBadge = computed(() => {
+  if (props.task.sourceProduct === 'sentec-tasks') return null
+  return sourceApps.badge(props.task.sourceProduct)
 })
 </script>
 
@@ -38,30 +50,30 @@ const poolLabel = computed(() => {
           {{ priorityMeta(task.priority).label }}
         </span>
       </div>
-      <span class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ relativeTime(task.createDate) }}</span>
+      <span class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ relativeTime(task.createdAt) }}</span>
     </div>
 
     <p class="mt-2 text-sm font-semibold leading-snug text-foreground">{{ task.title }}</p>
     <p v-if="task.description" class="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{{ task.description }}</p>
 
     <div class="mt-2.5 flex flex-wrap items-center gap-1.5">
-      <Badge v-if="task.location" variant="secondary" class="gap-1 text-[10px] font-medium">
+      <Badge v-if="task.roomNumber" variant="secondary" class="gap-1 text-[10px] font-medium">
         <MapPinIcon class="h-2.5 w-2.5" />
-        {{ task.location }}
+        {{ task.roomNumber }}
       </Badge>
       <Badge v-if="task.department" variant="outline" class="text-[10px]">{{ task.department.name }}</Badge>
       <Badge v-if="task.quantity && task.quantity > 1" variant="outline" class="text-[10px]">×{{ task.quantity }}</Badge>
-      <!-- Where the task came from. A partner name matters operationally:
-           a Butler task has a guest waiting on the other end of it. The dot is
-           the source app's registry colour — data, not a theme token. -->
-      <Badge v-if="task.partner" variant="outline" class="gap-1 text-[10px] text-muted-foreground">
+      <!-- The originating app matters operationally: a Butler task has a guest
+           waiting on the other end. The dot is the registry's colour — data,
+           not a theme token. -->
+      <Badge v-if="sourceBadge" variant="outline" class="gap-1 text-[10px] text-muted-foreground">
         <span
-          v-if="task.partner.badgeColor"
+          v-if="sourceBadge.color"
           class="h-1.5 w-1.5 rounded-full"
-          :style="{ backgroundColor: task.partner.badgeColor }"
+          :style="{ backgroundColor: sourceBadge.color }"
           aria-hidden="true"
         />
-        {{ task.partner.name }}
+        {{ sourceBadge.label }}
       </Badge>
     </div>
 
@@ -71,12 +83,12 @@ const poolLabel = computed(() => {
         <span class="truncate text-[11px] font-medium text-muted-foreground">{{ taskRef(task.id) }}</span>
       </div>
       <div class="flex items-center gap-1.5">
-        <Avatar v-if="assignee" class="h-6 w-6" :title="fullName(assignee)">
+        <Avatar v-if="assigneeName" class="h-6 w-6" :title="assigneeName">
           <AvatarFallback
             class="text-[10px] font-semibold"
             :class="mine ? 'bg-primary text-primary-foreground' : 'bg-primary/10 text-primary'"
           >
-            {{ initials(assignee) }}
+            {{ initials(assigneeName) }}
           </AvatarFallback>
         </Avatar>
         <span

@@ -4,7 +4,7 @@ import { UserRoundMinusIcon, UsersRoundIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import type { TaskDetail } from '~/utils/clientFakeApi'
-import { fullName } from '~/utils/task-ui'
+import { displayName } from '~/utils/task-ui'
 
 const props = defineProps<{
   task: TaskDetail
@@ -31,10 +31,10 @@ const errorMessage = ref('')
 const removingUserId = ref('')
 const isAdding = ref(false)
 
-const helpers = computed(() => props.task.collaborators)
+const helpers = computed(() => props.task.collaborators ?? [])
 const excluded = computed(() => [
-  ...helpers.value.map(h => h.userId),
-  ...(props.task.assignment?.userId ? [props.task.assignment.userId] : []),
+  ...helpers.value.map(h => h.staffId),
+  ...(props.task.assignment?.staffId ? [props.task.assignment.staffId] : []),
 ])
 
 function canLeave(userId: string) {
@@ -46,7 +46,7 @@ async function add() {
   isAdding.value = true
   errorMessage.value = ''
   try {
-    await api.addHelper(props.task.id, addUserId.value)
+    await api.addHelper({ taskId: props.task.id, staffId: addUserId.value })
     addUserId.value = ''
     emit('updated')
   }
@@ -63,7 +63,7 @@ async function remove(userId: string) {
   removingUserId.value = userId
   errorMessage.value = ''
   try {
-    await api.removeHelper(props.task.id, userId)
+    await api.removeHelper({ taskId: props.task.id, staffId: userId })
     emit('updated')
   }
   catch (e) {
@@ -94,24 +94,24 @@ async function remove(userId: string) {
       <p v-if="helpers.length === 0" class="py-1 text-xs text-muted-foreground">No helpers.</p>
       <div
         v-for="helper in helpers"
-        :key="helper.userId"
+        :key="helper.staffId"
         class="flex min-h-11 items-center justify-between gap-2 rounded-lg border bg-card px-3 py-2"
       >
-        <span class="min-w-0 truncate text-sm font-medium">{{ fullName(helper.user) || `User ${helper.userId}` }}</span>
+        <span class="min-w-0 truncate text-sm font-medium">{{ displayName(helper.staffName) }}</span>
         <Button
-          v-if="canManage || canLeave(helper.userId)"
+          v-if="canManage || canLeave(helper.staffId)"
           size="sm"
           variant="ghost"
           class="text-muted-foreground hover:text-destructive"
           :disabled="Boolean(removingUserId)"
-          :aria-busy="removingUserId === helper.userId"
-          :aria-label="`${canLeave(helper.userId) && !canManage ? 'Leave' : 'Remove'} ${fullName(helper.user) || helper.userId}`"
-          @click="remove(helper.userId)"
+          :aria-busy="removingUserId === helper.staffId"
+          :aria-label="`${canLeave(helper.staffId) && !canManage ? 'Leave' : 'Remove'} ${displayName(helper.staffName)}`"
+          @click="remove(helper.staffId)"
         >
           <UserRoundMinusIcon class="h-4 w-4" />
-          {{ removingUserId === helper.userId
-            ? (canLeave(helper.userId) && !canManage ? 'Leaving…' : 'Removing…')
-            : (canLeave(helper.userId) && !canManage ? 'Leave' : 'Remove') }}
+          {{ removingUserId === helper.staffId
+            ? (canLeave(helper.staffId) && !canManage ? 'Leaving…' : 'Removing…')
+            : (canLeave(helper.staffId) && !canManage ? 'Leave' : 'Remove') }}
         </Button>
       </div>
 

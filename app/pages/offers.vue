@@ -2,12 +2,12 @@
 import { onMounted, ref } from 'vue'
 import { ArrowLeftIcon, InboxIcon, RefreshCwIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
-import type { TaskOffer } from '~/utils/clientFakeApi'
-import { fullName, relativeTime } from '~/utils/task-ui'
+import type { InboxOffer } from '~/utils/clientFakeApi'
+import { displayName, relativeTime } from '~/utils/task-ui'
 
 definePageMeta({ title: 'Offers' })
 
-type OfferRow = TaskOffer & { fromUser: unknown, taskTitle: string }
+type OfferRow = InboxOffer
 
 const router = useRouter()
 const api = useTasksApi()
@@ -21,7 +21,7 @@ const acceptingId = ref('')
 const decliningId = ref('')
 
 function fromName(offer: OfferRow) {
-  return fullName(offer.fromUser as { firstName: string, lastName: string } | null) || `User ${offer.fromUserId}`
+  return displayName(offer.fromStaffName)
 }
 
 async function load() {
@@ -129,7 +129,7 @@ onMounted(load)
             <NuxtLink :to="`/tasks/${offer.taskId}`" class="min-w-0 text-sm font-semibold text-foreground underline-offset-2 active:text-primary">
               {{ offer.taskTitle }}
             </NuxtLink>
-            <span class="shrink-0 text-[11px] text-muted-foreground">{{ relativeTime(offer.createDate) }}</span>
+            <span class="shrink-0 text-[11px] text-muted-foreground">{{ relativeTime(offer.createdAt) }}</span>
           </div>
           <p class="text-xs text-muted-foreground">From {{ fromName(offer) }}</p>
           <p v-if="offer.note" class="rounded-lg bg-muted/60 px-3 py-2 text-sm text-foreground">“{{ offer.note }}”</p>

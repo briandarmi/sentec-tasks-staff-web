@@ -4,7 +4,7 @@ import { SendIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import type { TaskDetail } from '~/utils/clientFakeApi'
-import { fullName } from '~/utils/task-ui'
+import { displayName } from '~/utils/task-ui'
 
 const props = defineProps<{ task: TaskDetail }>()
 const emit = defineEmits<{ updated: [] }>()
@@ -19,7 +19,7 @@ const session = useSession()
  */
 const OFFER_ALLOWED = new Set(['NEW', 'IN_PROGRESS'])
 const isMine = computed(() =>
-  props.task.assignment?.kind === 'STAFF' && props.task.assignment.userId === session.userId.value,
+  props.task.assignment?.kind === 'STAFF' && props.task.assignment.staffId === session.userId.value,
 )
 const visible = computed(() => isMine.value && OFFER_ALLOWED.has(props.task.status))
 
@@ -38,7 +38,7 @@ async function send() {
   isSending.value = true
   errorMessage.value = ''
   try {
-    await api.sendOffer({ taskId: props.task.id, toUserId: toUserId.value, note: note.value.trim() || null })
+    await api.sendOffer({ taskId: props.task.id, toStaffId: toUserId.value, note: note.value.trim() || null })
     toUserId.value = ''
     note.value = ''
     emit('updated')
@@ -86,7 +86,7 @@ async function cancel() {
 
       <div v-if="pending" class="flex min-h-11 items-center justify-between gap-2 rounded-lg border bg-muted/40 px-3 py-2">
         <span class="min-w-0 truncate text-sm">
-          Offered to <span class="font-semibold">{{ fullName(pending.toUser) || pending.toUserId }}</span>
+          Offered to <span class="font-semibold">{{ displayName(pending.toStaffName) }}</span>
         </span>
         <Button
           size="sm"

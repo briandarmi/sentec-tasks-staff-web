@@ -38,8 +38,9 @@ const minPhotos = computed(() => props.task.proofRequirements.minProofPhotos)
 const needsNote = computed(() => props.task.proofRequirements.requiresCompletionNote)
 
 const photoCount = computed(() => {
-  const onTask = new Set(props.task.attachments.map(a => a.id))
-  const existing = props.task.attachments.filter(a => a.filetype === 'PHOTO' && !a.isRemoved).length
+  // The detail carries non-removed attachments only.
+  const onTask = new Set((props.task.attachments ?? []).map(a => a.id))
+  const existing = (props.task.attachments ?? []).filter(a => a.filetype === 'PHOTO').length
   const local = locallyAdded.value.filter(p => p.filetype === 'PHOTO' && !onTask.has(p.id)).length
   return existing + local
 })
@@ -62,12 +63,11 @@ async function onFilesPicked(event: Event) {
       if (!UPLOAD_MAX_BYTES[file.type]) {
         throw new Error(`contentType must be one of ${Object.keys(UPLOAD_MAX_BYTES).join(', ')}`)
       }
-      const presigned = await api.createUpload({ filename: file.name, contentType: file.type, sizeBytes: file.size })
-      const attached = await api.attachUpload({
+      const presigned = await api.presignUpload({ filename: file.name, contentType: file.type, sizeBytes: file.size })
+      const attached = await api.createAttachment({
         taskId: props.task.id,
         storageKey: presigned.storageKey,
         filetype: file.type === 'application/pdf' ? 'PDF' : 'PHOTO',
-        filename: file.name,
       })
       locallyAdded.value = [...locallyAdded.value, { id: attached.id, filetype: attached.filetype }]
     }

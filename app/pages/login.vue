@@ -9,15 +9,15 @@ definePageMeta({ layout: false })
 const route = useRoute()
 const session = useSession()
 
-const username = ref('')
+const email = ref('')
 const password = ref('')
 const isSubmitting = ref(false)
 const errorMessage = ref('')
 
 /**
  * The frontline roles this workspace is built for. Everyone else — property
- * admins, operators, a regional manager — can work a queue too, but is usually
- * signing in to look at one, so they sit below a divider rather than mixed in.
+ * admins, the operator, a regional manager — can look at a queue too, so they
+ * sit below a divider rather than mixed in.
  */
 const FRONTLINE_ROLES = ['staff', 'leader']
 
@@ -27,13 +27,13 @@ const demoGroups = ref<Array<{ key: string, logins: DemoLogin[] }>>([])
 onMounted(() => {
   const logins = demoLogins()
   demoGroups.value = [
-    { key: 'frontline', logins: logins.filter(d => FRONTLINE_ROLES.includes(d.role)) },
-    { key: 'management', logins: logins.filter(d => !FRONTLINE_ROLES.includes(d.role)) },
+    { key: 'frontline', logins: logins.filter(d => FRONTLINE_ROLES.includes(d.role) && !d.isOperator) },
+    { key: 'management', logins: logins.filter(d => !FRONTLINE_ROLES.includes(d.role) || d.isOperator) },
   ].filter(group => group.logins.length > 0)
 })
 
-function autofill(user: string, pass: string) {
-  username.value = user
+function autofill(demoEmail: string, pass: string) {
+  email.value = demoEmail
   password.value = pass
 }
 
@@ -42,7 +42,7 @@ async function submit() {
   errorMessage.value = ''
   isSubmitting.value = true
   try {
-    const result = await session.login({ username: username.value, password: password.value })
+    const result = await session.login({ email: email.value, password: password.value })
     if (!result.ok) {
       errorMessage.value = result.message
       return
@@ -69,15 +69,16 @@ async function submit() {
       <CardContent>
         <form class="space-y-5" @submit.prevent="submit">
           <div class="space-y-2">
-            <Label for="username">Username</Label>
+            <Label for="email">Email</Label>
             <Input
-              id="username"
-              v-model="username"
+              id="email"
+              v-model="email"
+              type="email"
               class="w-full"
               autocomplete="username"
               autocapitalize="none"
               spellcheck="false"
-              placeholder="Enter username"
+              placeholder="you@property.example"
             />
           </div>
 
@@ -114,15 +115,15 @@ async function submit() {
             <div class="grid grid-cols-2 gap-2">
               <Button
                 v-for="demo in group.logins"
-                :key="demo.username"
+                :key="demo.email"
                 type="button"
                 variant="outline"
                 size="sm"
                 class="justify-start text-xs"
-                @click="autofill(demo.username, demo.password)"
+                @click="autofill(demo.email, demo.password)"
               >
                 <WandSparklesIcon class="size-3" />
-                <span class="truncate capitalize">{{ demo.username }}</span>
+                <span class="truncate">{{ demo.name }}</span>
               </Button>
             </div>
           </template>

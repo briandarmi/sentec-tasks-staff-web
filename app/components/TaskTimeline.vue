@@ -1,34 +1,51 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { TaskStatus } from '~/utils/clientFakeApi'
-import { fullName, relativeTime, statusMeta } from '~/utils/task-ui'
+import type { TaskDetail, TaskStatus } from '~/utils/clientFakeApi'
+import { useSession } from '~/composables/useSession'
+import { displayName, relativeTime, statusMeta } from '~/utils/task-ui'
 
-interface Person { firstName: string, lastName: string }
+/**
+ * One chronological stream: history rows and comments interleaved.
+ *
+ * History rows carry only a staffId (never a name — the API resolves names on
+ * comments and collaborators, not history), so the actor label is derived from
+ * what the detail already knows: "You", the current assignee's name, a helper's
+ * name, or plain "Staff"; a nil staffId is a system/partner action.
+ */
+const props = defineProps<{ task: TaskDetail }>()
 
-const props = defineProps<{
-  history: Array<{ createDate: string, status: TaskStatus, description: string | null, user: Person | null }>
-  comments: Array<{ createDate: string, comment: string, user: Person | null }>
-}>()
+const session = useSession()
 
 type Entry =
-  | { kind: 'status', at: string, user: Person | null, status: TaskStatus, text: string | null }
-  | { kind: 'comment', at: string, user: Person | null, text: string }
+  | { kind: 'status', at: string, actor: string, status: TaskStatus, text: string | null }
+  | { kind: 'comment', at: string, actor: string, text: string }
 
-/** One chronological stream: transitions and comments interleaved. */
+function actorFor(staffId: string | null): string {
+  if (!staffId) return 'System'
+  if (staffId === session.userId.value) return 'You'
+  const assignment = props.task.assignment
+  if (assignment?.kind === 'STAFF' && assignment.staffId === staffId) return displayName(assignment.staffName)
+  const helper = props.task.collaborators?.find(c => c.staffId === staffId)
+  if (helper) return displayName(helper.staffName)
+  return 'Staff'
+}
+
 const entries = computed<Entry[]>(() => {
-  const status: Entry[] = props.history.map(e => ({
-    kind: 'status', at: e.createDate, user: e.user, status: e.status, text: e.description,
+  const status: Entry[] = (props.task.history ?? []).map(row => ({
+    kind: 'status',
+    at: row.createdAt,
+    actor: actorFor(row.staffId),
+    status: row.status as TaskStatus,
+    text: row.description,
   }))
-  const comments: Entry[] = props.comments.map(e => ({
-    kind: 'comment', at: e.createDate, user: e.user, text: e.comment,
+  const comments: Entry[] = (props.task.comments ?? []).map(row => ({
+    kind: 'comment',
+    at: row.createdAt,
+    actor: row.staffId === session.userId.value ? 'You' : displayName(row.staffName),
+    text: row.comment,
   }))
   return [...status, ...comments].sort((a, b) => a.at.localeCompare(b.at))
 })
-
-/** Unattributed rows are partner dispatches, not anonymous people. */
-function actor(user: Person | null) {
-  return user ? fullName(user) : 'System'
-}
 </script>
 
 <template>
@@ -43,10 +60,10 @@ function actor(user: Person | null) {
       <div class="flex items-baseline justify-between gap-2">
         <p class="text-xs font-semibold text-foreground">
           <template v-if="entry.kind === 'status'">
-            {{ actor(entry.user) }} moved to
+            {{ entry.actor }} moved to
             <span :class="statusMeta(entry.status).badge" class="ml-0.5 rounded-full px-1.5 py-0.5">{{ statusMeta(entry.status).label }}</span>
           </template>
-          <template v-else>{{ actor(entry.user) }}</template>
+          <template v-else>{{ entry.actor }}</template>
         </p>
         <span class="shrink-0 text-[11px] text-muted-foreground">{{ relativeTime(entry.at) }}</span>
       </div>

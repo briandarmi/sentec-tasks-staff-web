@@ -7,8 +7,8 @@ defineProps<{ title: string }>()
 
 const session = useSession()
 
-const activeProperty = computed(() => session.activeTenant.value)
-const canSwitch = computed(() => session.tenants.value.length > 1)
+const activeProperty = computed(() => session.activeHotel.value)
+const canSwitch = computed(() => session.hotels.value.length > 1)
 const switcherOpen = ref(false)
 </script>
 

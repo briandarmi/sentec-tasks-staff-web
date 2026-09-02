@@ -1,110 +1,119 @@
 import { computed } from 'vue'
-import type { SessionUser, TenantRole } from '~/utils/clientFakeApi'
+import type { Envelope, Staff } from '~/utils/clientFakeApi'
 
 /**
- * Signed-in state for the Sentec Tasks web app.
+ * Signed-in state against the real Sentec Tasks API contract.
  *
- * Auth model: the real API issues an httpOnly cookie session with CSRF
- * protection and a CORS allow-list — deliberately NOT a bearer token in
- * localStorage, which any script on the page can read. This composable keeps
- * the same discipline against the mock: no user id, role or permission is ever
- * persisted, and nothing the UI stores can be replayed as a credential beyond
- * the shift window.
+ * Auth model: POST /v1/auth/staff/login?delivery=cookie sets the httpOnly
+ * `st_session` cookie and returns {csrfToken, staff}; every mutation must echo
+ * the CSRF token as X-CSRF-Token; GET /v1/auth/session recovers the token
+ * after a refresh. A browser-side mock cannot mint an httpOnly cookie, so the
+ * session id is held here and replayed as a `Cookie: st_session=…` header —
+ * the shape is the contract's, the protection is necessarily the server's.
  *
- * The one thing held across a page refresh is the opaque resume token, in
- * `sessionStorage` rather than `localStorage` so it dies with the browser tab.
- * That matters on shared shift devices, which is the same reason logout below
- * clears every cached row rather than only the identity.
+ * The session id is the ONE thing persisted across a refresh, in
+ * `sessionStorage` so it dies with the tab — the same 12-hour shift-device
+ * discipline the real cookie has (Max-Age=43200).
  */
 
-const RESUME_KEY = 'sentec-tasks-resume'
+const SESSION_KEY = 'sentec-tasks-session'
 
-export interface ReachableTenant {
+export interface ReachableHotel {
   id: string
   name: string
-  role: TenantRole | null
-  /** True when reach comes from a group grant rather than direct membership. */
-  viaGroupGrant: boolean
 }
 
 export function useSession() {
   const sessionId = useState<string | null>('sessionId', () => null)
   const csrfToken = useState<string | null>('csrfToken', () => null)
-  const user = useState<SessionUser | null>('sessionUser', () => null)
-  const tenantId = useState<string | null>('activeTenantId', () => null)
-  /** True while the initial resume attempt is in flight, to avoid a login flash. */
+  const staff = useState<Staff | null>('sessionStaff', () => null)
+  const hotelId = useState<string | null>('activeHotelId', () => null)
+  /** True while the initial recovery attempt is in flight, to avoid a login flash. */
   const isRestoring = useState<boolean>('sessionRestoring', () => true)
 
-  const isAuthenticated = computed(() => Boolean(sessionId.value && user.value))
-  const isOperator = computed(() => Boolean(user.value?.isOperator))
-  const tenants = computed<ReachableTenant[]>(() => user.value?.tenants ?? [])
-  const activeTenant = computed(() => tenants.value.find(t => t.id === tenantId.value) ?? null)
-  const displayName = computed(() => user.value?.displayName ?? '')
-  const email = computed(() => user.value?.email ?? '')
-  const userId = computed(() => user.value?.userId ?? null)
+  const isAuthenticated = computed(() => Boolean(sessionId.value && staff.value))
+  const isOperator = computed(() => Boolean(staff.value?.isOperator))
+  const displayName = computed(() => staff.value?.name ?? '')
+  const email = computed(() => staff.value?.email ?? '')
+  const userId = computed(() => staff.value?.id ?? null)
+  /** Account-wide role — the real API has one role per account, not per hotel. */
+  const role = computed(() => staff.value?.role ?? null)
+  const createTask = computed(() => Boolean(staff.value?.createTask))
 
-  /** Role at the active property. Operators act as admin everywhere. */
-  const role = computed<TenantRole | 'operator' | null>(() => {
-    if (!user.value) return null
-    if (user.value.isOperator) return 'operator'
-    return activeTenant.value?.role ?? null
-  })
+  const hotels = computed<ReachableHotel[]>(() => (staff.value?.hotels ?? []).map(id => ({ id, name: hotelNames.value[id] ?? id })))
+  const activeHotel = computed(() => hotels.value.find(h => h.id === hotelId.value) ?? null)
 
-  function readResumeToken() {
+  /** Hotel display names, resolved lazily from the mock's demo helper. */
+  const hotelNames = useState<Record<string, string>>('hotelNames', () => ({}))
+
+  async function resolveHotelNames(ids: string[]) {
+    const { demoHotelName } = await import('~/utils/clientFakeApi')
+    const next = { ...hotelNames.value }
+    for (const id of ids) next[id] = demoHotelName(id)
+    hotelNames.value = next
+  }
+
+  function readStoredSession() {
     if (!import.meta.client) return null
     try {
-      return sessionStorage.getItem(RESUME_KEY)
+      return sessionStorage.getItem(SESSION_KEY)
     }
     catch {
-      // Private mode or blocked storage: sign-in still works, it just will not
-      // survive a refresh.
       return null
     }
   }
 
-  function writeResumeToken(token: string | null) {
+  function writeStoredSession(id: string | null) {
     if (!import.meta.client) return
     try {
-      if (token) sessionStorage.setItem(RESUME_KEY, token)
-      else sessionStorage.removeItem(RESUME_KEY)
+      if (id) sessionStorage.setItem(SESSION_KEY, id)
+      else sessionStorage.removeItem(SESSION_KEY)
     }
-    catch { /* storage unavailable — nothing to do */ }
+    catch { /* storage unavailable — sign-in just will not survive a refresh */ }
   }
 
-  function adopt(payload: { sessionId: string, csrfToken: string, resumeToken: string, user: SessionUser }) {
+  function adopt(payload: { sessionId: string, csrfToken: string, staff: Staff }) {
     sessionId.value = payload.sessionId
     csrfToken.value = payload.csrfToken
-    user.value = payload.user
-    writeResumeToken(payload.resumeToken)
-
-    // Pick a property so the first screen has data. A single-property user never
-    // sees a chooser at all.
-    const stillValid = payload.user.tenants.some(t => t.id === tenantId.value)
-    if (!stillValid) tenantId.value = payload.user.tenants[0]?.id ?? null
+    staff.value = payload.staff
+    writeStoredSession(payload.sessionId)
+    void resolveHotelNames(payload.staff.hotels)
+    const stillValid = payload.staff.hotels.includes(hotelId.value ?? '')
+    if (!stillValid) hotelId.value = payload.staff.hotels[0] ?? null
   }
 
-  async function request<T>(path: string, opts: { method?: string, body?: unknown, query?: Record<string, unknown>, tenantId?: string } = {}): Promise<T> {
+  /**
+   * One request against the API. Injects the session cookie, the CSRF echo and
+   * the X-Hotel-Id scope; returns the response envelope's body. Swapping the
+   * mock for the real API means replacing the import below with $fetch — the
+   * headers and paths are already the real contract.
+   */
+  async function request<T = unknown>(path: string, opts: { method?: string, body?: unknown, query?: Record<string, unknown>, hotelId?: string | null } = {}): Promise<Envelope<T>> {
     const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
-    return handleFakeApiRequest(path, {
+    const scope = opts.hotelId === undefined ? hotelId.value : opts.hotelId
+    const res = handleFakeApiRequest(path, {
       method: opts.method,
-      body: opts.body,
-      query: opts.query,
+      body: opts.body as Record<string, unknown> | undefined,
+      query: opts.query as Record<string, string> | undefined,
       headers: {
-        ...(sessionId.value ? { 'x-session-id': sessionId.value } : {}),
+        ...(sessionId.value ? { cookie: `st_session=${sessionId.value}` } : {}),
         ...(csrfToken.value ? { 'x-csrf-token': csrfToken.value } : {}),
-        ...(opts.tenantId ?? tenantId.value ? { 'x-tenant-id': String(opts.tenantId ?? tenantId.value) } : {}),
+        ...(scope ? { 'x-hotel-id': scope } : {}),
       },
-    }) as T
+    })
+    return (res.body ?? { version: 'v1', data: null }) as Envelope<T>
   }
 
-  async function login(credentials: { username: string, password: string }) {
+  async function login(credentials: { email: string, password: string }) {
     const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
     try {
-      const res = handleFakeApiRequest('/v1/auth/login', {
+      const res = handleFakeApiRequest('/v1/auth/staff/login', {
         method: 'POST',
-        body: { username: credentials.username.trim(), password: credentials.password },
-      }) as { data: { sessionId: string, csrfToken: string, resumeToken: string, user: SessionUser } }
-      adopt(res.data)
+        query: { delivery: 'cookie' },
+        body: { email: credentials.email.trim(), password: credentials.password },
+      })
+      const data = res.body?.data as { csrfToken: string, staff: Staff, _sessionCookie: string }
+      adopt({ sessionId: data._sessionCookie, csrfToken: data.csrfToken, staff: data.staff })
       return { ok: true as const }
     }
     catch (e) {
@@ -112,22 +121,22 @@ export function useSession() {
     }
   }
 
-  /** Re-establish a session on boot. Silent: a dead token just means signed out. */
+  /** CSRF recovery on boot: the cookie survives a refresh, the token does not. */
   async function restore() {
-    const token = readResumeToken()
-    if (!token) {
+    const stored = readStoredSession()
+    if (!stored) {
       isRestoring.value = false
       return false
     }
     const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
     try {
-      const res = handleFakeApiRequest('/v1/auth/resume', { method: 'POST', body: { token } }) as
-        { data: { sessionId: string, csrfToken: string, resumeToken: string, user: SessionUser } }
-      adopt(res.data)
+      const res = handleFakeApiRequest('/v1/auth/session', { headers: { cookie: `st_session=${stored}` } })
+      const data = res.body?.data as { csrfToken: string, staff: Staff }
+      adopt({ sessionId: stored, csrfToken: data.csrfToken, staff: data.staff })
       return true
     }
     catch {
-      writeResumeToken(null)
+      writeStoredSession(null)
       return false
     }
     finally {
@@ -136,13 +145,8 @@ export function useSession() {
   }
 
   /**
-   * Sign out and forget everything.
-   *
-   * Finding 3: previously the next person on a shared device saw the last
-   * user's tasks until their own data loaded. So this clears the identity, the
-   * resume token AND every cached payload — including the selected property,
-   * which is why signing back in asks for the property again. That is correct
-   * for a shared device even though it costs the single-property user a tap.
+   * Sign out and forget everything — identity, session, every cached payload,
+   * and the selected property. Correct for a shared shift device.
    */
   async function logout() {
     try {
@@ -152,26 +156,27 @@ export function useSession() {
 
     sessionId.value = null
     csrfToken.value = null
-    user.value = null
-    tenantId.value = null
-    writeResumeToken(null)
+    staff.value = null
+    hotelId.value = null
+    writeStoredSession(null)
     clearNuxtState()
   }
 
-  function setTenantId(next: string) {
-    if (tenants.value.some(t => t.id === next)) tenantId.value = next
+  function setHotelId(next: string) {
+    if (staff.value?.hotels.includes(next)) hotelId.value = next
   }
 
   return {
     sessionId,
-    user,
+    staff,
     userId,
     displayName,
     email,
-    tenantId,
-    tenants,
-    activeTenant,
     role,
+    createTask,
+    hotelId,
+    hotels,
+    activeHotel,
     isOperator,
     isAuthenticated,
     isRestoring,
@@ -179,16 +184,13 @@ export function useSession() {
     logout,
     restore,
     request,
-    setTenantId,
+    setHotelId,
   }
 }
 
 /**
- * Drop every cached API payload held in Nuxt state.
- *
- * `useState` keys are shared app-wide, so leaving them populated after a logout
- * is exactly the leak finding 3 describes. Keys are listed explicitly rather
- * than wildcarded so adding a new cache is a deliberate act.
+ * Drop every cached API payload held in Nuxt state. Keys are listed explicitly
+ * rather than wildcarded so adding a new cache is a deliberate act.
  */
 function clearNuxtState() {
   const keys = [
@@ -201,6 +203,7 @@ function clearNuxtState() {
     'cachedStaff',
     'cachedRoutingRules',
     'cachedSummary',
+    'hotelNames',
   ]
   for (const key of keys) {
     const state = useState<unknown>(key, () => null)

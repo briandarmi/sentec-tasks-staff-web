@@ -1,10 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useTasksApi, type StaffMember } from '~/composables/useTasksApi'
+import { useTasksApi } from '~/composables/useTasksApi'
+import { useSession } from '~/composables/useSession'
 
+interface Option { id: string, label: string, detail: string | null }
+
+/**
+ * A person picker over GET /v1/staff/assignable — which is leader/admin-only.
+ * A plain staff member (delegating, or adding a helper) gets the real 403, so
+ * this control degrades honestly: it falls back to the caller's own teams'
+ * member lists (/v1/teams + /v1/teams/{id}/members are open to any actor),
+ * which carry ids but no names — the API exposes no staff directory to staff.
+ */
 const props = defineProps<{
   modelValue: string
-  /** User ids that must not be offered (the assignee, existing helpers, yourself…). */
+  /** Staff ids that must not be offered (the assignee, existing helpers, yourself…). */
   exclude?: string[]
   placeholder?: string
   ariaLabel?: string
@@ -13,27 +23,39 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:modelValue': [string] }>()
 
 const api = useTasksApi()
-const members = ref<StaffMember[]>([])
+const session = useSession()
+const options = ref<Option[]>([])
 const isLoading = ref(false)
 const errorMessage = ref('')
+/** True when the list is id-only team members rather than the named directory. */
+const teamFallback = ref(false)
 
-const options = computed(() => {
+const offered = computed(() => {
   const excluded = new Set(props.exclude ?? [])
-  return members.value.filter(member => !excluded.has(member.userId))
+  return options.value.filter(option => !excluded.has(option.id))
 })
 
-/**
- * A transient load failure must not leave the control with nothing to choose
- * and no way back — the sibling pickers all offer a Retry, so this one does.
- */
 async function load() {
   isLoading.value = true
   errorMessage.value = ''
+  teamFallback.value = false
   try {
-    members.value = await api.listStaff()
+    const rows = await api.listAssignableStaff()
+    options.value = rows.map(row => ({ id: row.id, label: row.name, detail: row.role }))
   }
-  catch (e) {
-    errorMessage.value = (e as Error).message
+  catch {
+    // The named directory is leader-only; fall back to the caller's teams.
+    try {
+      const teams = await api.listTeams()
+      const memberLists = await Promise.all(teams.map(team => api.listTeamMembers(team.id).catch(() => [] as string[])))
+      const ids = new Set(memberLists.flat())
+      ids.delete(session.userId.value ?? '')
+      options.value = [...ids].map(id => ({ id, label: `Team member ${id.slice(0, 8).toUpperCase()}`, detail: null }))
+      teamFallback.value = true
+    }
+    catch (e) {
+      errorMessage.value = (e as Error).message
+    }
   }
   finally {
     isLoading.value = false
@@ -52,20 +74,24 @@ onMounted(load)
         <Button size="sm" variant="outline" @click="load">Retry</Button>
       </AlertDescription>
     </Alert>
-    <Select
-      v-else
-      :model-value="modelValue"
-      @update:model-value="value => emit('update:modelValue', String(value ?? ''))"
-    >
-      <SelectTrigger class="w-full" :aria-label="ariaLabel">
-        <SelectValue :placeholder="isLoading ? 'Loading…' : placeholder ?? 'Choose a person'" />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem v-for="member in options" :key="member.userId" :value="member.userId">
-          {{ member.firstName }} {{ member.lastName }}
-          <span class="text-muted-foreground"> · {{ member.position || member.role }}</span>
-        </SelectItem>
-      </SelectContent>
-    </Select>
+    <template v-else>
+      <Select
+        :model-value="modelValue"
+        @update:model-value="value => emit('update:modelValue', String(value ?? ''))"
+      >
+        <SelectTrigger class="w-full" :aria-label="ariaLabel">
+          <SelectValue :placeholder="isLoading ? 'Loading…' : placeholder ?? 'Choose a person'" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem v-for="option in offered" :key="option.id" :value="option.id">
+            {{ option.label }}
+            <span v-if="option.detail" class="text-muted-foreground"> · {{ option.detail }}</span>
+          </SelectItem>
+        </SelectContent>
+      </Select>
+      <p v-if="teamFallback" class="text-xs text-muted-foreground">
+        Names are visible to leaders only — these are your teammates, listed by id.
+      </p>
+    </template>
   </div>
 </template>

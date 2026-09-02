@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CheckIcon, SearchIcon } from '@lucide/vue'
-import { useTasksApi, type StaffMember } from '~/composables/useTasksApi'
+import { SearchIcon } from '@lucide/vue'
+import { useTasksApi } from '~/composables/useTasksApi'
+import type { AssignableStaff } from '~/utils/clientFakeApi'
 import { initials } from '~/utils/task-ui'
 
 const props = defineProps<{
@@ -15,20 +16,19 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:open': [boolean]
-  'assign': [{ userId: string, remark: string | null }]
+  'assign': [{ staffId: string, remark: string | null }]
 }>()
 
 const api = useTasksApi()
 
 /**
- * Scope defaults to the task's department.
- *
- * The previous picker listed every person at the property, which is a long
- * scroll on a phone. Cross-department assignment is real but occasional (a duty
- * manager covering), so it lives behind the toggle rather than in the default.
+ * Scope defaults to the task's department — GET /v1/staff/assignable's own
+ * departmentId narrowing, which the API recommends defaulting to the TASK's
+ * department (assign reconciles to it regardless of who assigns).
+ * Cross-department cover is real but occasional, so it lives behind the toggle.
  */
 const showAll = ref(false)
-const members = ref<StaffMember[]>([])
+const members = ref<AssignableStaff[]>([])
 const isLoading = ref(false)
 const errorMessage = ref('')
 const search = ref('')
@@ -38,20 +38,16 @@ const canScope = computed(() => Boolean(props.departmentId))
 
 const filtered = computed(() => {
   const query = search.value.trim().toLowerCase()
-  const rows = members.value.filter(m => m.userId !== props.currentAssigneeId)
+  const rows = members.value.filter(m => m.id !== props.currentAssigneeId)
   if (!query) return rows
-  return rows.filter(m =>
-    `${m.firstName} ${m.lastName}`.toLowerCase().includes(query)
-    || (m.position ?? '').toLowerCase().includes(query)
-    || (m.department?.name ?? '').toLowerCase().includes(query),
-  )
+  return rows.filter(m => m.name.toLowerCase().includes(query) || m.role.toLowerCase().includes(query))
 })
 
 async function load() {
   isLoading.value = true
   errorMessage.value = ''
   try {
-    members.value = await api.listStaff(showAll.value || !props.departmentId ? null : props.departmentId)
+    members.value = await api.listAssignableStaff(showAll.value || !props.departmentId ? null : props.departmentId)
   }
   catch (e) {
     errorMessage.value = (e as Error).message
@@ -73,9 +69,9 @@ watch(showAll, () => {
   if (props.open) load()
 })
 
-function choose(member: StaffMember) {
+function choose(member: AssignableStaff) {
   if (props.busy) return
-  emit('assign', { userId: member.userId, remark: remark.value.trim() || null })
+  emit('assign', { staffId: member.id, remark: remark.value.trim() || null })
 }
 </script>
 
@@ -119,26 +115,21 @@ function choose(member: StaffMember) {
         <div v-else class="max-h-[46vh] space-y-1.5 overflow-y-auto">
           <button
             v-for="member in filtered"
-            :key="member.userId"
+            :key="member.id"
             type="button"
             :disabled="busy"
-            class="flex min-h-11 w-full items-center gap-3 rounded-lg border bg-card px-3 py-2.5 text-left transition-colors disabled:opacity-60 enabled:active:bg-accent"
+            class="flex min-h-11 w-full items-center gap-3 rounded-lg border bg-card px-3 py-2.5 text-left transition-colors disabled:opacity-60 enabled:active:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             @click="choose(member)"
           >
             <Avatar class="h-9 w-9 shrink-0">
               <AvatarFallback class="bg-primary/10 text-xs font-semibold text-primary">
-                {{ initials(member) }}
+                {{ initials(member.name) }}
               </AvatarFallback>
             </Avatar>
             <span class="min-w-0 flex-1">
-              <span class="block truncate text-sm font-medium">{{ member.firstName }} {{ member.lastName }}</span>
-              <span class="block truncate text-xs text-muted-foreground">
-                {{ member.position || member.role }}<template v-if="member.department"> · {{ member.department.name }}</template>
-              </span>
+              <span class="block truncate text-sm font-medium">{{ member.name }}</span>
+              <span class="block truncate text-xs capitalize text-muted-foreground">{{ member.role }}</span>
             </span>
-            <!-- Current workload: assigning to whoever is already carrying six
-                 open tasks is the mistake this number exists to prevent. -->
-            <Badge variant="secondary" class="shrink-0 tabular-nums text-[10px]">{{ member.openTaskCount }} open</Badge>
           </button>
         </div>
       </div>

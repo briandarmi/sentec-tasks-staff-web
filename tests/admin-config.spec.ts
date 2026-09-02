@@ -1,372 +1,331 @@
 import { describe, expect, it } from 'vitest'
-import { ApiError, handleFakeApiRequest as call } from '~/utils/clientFakeApi'
+import { ApiError, IDS, WARN_NO_NEW_COLUMN, handleFakeApiRequest as call } from '~/utils/clientFakeApi'
 
-// Behavioural contract for the configuration surface ported from the
-// sentec-tasks-admin repo (github.com/SentinelTech-com/sentec-tasks-admin).
-// Each suite pins one of that repo's findings against this mock, so the local
-// console can't quietly regress a rule the real console already learned the
-// hard way: the full-replace duration wipe, closed weekdays saved as open,
-// double-added team members, admin granted in the same breath as creation.
+// The configuration + platform surface of sentec-tasks-api, pinned against
+// the mock: kanban PATCH semantics, the config upserts and their exact
+// validation strings, the master-department enable model, staff lifecycle,
+// and the operator-only platform routes.
+//
+// Suites share one mock instance and run in order; each notes what it leaves
+// behind.
 
-type Session = { sessionId: string, csrfToken: string, user: any }
+interface Session { cookie: string, csrf: string, staff: { id: string } }
 
-function login(username: string, password: string): Session {
-  return call('/v1/auth/login', { method: 'POST', body: { username, password } }).data as Session
+function login(email: string, password: string): Session {
+  const res = call('/v1/auth/staff/login', { method: 'POST', query: { delivery: 'cookie' }, body: { email, password } })
+  const data = res.body!.data as { csrfToken: string, staff: { id: string }, _sessionCookie: string }
+  return { cookie: `st_session=${data._sessionCookie}`, csrf: data.csrfToken, staff: data.staff }
 }
 
-function h(session: Session, tenantId?: string) {
-  return { 'x-session-id': session.sessionId, ...(tenantId ? { 'x-tenant-id': tenantId } : {}) }
+function h(session: Session, hotelId?: string) {
+  return { 'cookie': session.cookie, 'x-csrf-token': session.csrf, ...(hotelId ? { 'x-hotel-id': hotelId } : {}) }
 }
 
-function errCode(fn: () => unknown): string {
+function errOf(fn: () => unknown): { code: string, message: string } {
   try {
     fn()
-    return 'NO_ERROR'
+    return { code: 'NO_ERROR', message: '' }
   }
   catch (e) {
-    return e instanceof ApiError ? e.code : `UNEXPECTED:${String(e)}`
+    const err = e as ApiError
+    return { code: err.code, message: err.message }
   }
 }
 
-describe('catalog categories are per property', () => {
-  it('lists only the active property\'s categories', () => {
-    const admin = login('admin', 'admin123')
-    const rows = call('/v1/catalog/categories', { headers: h(admin, '1') }).data
-    expect(rows.length).toBeGreaterThan(0)
-    expect(rows.every((c: any) => c.tenantId === '1')).toBe(true)
+const H = IDS.hotel.simatupang
+const data = <T = any>(res: { body: { data: unknown } | null }): T => res!.body!.data as T
+const admin = () => login('admin@aston.example', 'admin123')
+const operator = () => login('operator@sentineltech.example', 'operator123')
+
+describe('kanban board editing (PATCH /v1/kanban-board)', () => {
+  // Leaves behind: an extra "Blocked" column at Simatupang.
+
+  it('validates entries all-or-nothing with the exact messages', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ name: 'X' }] } })).message)
+      .toBe('columnSort is required')
+    expect(errOf(() => call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ name: 'X', columnSort: 0 }] } })).message)
+      .toBe('columnSort must be a positive integer')
+    expect(errOf(() => call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ name: 'X', columnSort: 1, status: 'DONE' }] } })).message)
+      .toBe('status must be one of NEW, IN_PROGRESS, SUBMITTED, FINISHED, VERIFIED, PENDING, CANCELLED')
+    expect(errOf(() => call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ isRemoved: true, name: 'X', columnSort: 1 }] } })).message)
+      .toBe('cannot set isRemoved on a new column')
   })
 
-  it('refuses an item pointing at another property\'s category', () => {
-    const admin = login('admin', 'admin123')
-    // Category 5 belongs to tenant 2.
-    expect(errCode(() => call('/v1/catalog/items/upsert', {
-      method: 'POST',
-      body: { categoryId: '5', name: 'X', quantityEnabled: false, defaultPriority: 'NORMAL', requiresLocation: false, defaultChecklist: [], defaultDurationMinutes: null, minProofPhotos: 0, requiresCompletionNote: false },
-      headers: h(admin, '1'),
-    }))).toBe('BAD_REQUEST')
+  it('keeps a column\'s status immutable and skips removals with active tasks', () => {
+    const a = admin()
+    const board = data<{ columns: Array<{ id: string, status: string | null, name: string }> }>(call('/v1/kanban-board', { headers: h(a, H) }))
+    const inProgress = board.columns.find(c => c.status === 'IN_PROGRESS')!
+    expect(errOf(() => call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ id: inProgress.id, status: 'PENDING' }] } })).message)
+      .toBe('column status cannot be changed after creation')
+    // In Progress holds active work: the removal is SKIPPED with a warning.
+    const removal = call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ id: inProgress.id, isRemoved: true }] } })
+    const warnings = (removal.body!.meta as { warnings: string[] }).warnings
+    expect(warnings.some(w => w.includes('still has an active task'))).toBe(true)
+    const after = data<{ columns: Array<{ id: string }> }>(call('/v1/kanban-board', { headers: h(a, H) }))
+    expect(after.columns.some(c => c.id === inProgress.id)).toBe(true)
   })
 
-  it('creates and edits a category, admin-only', () => {
-    const admin = login('admin', 'admin123')
-    const leader = login('leader', 'leader123')
-    const created = call('/v1/catalog/categories/upsert', { method: 'POST', body: { name: 'Wellness', code: 'wel', sort: 6 }, headers: h(admin, '1') }).data
-    expect(created.code).toBe('WEL')
-    expect(created.tenantId).toBe('1')
-    expect(errCode(() => call('/v1/catalog/categories/upsert', { method: 'POST', body: { name: 'Nope', code: 'NO', sort: 1 }, headers: h(leader, '1') })))
-      .toBe('FORBIDDEN')
-  })
-})
-
-describe('catalog item upsert is a full replace', () => {
-  const itemBody = (overrides: Record<string, unknown>) => ({
-    id: '2',
-    categoryId: '1',
-    name: 'Room cleaning',
-    quantityEnabled: false,
-    defaultPriority: 'NORMAL',
-    requiresLocation: true,
-    defaultChecklist: ['Strip and remake the beds'],
-    minProofPhotos: 2,
-    requiresCompletionNote: true,
-    ...overrides,
-  })
-
-  it('preserves defaultDurationMinutes only when the caller echoes it back', () => {
-    const admin = login('admin', 'admin123')
-    // Seeded at 45. Echoed back → kept.
-    const kept = call('/v1/catalog/items/upsert', { method: 'POST', body: itemBody({ defaultDurationMinutes: 45 }), headers: h(admin, '1') }).data
-    expect(kept.defaultDurationMinutes).toBe(45)
-    // Omitted → cleared. This is the wipe the admin screen must round-trip
-    // against; the screen carries the value with no control bound to it.
-    const wiped = call('/v1/catalog/items/upsert', { method: 'POST', body: itemBody({}), headers: h(admin, '1') }).data
-    expect(wiped.defaultDurationMinutes).toBeNull()
-    // Restore the seed for anything reading it later in this file.
-    call('/v1/catalog/items/upsert', { method: 'POST', body: itemBody({ defaultDurationMinutes: 45 }), headers: h(admin, '1') })
-  })
-
-  it('drops blank checklist steps rather than seeding empty ones', () => {
-    const admin = login('admin', 'admin123')
-    const saved = call('/v1/catalog/items/upsert', {
-      method: 'POST',
-      body: itemBody({ defaultDurationMinutes: 45, defaultChecklist: ['  Vacuum  ', '', '   ', 'Restock'] }),
-      headers: h(admin, '1'),
-    }).data
-    expect(saved.defaultChecklist).toEqual(['Vacuum', 'Restock'])
-  })
-
-  it('enforces the proof-photo gate as a whole number between 0 and 10', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/catalog/items/upsert', { method: 'POST', body: itemBody({ defaultDurationMinutes: 45, minProofPhotos: 11 }), headers: h(admin, '1') })))
-      .toBe('BAD_REQUEST')
-    expect(errCode(() => call('/v1/catalog/items/upsert', { method: 'POST', body: itemBody({ defaultDurationMinutes: 45, minProofPhotos: 1.5 }), headers: h(admin, '1') })))
-      .toBe('BAD_REQUEST')
-  })
-
-  it('lets an item keep its deactivated category, but not move onto one', () => {
-    const admin = login('admin', 'admin123')
-    // Category 10 (Seasonal) is deactivated. Moving item 2 onto it: refused.
-    expect(errCode(() => call('/v1/catalog/items/upsert', { method: 'POST', body: itemBody({ defaultDurationMinutes: 45, categoryId: '10' }), headers: h(admin, '1') })))
-      .toBe('BAD_REQUEST')
-    // An item already on it keeps it: create while active is impossible here,
-    // so simulate by deactivating after the fact and re-saving unchanged.
-    const created = call('/v1/catalog/items/upsert', {
-      method: 'POST',
-      body: { categoryId: '4', name: 'Fruit basket', quantityEnabled: false, defaultPriority: 'LOW', requiresLocation: false, defaultChecklist: [], defaultDurationMinutes: null, minProofPhotos: 0, requiresCompletionNote: false },
-      headers: h(admin, '1'),
-    }).data
-    call('/v1/catalog/categories/upsert', { method: 'POST', body: { id: '4', name: 'Food & Beverage', code: 'FNB', icon: '🍽️', sort: 4, isActive: false }, headers: h(admin, '1') })
-    const resaved = call('/v1/catalog/items/upsert', {
-      method: 'POST',
-      body: { id: created.id, categoryId: '4', name: 'Fruit basket', quantityEnabled: false, defaultPriority: 'LOW', requiresLocation: false, defaultChecklist: [], defaultDurationMinutes: null, minProofPhotos: 0, requiresCompletionNote: false },
-      headers: h(admin, '1'),
-    }).data
-    expect(resaved.categoryId).toBe('4')
-    // Reactivate so later suites see the seed shape.
-    call('/v1/catalog/categories/upsert', { method: 'POST', body: { id: '4', name: 'Food & Beverage', code: 'FNB', icon: '🍽️', sort: 4, isActive: true }, headers: h(admin, '1') })
+  it('creates columns, treats description as three-state, warns about a missing NEW column', () => {
+    const a = admin()
+    const created = call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ name: 'Blocked', columnSort: 9, status: 'PENDING', description: 'Waiting on parts' }] } })
+    expect((created.body!.meta as { warnings: string[] }).warnings).toEqual([])
+    const board = data<{ columns: Array<{ id: string, name: string, description: string | null, status: string | null }> }>(created)
+    const blocked = board.columns.find(c => c.name === 'Blocked')!
+    expect(blocked.description).toBe('Waiting on parts')
+    // Key present with null clears; key absent leaves unchanged.
+    call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ id: blocked.id, description: null }] } })
+    let reread = data<{ columns: Array<{ id: string, description: string | null }> }>(call('/v1/kanban-board', { headers: h(a, H) }))
+    expect(reread.columns.find(c => c.id === blocked.id)!.description).toBeNull()
+    call('/v1/kanban-board', { method: 'PATCH', headers: h(a, H), body: { columns: [{ id: blocked.id, name: 'Blocked!' }] } })
+    reread = data(call('/v1/kanban-board', { headers: h(a, H) }))
+    expect(reread.columns.find(c => c.id === blocked.id)!.description).toBeNull()
+    // Removing the NEW column on an EMPTY tenant triggers the orphan warning
+    // (anywhere with a task in New, the removal itself would be skipped instead).
+    const service = { 'authorization': 'Bearer service:test', 'x-hotel-id': '88888888-0000-4000-8000-000000000001' }
+    call('/v1/tenants', { method: 'POST', headers: { authorization: 'Bearer service:test' }, body: { hotelRef: '88888888-0000-4000-8000-000000000001', name: 'Alana Surabaya' } })
+    const emptyBoard = data<{ columns: Array<{ id: string, status: string | null }> }>(call('/v1/kanban-board', { headers: service }))
+    const newColumn = emptyBoard.columns.find(c => c.status === 'NEW')!
+    const warned = call('/v1/kanban-board', { method: 'PATCH', headers: service, body: { columns: [{ id: newColumn.id, isRemoved: true }] } })
+    expect((warned.body!.meta as { warnings: string[] }).warnings).toContain(WARN_NO_NEW_COLUMN)
   })
 })
 
-describe('locations', () => {
-  it('scopes types and locations to the property', () => {
-    const admin = login('admin', 'admin123')
-    expect(call('/v1/location-types', { headers: h(admin, '1') }).data.every((t: any) => t.tenantId === '1')).toBe(true)
-    expect(call('/v1/locations', { headers: h(admin, '1') }).data.every((l: any) => l.tenantId === '1')).toBe(true)
+describe('catalog items', () => {
+  it('validates name in runes, priority, and the proof-photo range', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/catalog-items', { method: 'POST', headers: h(a, H), body: { name: '' } })).message)
+      .toBe('name is required (1-100 runes)')
+    expect(errOf(() => call('/v1/catalog-items', { method: 'POST', headers: h(a, H), body: { name: 'X', defaultPriority: 'ASAP' } })).message)
+      .toBe('defaultPriority must be one of LOW, NORMAL, HIGH, URGENT')
+    expect(errOf(() => call('/v1/catalog-items', { method: 'POST', headers: h(a, H), body: { name: 'X', minProofPhotos: 11 } })).message)
+      .toBe('minProofPhotos must be between 0 and 10')
+    expect(errOf(() => call('/v1/catalog-items', { method: 'POST', headers: h(a, H), body: { name: 'Extra towels' } })).code)
+      .toBe('CONFLICT')
   })
 
-  it('refuses a new location on a deactivated type, but lets an existing one stay', () => {
-    const admin = login('admin', 'admin123')
-    // Type 4 (Back Office) is deactivated.
-    expect(errCode(() => call('/v1/locations/upsert', { method: 'POST', body: { locationTypeId: '4', name: 'Store Room', code: 'STR' }, headers: h(admin, '1') })))
-      .toBe('BAD_REQUEST')
-    // Location 6 already sits on type 4 — renaming it must not be blocked.
-    const renamed = call('/v1/locations/upsert', { method: 'POST', body: { id: '6', locationTypeId: '4', name: 'Staff Canteen B1', code: 'CANT' }, headers: h(admin, '1') }).data
-    expect(renamed.name).toBe('Staff Canteen B1')
-    expect(renamed.locationTypeId).toBe('4')
+  it('upserts are a FULL REPLACE: omitted fields reset, not persist', () => {
+    const a = admin()
+    const created = data(call('/v1/catalog-items', { method: 'POST', headers: h(a, H), body: { name: 'Pillow menu', description: 'Feather or foam', minProofPhotos: 2, requiresCompletionNote: true, categoryId: IDS.category.hk } }))
+    const replaced = data(call('/v1/catalog-items', { method: 'POST', headers: h(a, H), body: { id: created.id, name: 'Pillow menu' } }))
+    expect(replaced.description).toBeNull()
+    expect(replaced.minProofPhotos).toBe(0)
+    expect(replaced.requiresCompletionNote).toBe(false)
+    expect(replaced.categoryId).toBeNull()
+    expect(replaced.defaultPriority).toBe('NORMAL')
   })
 
-  it('requires name, code and a same-property type', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/locations/upsert', { method: 'POST', body: { locationTypeId: '1', name: '', code: 'X' }, headers: h(admin, '1') }))).toBe('BAD_REQUEST')
-    expect(errCode(() => call('/v1/locations/upsert', { method: 'POST', body: { locationTypeId: '1', name: 'X', code: '' }, headers: h(admin, '1') }))).toBe('BAD_REQUEST')
-    // Type 5 belongs to tenant 2.
-    expect(errCode(() => call('/v1/locations/upsert', { method: 'POST', body: { locationTypeId: '5', name: 'X', code: 'X' }, headers: h(admin, '1') }))).toBe('BAD_REQUEST')
-  })
-})
-
-describe('teams and membership', () => {
-  it('lists teams with a member count', () => {
-    const admin = login('admin', 'admin123')
-    const rows = call('/v1/teams', { headers: h(admin, '1') }).data
-    expect(rows.find((t: any) => t.id === '1')?.memberCount).toBe(2)
-    expect(call('/v1/teams/1/members', { headers: h(admin, '1') }).data).toEqual(['10', '11'])
-  })
-
-  it('refuses adding someone twice — a double-clicked Add is one membership', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/teams/1/members/add', { method: 'POST', body: { userId: '10' }, headers: h(admin, '1') })))
-      .toBe('ALREADY_MEMBER')
-  })
-
-  it('adds and removes a member, and 404s a second remove', () => {
-    const admin = login('admin', 'admin123')
-    call('/v1/teams/2/members/add', { method: 'POST', body: { userId: '10' }, headers: h(admin, '1') })
-    expect(call('/v1/teams/2/members', { headers: h(admin, '1') }).data).toContain('10')
-    call('/v1/teams/2/members/remove', { method: 'POST', body: { userId: '10' }, headers: h(admin, '1') })
-    expect(errCode(() => call('/v1/teams/2/members/remove', { method: 'POST', body: { userId: '10' }, headers: h(admin, '1') })))
-      .toBe('NOT_FOUND')
-  })
-
-  it('only admits people who work at the property', () => {
-    const admin = login('admin', 'admin123')
-    // User 30 works at tenant 3.
-    expect(errCode(() => call('/v1/teams/1/members/add', { method: 'POST', body: { userId: '30' }, headers: h(admin, '1') })))
-      .toBe('BAD_REQUEST')
+  it('lists actives by default and includes inactives on request', () => {
+    const a = admin()
+    const pillow = data<any[]>(call('/v1/catalog-items', { headers: h(a, H) })).find(i => i.name === 'Pillow menu')!
+    call('/v1/catalog-items', { method: 'POST', headers: h(a, H), body: { id: pillow.id, name: 'Pillow menu', isActive: false } })
+    expect(data<any[]>(call('/v1/catalog-items', { headers: h(a, H) })).some(i => i.id === pillow.id)).toBe(false)
+    expect(data<any[]>(call('/v1/catalog-items', { headers: h(a, H), query: { includeInactive: 'true' } })).some(i => i.id === pillow.id)).toBe(true)
   })
 })
 
-describe('operating schedules', () => {
-  it('treats a weekday with no window as closed — absence is the flag', () => {
-    const admin = login('admin', 'admin123')
-    const schedules = call('/v1/operating-schedules', { headers: h(admin, '1') }).data
-    const engineering = schedules.find((s: any) => s.name === 'Engineering Hours')
-    // Sunday (0) has no window at all; there is no zero-width representation.
-    expect(engineering.windows.some((w: any) => w.weekday === 0)).toBe(false)
-    expect(engineering.windows).toHaveLength(6)
+describe('departments: master catalogue + per-hotel enablement', () => {
+  it('master reads are admin-only; master creates are service-only', () => {
+    const staff = login('staff@aston.example', 'staff123')
+    expect(errOf(() => call('/v1/departments', { headers: h(staff, H) })).message).toBe('admin access required')
+    const rows = data<any[]>(call('/v1/departments', { headers: h(admin(), H) }))
+    expect(rows.some(d => d.name === 'Housekeeping')).toBe(true)
+    const created = call('/v1/departments', { method: 'POST', headers: { authorization: 'Bearer service:test' }, body: { name: 'Security' } })
+    expect(created.status).toBe(201)
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: { authorization: 'Bearer service:test' }, body: { name: 'Security' } })).message)
+      .toBe('department name already exists')
   })
 
-  it('rejects a window that closes at or before it opens', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/operating-schedules/upsert', {
-      method: 'POST',
-      body: { name: 'Broken', windows: [{ weekday: 1, opensMinutes: 600, closesMinutes: 600 }], exceptions: [] },
-      headers: h(admin, '1'),
-    }))).toBe('BAD_REQUEST')
+  it('enabling is idempotent (201 then 200) and checked against DB-truth hotels', () => {
+    const a = admin()
+    const security = data<any[]>(call('/v1/departments', { headers: h(a, H) })).find(d => d.name === 'Security')!
+    const first = call('/v1/hotel-departments', { method: 'POST', headers: h(a, H), body: { departmentId: security.id } })
+    expect(first.status).toBe(201)
+    const again = call('/v1/hotel-departments', { method: 'POST', headers: h(a, H), body: { departmentId: security.id } })
+    expect(again.status).toBe(200)
+    expect(data(again).id).toBe(data(first).id)
+    // Rina's CLAIM covers Simatupang via the group grant, but she has no direct
+    // staff_hotel row there — the fresh DB check refuses the write.
+    const rina = login('regional@aston.example', 'regional123')
+    expect(errOf(() => call('/v1/hotel-departments', { method: 'POST', headers: h(rina, H), body: { departmentId: security.id } })).message)
+      .toBe('cannot manage departments for hotels you do not manage')
+  })
+})
+
+describe('teams and members', () => {
+  it('upserts with duplicate-name 409 and cross-hotel department 422', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/teams', { method: 'POST', headers: h(a, H), body: { name: 'HK Morning Shift' } })).message)
+      .toBe('team name already exists')
+    expect(errOf(() => call('/v1/teams', { method: 'POST', headers: h(a, H), body: { name: 'Fave crew', hotelDepartmentId: IDS.dept.faveHousekeeping } })).message)
+      .toBe('invalid department reference')
   })
 
-  it('accepts 1440 as until-midnight', () => {
-    const admin = login('admin', 'admin123')
-    const created = call('/v1/operating-schedules/upsert', {
-      method: 'POST',
-      body: { name: 'Night Desk', departmentId: '3', windows: [{ weekday: 5, opensMinutes: 1080, closesMinutes: 1440 }], exceptions: [] },
-      headers: h(admin, '1'),
-    }).data
-    expect(created.windows[0].closesMinutes).toBe(1440)
+  it('manages members idempotently, hotel-scoped, with 200 {ok:true}', () => {
+    const a = admin()
+    expect(errOf(() => call(`/v1/teams/${IDS.team.hkMorning}/members/${IDS.staff.nur}`, { method: 'PUT', headers: h(a, H) })).message)
+      .toBe('invalid staff reference') // Nur belongs to Fave, not Simatupang
+    const added = call(`/v1/teams/${IDS.team.hkMorning}/members/${IDS.staff.sari}`, { method: 'PUT', headers: h(a, H) })
+    expect(added.status).toBe(200)
+    expect(added.body!.data).toEqual({ ok: true })
+    const members = data<string[]>(call(`/v1/teams/${IDS.team.hkMorning}/members`, { headers: h(a, H) }))
+    expect(members).toContain(IDS.staff.sari)
+    // Removal is a 200 no-op when absent — never an error.
+    expect(call(`/v1/teams/${IDS.team.hkMorning}/members/${IDS.staff.sari}`, { method: 'DELETE', headers: h(a, H) }).status).toBe(200)
+    expect(call(`/v1/teams/${IDS.team.hkMorning}/members/${IDS.staff.sari}`, { method: 'DELETE', headers: h(a, H) }).status).toBe(200)
+  })
+})
+
+describe('SLAs and operating schedules', () => {
+  it('requires positive whole minutes and swaps the single default', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/slas', { method: 'POST', headers: h(a, H), body: { name: 'Bad', responseTime: 0, resolutionTime: 5 } })).message)
+      .toBe('responseTime and resolutionTime must be positive minutes')
+    const created = data(call('/v1/slas', { method: 'POST', headers: h(a, H), body: { name: 'Overnight', responseTime: 60, resolutionTime: 240, isDefault: true } }))
+    expect(created.isDefault).toBe(true)
+    const rows = data<any[]>(call('/v1/slas', { headers: h(a, H) }))
+    expect(rows.filter(s => s.isDefault)).toHaveLength(1)
+    // Hand the default back to Standard so routing fallbacks stay stable.
+    call('/v1/slas', { method: 'POST', headers: h(a, H), body: { id: IDS.sla.smtpStandard, name: 'Standard', responseTime: 15, resolutionTime: 45, isDefault: true } })
   })
 
-  it('refuses a second default and a second schedule per department', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/operating-schedules/upsert', { method: 'POST', body: { name: 'Another default', isDefault: true, windows: [], exceptions: [] }, headers: h(admin, '1') })))
-      .toBe('DUPLICATE_DEFAULT')
-    // Department 2 already has Engineering Hours.
-    expect(errCode(() => call('/v1/operating-schedules/upsert', { method: 'POST', body: { name: 'Second eng', departmentId: '2', windows: [], exceptions: [] }, headers: h(admin, '1') })))
-      .toBe('DEPARTMENT_SCHEDULED')
+  it('enforces schedule shape rules and the two uniqueness slots', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/operating-schedules', { method: 'POST', headers: h(a, H), body: { name: 'X', windows: [{ weekday: 7, opensMinutes: 0, closesMinutes: 100 }] } })).message)
+      .toBe('window weekday must be 0-6 (Sunday-Saturday)')
+    expect(errOf(() => call('/v1/operating-schedules', { method: 'POST', headers: h(a, H), body: { name: 'X', windows: [{ weekday: 1, opensMinutes: 0, closesMinutes: 100 }, { weekday: 1, opensMinutes: 200, closesMinutes: 300 }] } })).message)
+      .toBe('at most one window per weekday')
+    expect(errOf(() => call('/v1/operating-schedules', { method: 'POST', headers: h(a, H), body: { name: 'X', windows: [{ weekday: 1, opensMinutes: 300, closesMinutes: 200 }] } })).message)
+      .toBe('window closesMinutes must be greater than opensMinutes')
+    expect(errOf(() => call('/v1/operating-schedules', { method: 'POST', headers: h(a, H), body: { name: 'X', isDefault: true, windows: [] } })).message)
+      .toBe('another schedule already claims this default/department slot')
+    expect(errOf(() => call('/v1/operating-schedules', { method: 'POST', headers: h(a, H), body: { name: 'X', hotelDepartmentId: IDS.dept.smtpMaintenance, windows: [] } })).message)
+      .toBe('another schedule already claims this default/department slot')
   })
 
-  it('replaces the full windows set on every save — a rename must echo hours back', () => {
-    const admin = login('admin', 'admin123')
-    const created = call('/v1/operating-schedules/upsert', {
-      method: 'POST',
-      body: { name: 'Spa Hours', departmentId: '4', windows: [{ weekday: 2, opensMinutes: 540, closesMinutes: 1020 }], exceptions: [] },
-      headers: h(admin, '1'),
-    }).data
-    // A "rename" that forgets the windows wipes them: full replace, no merge.
-    const renamed = call('/v1/operating-schedules/upsert', {
-      method: 'POST',
-      body: { id: created.id, name: 'Spa & Wellness Hours', departmentId: '4' },
-      headers: h(admin, '1'),
-    }).data
-    expect(renamed.windows).toHaveLength(0)
-  })
-
-  it('validates exceptions: dated, and open ones carry a real span', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/operating-schedules/upsert', {
-      method: 'POST',
-      body: { name: 'Bad exception', windows: [], exceptions: [{ date: 'someday', isClosed: true }] },
-      headers: h(admin, '1'),
-    }))).toBe('BAD_REQUEST')
-    expect(errCode(() => call('/v1/operating-schedules/upsert', {
-      method: 'POST',
-      body: { name: 'Bad exception', windows: [], exceptions: [{ date: '2026-12-25', isClosed: false, opensMinutes: 600, closesMinutes: 500 }] },
-      headers: h(admin, '1'),
-    }))).toBe('BAD_REQUEST')
+  it('every save replaces the FULL windows/exceptions set', () => {
+    const a = admin()
+    const created = data(call('/v1/operating-schedules', { method: 'POST', headers: h(a, H), body: { name: 'FO Desk', hotelDepartmentId: IDS.dept.smtpFrontOffice, windows: [{ weekday: 1, opensMinutes: 360, closesMinutes: 1320 }], exceptions: [{ date: '2026-12-25', isClosed: true }] } }))
+    const replaced = data(call('/v1/operating-schedules', { method: 'POST', headers: h(a, H), body: { id: created.id, name: 'FO Desk', hotelDepartmentId: IDS.dept.smtpFrontOffice, windows: [{ weekday: 2, opensMinutes: 360, closesMinutes: 1320 }], exceptions: [] } }))
+    expect(replaced.windows).toHaveLength(1)
+    expect(replaced.windows[0].weekday).toBe(2)
+    expect(replaced.exceptions).toEqual([])
   })
 })
 
 describe('terminology', () => {
-  it('merges the property\'s overrides over the defaults, per property', () => {
-    const admin = login('admin', 'admin123')
-    const regional = login('regional', 'regional123')
-    // Tenant 1 renamed "Requester" to "Guest" in the seed.
-    expect(call('/v1/terminology', { headers: h(admin, '1') }).data.requester).toBe('Guest')
-    expect(call('/v1/terminology', { headers: h(admin, '1') }).data.department).toBe('Department')
-    // Tenant 2 has no overrides: pure defaults, untouched by tenant 1's rename.
-    expect(call('/v1/terminology', { headers: h(regional, '2') }).data.requester).toBe('Requester')
-  })
-
-  it('lets an admin rename a term and returns the merged map', () => {
-    const admin = login('admin', 'admin123')
-    const map = call('/v1/terminology', { method: 'PATCH', body: { key: 'location', value: 'Room' }, headers: h(admin, '1') }).data
-    expect(map.location).toBe('Room')
-    expect(map.requester).toBe('Guest')
-  })
-
-  it('is admin-only to write, readable by staff', () => {
-    const staff = login('staff', 'staff123')
-    expect(call('/v1/terminology', { headers: h(staff, '1') }).data.requester).toBe('Guest')
-    expect(errCode(() => call('/v1/terminology', { method: 'PATCH', body: { key: 'visit', value: 'Stay' }, headers: h(staff, '1') })))
-      .toBe('FORBIDDEN')
-  })
-
-  it('rejects unknown terms and blank values', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/terminology', { method: 'PATCH', body: { key: 'task', value: 'Job' }, headers: h(admin, '1') }))).toBe('BAD_REQUEST')
-    expect(errCode(() => call('/v1/terminology', { method: 'PATCH', body: { key: 'visit', value: '  ' }, headers: h(admin, '1') }))).toBe('BAD_REQUEST')
+  it('merges the vertical profile with per-hotel overrides, one key per PATCH', () => {
+    const a = admin()
+    const merged = data<Record<string, string>>(call('/v1/terminology', { headers: h(a, H) }))
+    expect(merged.requester).toBe('Guest') // the seeded override
+    expect(merged.visit).toBe('Visit') // the profile default
+    expect(errOf(() => call('/v1/terminology', { method: 'PATCH', headers: h(a, H), body: { key: 'visit', value: ' ' } })).message)
+      .toBe('value is required')
+    const after = data<Record<string, string>>(call('/v1/terminology', { method: 'PATCH', headers: h(a, H), body: { key: 'visit', value: 'Stay' } }))
+    expect(after.visit).toBe('Stay')
+    expect(after.requester).toBe('Guest')
   })
 })
 
-describe('SLA targets are whole minutes', () => {
-  it('refuses fractional minutes on create and edit', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/slas/upsert', { method: 'POST', body: { name: 'Frac', responseTime: 15.5, resolutionTime: 45 }, headers: h(admin, '1') })))
-      .toBe('BAD_REQUEST')
-    expect(errCode(() => call('/v1/slas/upsert', { method: 'POST', body: { id: '1', name: 'Standard', responseTime: 15, resolutionTime: 45.25, isDefault: true }, headers: h(admin, '1') })))
-      .toBe('BAD_REQUEST')
-  })
-})
+describe('staff lifecycle', () => {
+  // Leaves behind: one new staff member (Ayu) at Simatupang, promoted to admin.
 
-describe('routing rule deletion', () => {
-  it('is admin-only and hard-deletes the rule', () => {
-    const admin = login('admin', 'admin123')
-    const leader = login('leader', 'leader123')
-    const created = call('/v1/routing-rules/upsert', {
-      method: 'POST',
-      body: { priority: 70, matchItemId: '8', departmentId: '3', slaId: '1' },
-      headers: h(admin, '1'),
-    }).data
-    expect(errCode(() => call('/v1/routing-rules/delete', { method: 'POST', body: { id: created.id }, headers: h(leader, '1') })))
-      .toBe('FORBIDDEN')
-    call('/v1/routing-rules/delete', { method: 'POST', body: { id: created.id }, headers: h(admin, '1') })
-    expect(call('/v1/routing-rules', { headers: h(admin, '1') }).data.some((r: any) => r.id === created.id)).toBe(false)
-    expect(errCode(() => call('/v1/routing-rules/delete', { method: 'POST', body: { id: created.id }, headers: h(admin, '1') })))
-      .toBe('NOT_FOUND')
-  })
-})
-
-describe('board column removal', () => {
-  it('skips (with a warning) a column that still holds open work', () => {
-    const admin = login('admin', 'admin123')
-    // Column 3 (On Hold) holds task 6, which is PENDING — open.
-    const result = call('/v1/board/columns/remove', { method: 'POST', body: { id: '3' }, headers: h(admin, '1') }).data
-    expect(result.removed).toBe(false)
-    expect(result.warning).toContain('skipped')
-    // A 200 with a warning means nothing happened: the column is still there.
-    const board = call('/v1/board', { headers: h(admin, '1') }).data
-    expect(board.columns.some((c: any) => c.id === '3')).toBe(true)
+  it('creates staff/leader only, validating password and hotel grants', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'x@aston.example', name: 'X', password: 'longenough1', role: 'admin', hotels: [H] } })).message)
+      .toBe('role must be staff or leader')
+    expect(errOf(() => call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'x@aston.example', name: 'X', password: 'short', role: 'staff', hotels: [H] } })).message)
+      .toBe('password must be at least 10 characters')
+    expect(errOf(() => call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'x@aston.example', name: 'X', password: 'longenough1', role: 'staff', hotels: [IDS.hotel.fave] } })).message)
+      .toBe('cannot grant access to hotels you do not manage')
+    expect(errOf(() => call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'admin@aston.example', name: 'X', password: 'longenough1', role: 'staff', hotels: [H] } })).message)
+      .toBe('email already registered')
+    const created = call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'ayu@aston.example', name: 'Ayu Lestari', password: 'ayu1234567', role: 'staff', hotels: [H], hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true } })
+    expect(created.status).toBe(201)
+    expect(data(created).role).toBe('staff')
   })
 
-  it('removes a column with no open work', () => {
-    const admin = login('admin', 'admin123')
-    const created = call('/v1/board/columns/upsert', { method: 'POST', body: { name: 'Awaiting parts', status: 'PENDING', columnSort: 7 }, headers: h(admin, '1') }).data
-    const result = call('/v1/board/columns/remove', { method: 'POST', body: { id: created.id }, headers: h(admin, '1') }).data
-    expect(result.removed).toBe(true)
-    const board = call('/v1/board', { headers: h(admin, '1') }).data
-    expect(board.columns.some((c: any) => c.id === created.id)).toBe(false)
-    // Removal is terminal: the column cannot be edited back to life.
-    expect(errCode(() => call('/v1/board/columns/upsert', { method: 'POST', body: { id: created.id, name: 'Zombie', status: 'PENDING' }, headers: h(admin, '1') })))
-      .toBe('NOT_FOUND')
-  })
-
-  it('rejects a fractional or zero column order', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/board/columns/upsert', { method: 'POST', body: { name: 'X', status: 'PENDING', columnSort: 1.5 }, headers: h(admin, '1') }))).toBe('BAD_REQUEST')
-    expect(errCode(() => call('/v1/board/columns/upsert', { method: 'POST', body: { name: 'X', status: 'PENDING', columnSort: 0 }, headers: h(admin, '1') }))).toBe('BAD_REQUEST')
-  })
-})
-
-describe('two-step admin promotion', () => {
-  it('refuses admin at creation', () => {
-    const admin = login('admin', 'admin123')
-    expect(errCode(() => call('/v1/staff/upsert', {
-      method: 'POST',
-      body: { email: 'new.admin@aston.example', firstName: 'Nadia', lastName: 'Putri', role: 'admin', canCreateTask: true },
-      headers: h(admin, '1'),
-    }))).toBe('BAD_REQUEST')
-  })
-
-  it('creates as staff or leader, then promotes in a separate request', () => {
-    const admin = login('admin', 'admin123')
-    const created = call('/v1/staff/upsert', {
-      method: 'POST',
-      body: { email: 'new.admin@aston.example', firstName: 'Nadia', lastName: 'Putri', role: 'leader', canCreateTask: true },
-      headers: h(admin, '1'),
-    }).data
-    expect(created.role).toBe('leader')
-    const promoted = call('/v1/staff/upsert', {
-      method: 'POST',
-      body: { profileId: created.id, role: 'admin', canCreateTask: true },
-      headers: h(admin, '1'),
-    }).data
+  it('promotes to admin via PATCH — never at creation — with a 422 on a bad role', () => {
+    const a = admin()
+    const ayu = data<any[]>(call('/v1/staff', { headers: h(a, H) })).find(s => s.email === 'ayu@aston.example')!
+    expect(errOf(() => call(`/v1/staff/${ayu.id}`, { method: 'PATCH', headers: h(a, H), body: { role: 'boss' } })).code)
+      .toBe('UNPROCESSABLE')
+    const promoted = data(call(`/v1/staff/${ayu.id}`, { method: 'PATCH', headers: h(a, H), body: { role: 'admin' } }))
     expect(promoted.role).toBe('admin')
+    // A non-sharing admin's target collapses to the same 404 as a missing one.
+    const rina = login('regional@aston.example', 'regional123')
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.nur}`, { method: 'PATCH', headers: h(rina), body: { name: 'X' } })).message)
+      .toBe('staff')
+  })
+})
+
+describe('platform routes (operator only)', () => {
+  // Leaves behind: one provisioned tenant with its first admin, one new group,
+  // one deactivated partner (re-activated at the end).
+
+  it('gates every /v1/platform route on the operator flag', () => {
+    const a = admin()
+    expect(errOf(() => call('/v1/platform/tenants', { headers: h(a) })).message).toBe('operator access required')
+    expect(errOf(() => call('/v1/platform/partners', { headers: h(a) })).message).toBe('operator access required')
+  })
+
+  it('provisions idempotently and seeds the template board and default SLA', () => {
+    const op = operator()
+    const hotelRef = '77777777-0000-4000-8000-000000000001'
+    const first = call('/v1/platform/tenants', { method: 'POST', headers: h(op), body: { hotelRef, name: 'Huxley Seminyak' } })
+    expect(first.status).toBe(201)
+    expect(call('/v1/platform/tenants', { method: 'POST', headers: h(op), body: { hotelRef, name: 'Huxley Seminyak' } }).status).toBe(200)
+    // The seeded board + default SLA are visible to a service actor.
+    const service = { authorization: 'Bearer service:test' }
+    const board = data(call('/v1/kanban-board', { headers: service, query: { hotelRef } }))
+    expect(board.columns.length).toBe(6)
+    const slas = data<any[]>(call('/v1/slas', { headers: service, query: { hotelRef } }))
+    expect(slas.some(s => s.isDefault)).toBe(true)
+  })
+
+  it('creates the first admin exactly once, with a one-time temporary password', () => {
+    const op = operator()
+    const hotelRef = '77777777-0000-4000-8000-000000000001'
+    const created = call(`/v1/platform/tenants/${hotelRef}/first-admin`, { method: 'POST', headers: h(op), body: { email: 'gm@huxley.example', name: 'Huxley GM' } })
+    expect(created.status).toBe(201)
+    const payload = data<{ temporaryPassword: string, role: string }>(created)
+    expect(payload.role).toBe('admin')
+    expect(payload.temporaryPassword.length).toBeGreaterThanOrEqual(20)
+    expect(errOf(() => call(`/v1/platform/tenants/${hotelRef}/first-admin`, { method: 'POST', headers: h(op), body: { email: 'gm2@huxley.example', name: 'Another' } })).message)
+      .toBe('tenant already has an admin')
+    // The password works: the new admin can sign in and read their hotel.
+    const gm = login('gm@huxley.example', payload.temporaryPassword)
+    expect(call('/v1/tasks', { headers: h(gm, hotelRef) }).status).toBe(200)
+  })
+
+  it('manages groups with membership-verified removal', () => {
+    const op = operator()
+    const group = data(call('/v1/platform/tenant-groups', { method: 'POST', headers: h(op), body: { name: 'Huxley' } }))
+    const hotelRef = '77777777-0000-4000-8000-000000000001'
+    call(`/v1/platform/tenant-groups/${group.id}/tenants/${hotelRef}`, { method: 'PUT', headers: h(op) })
+    const listed = data<any[]>(call('/v1/platform/tenant-groups', { headers: h(op) }))
+    expect(listed.find(g => g.id === group.id)!.tenants).toEqual([{ hotelRef, name: 'Huxley Seminyak' }])
+    // Naming the wrong group leaves membership untouched.
+    expect(errOf(() => call(`/v1/platform/tenant-groups/${IDS.group.aston}/tenants/${hotelRef}`, { method: 'DELETE', headers: h(op) })).message)
+      .toBe('group membership')
+    call(`/v1/platform/tenant-groups/${group.id}/tenants/${hotelRef}`, { method: 'DELETE', headers: h(op) })
+    const renamed = data(call(`/v1/platform/tenant-groups/${group.id}`, { method: 'PATCH', headers: h(op), body: { name: 'Huxley Collection' } }))
+    expect(renamed.name).toBe('Huxley Collection')
+  })
+
+  it('registers partners with a one-time secret; deactivation revokes instantly', () => {
+    const op = operator()
+    const created = call('/v1/platform/partners', { method: 'POST', headers: h(op), body: { name: 'Sentec SBE' } })
+    expect(created.status).toBe(201)
+    expect(data<{ secret: string }>(created).secret.length).toBe(43)
+    // The list never carries a secret.
+    const listed = data<any[]>(call('/v1/platform/partners', { headers: h(op) }))
+    expect(listed.every(p => !('secret' in p))).toBe(true)
+    // Deactivating an active partner cuts its token off immediately.
+    call(`/v1/platform/partners/${IDS.partner.butler}`, { method: 'PATCH', headers: h(op), body: { isActive: false } })
+    expect(errOf(() => call('/v1/tasks', { headers: { 'authorization': `Bearer partner:${IDS.partner.butler}`, 'x-hotel-id': H } })).code)
+      .toBe('UNAUTHORIZED')
+    call(`/v1/platform/partners/${IDS.partner.butler}`, { method: 'PATCH', headers: h(op), body: { isActive: true } })
+    expect(call('/v1/tasks', { headers: { 'authorization': `Bearer partner:${IDS.partner.butler}`, 'x-hotel-id': H } }).status).toBe(200)
   })
 })

@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { HandIcon, RefreshCwIcon, SquareKanbanIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useCaps } from '~/composables/useCaps'
-import type { BoardWithColumns, TaskListItem } from '~/utils/clientFakeApi'
+import type { Board, BoardColumn, TaskListItem } from '~/utils/clientFakeApi'
 import { isClaimable, statusMeta } from '~/utils/task-ui'
 
 definePageMeta({ title: 'Board' })
@@ -11,12 +11,13 @@ definePageMeta({ title: 'Board' })
 const api = useTasksApi()
 const caps = useCaps()
 
-const board = ref<BoardWithColumns | null>(null)
+const board = ref<(Board & { columns: BoardColumn[] }) | null>(null)
 const tasks = ref<TaskListItem[]>([])
 const isLoading = ref(false)
 const errorMessage = ref('')
 const activeColumnId = ref('')
 const claimingId = ref('')
+const totalCount = ref(0)
 
 const columns = computed(() => board.value?.columns ?? [])
 
@@ -41,8 +42,8 @@ function canClaimCard(task: TaskListItem) {
 
 function claimLabel(task: TaskListItem) {
   const a = task.assignment
-  if (a?.kind === 'TEAM') return `Claim from ${a.team?.name ?? 'the team'}`
-  if (a?.kind === 'DEPARTMENT') return `Claim from ${a.department?.name ?? 'the department'}`
+  if (a?.kind === 'TEAM') return `Claim from ${a.teamName ?? 'the team'}`
+  if (a?.kind === 'DEPARTMENT') return `Claim from ${a.departmentName ?? 'the department'}`
   return 'Claim this'
 }
 
@@ -51,15 +52,24 @@ async function load() {
   errorMessage.value = ''
   try {
     try {
-      board.value = await api.getBoard()
+      board.value = await api.getKanbanBoard()
     }
     catch (e) {
       // A property with no provisioned board is a real state, not an error.
       if (!/not found/i.test((e as Error).message)) throw e
       board.value = null
     }
-    tasks.value = board.value ? (await api.listTasks({ limit: 200 })).data : []
-    if (board.value?.columns.length && !board.value.columns.some(c => c.id === activeColumnId.value)) {
+    if (board.value) {
+      // The API caps a page at 100; say so when the board is showing a slice.
+      const res = await api.listTasks({ limit: 100 })
+      tasks.value = res.data
+      totalCount.value = res.meta.total
+    }
+    else {
+      tasks.value = []
+      totalCount.value = 0
+    }
+    if (board.value?.columns.length && !board.value.columns.some(column => column.id === activeColumnId.value)) {
       activeColumnId.value = board.value.columns[0]!.id
     }
   }
@@ -102,7 +112,10 @@ onMounted(load)
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
         <h2 class="text-lg font-bold tracking-tight">Board</h2>
-        <p class="text-xs text-muted-foreground">Live workflow for this property.</p>
+        <p class="text-xs text-muted-foreground">
+          Live workflow for this property.
+          <template v-if="totalCount > tasks.length"> Showing {{ tasks.length }} of {{ totalCount }}.</template>
+        </p>
       </div>
       <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
         <RefreshCwIcon class="h-4 w-4" :class="isLoading ? 'animate-spin' : ''" />
@@ -138,7 +151,7 @@ onMounted(load)
           :class="column.id === activeColumnId ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
           @click="activeColumnId = column.id"
         >
-          <span class="h-2 w-2 rounded-full" :class="statusMeta(column.status).dot" />
+          <span class="h-2 w-2 rounded-full" :class="column.status ? statusMeta(column.status).dot : 'bg-muted-foreground/40'" />
           {{ column.name }}
           <span class="rounded-full bg-background/70 px-1.5 tabular-nums">{{ countByColumn.get(column.id) ?? 0 }}</span>
         </button>

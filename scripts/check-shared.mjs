@@ -27,7 +27,7 @@ const SHARED = [
   'tests/admin-config.spec.ts',
   'tests/staff-flows.spec.ts',
   'tests/task-ui.spec.ts',
-  'tests/overview-compliance.spec.ts',
+  'tests/api-fidelity.spec.ts',
 ]
 
 if (!existsSync(sibling)) {

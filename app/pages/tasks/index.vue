@@ -1,29 +1,33 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { FilterXIcon, LayoutListIcon, RefreshCwIcon, SearchIcon } from '@lucide/vue'
-import { useTasksApi } from '~/composables/useTasksApi'
-import type { Department, TaskListItem } from '~/utils/clientFakeApi'
+import { useTasksApi, type TaskQuery } from '~/composables/useTasksApi'
+import { useSession } from '~/composables/useSession'
+import type { TaskListItem } from '~/utils/clientFakeApi'
 
 definePageMeta({ title: 'Tasks' })
 
 const route = useRoute()
 const router = useRouter()
 const api = useTasksApi()
+const session = useSession()
 
 /**
- * Filters live in the URL, not in component state.
+ * Filters live in the URL, not in component state — a filtered view is
+ * shareable and survives a refresh or back-navigation from a task detail.
  *
- * That makes a filtered view shareable ("look at the breached ones") and makes
- * it survive a refresh or a back-navigation from a task detail — which is the
- * common path, and losing the filter every time was the annoyance this fixes.
+ * Every chip maps to a REAL list parameter (status, assignedStaffId,
+ * helping=1, responseSlaStatus/resolutionSlaStatus). The two exceptions are
+ * labeled where they happen: "To claim" narrows the fetched page to pool rows
+ * client-side (the API's staff auto-scope already returns own + unclaimed
+ * work, but has no unclaimed-only parameter), and the search box filters the
+ * loaded page only — the API has no free-text search.
  */
 const search = ref(String(route.query.q ?? ''))
 const status = computed(() => String(route.query.status ?? ''))
 const scope = computed(() => String(route.query.scope ?? ''))
-const departmentId = computed(() => String(route.query.dept ?? ''))
 
 const tasks = ref<TaskListItem[]>([])
-const departments = ref<Department[]>([])
 const totalCount = ref(0)
 const nextCursor = ref<string | null>(null)
 const isLoading = ref(false)
@@ -32,7 +36,7 @@ const errorMessage = ref('')
 
 const PAGE_SIZE = 20
 
-const hasFilters = computed(() => Boolean(status.value || scope.value || departmentId.value || search.value.trim()))
+const hasFilters = computed(() => Boolean(status.value || scope.value || search.value.trim()))
 
 /** Write one filter into the URL, dropping the cursor so paging restarts. */
 function setFilter(key: string, value: string) {
@@ -47,24 +51,38 @@ function clearFilters() {
   router.replace({ query: {} })
 }
 
-function currentQuery() {
-  return {
-    status: status.value,
-    scope: scope.value as '' | 'mine' | 'unclaimed' | 'breached' | 'helping',
-    departmentId: departmentId.value,
-    q: search.value.trim(),
-    limit: PAGE_SIZE,
+function currentQuery(): TaskQuery {
+  const query: TaskQuery = { limit: PAGE_SIZE }
+  if (status.value) query.status = status.value as TaskQuery['status']
+  switch (scope.value) {
+    case 'mine':
+      query.assignedStaffId = session.userId.value ?? undefined
+      break
+    case 'helping':
+      query.helping = '1'
+      break
+    case 'late-response':
+      query.responseSlaStatus = 'BREACHED'
+      break
+    case 'breached':
+      query.resolutionSlaStatus = 'BREACHED'
+      break
   }
+  return query
 }
+
+/** "To claim" narrows to pool rows after the fetch — labeled client-side. */
+const clientNarrow = (rows: TaskListItem[]) =>
+  scope.value === 'unclaimed' ? rows.filter(t => !t.assignment || t.assignment.kind !== 'STAFF') : rows
 
 async function load() {
   isLoading.value = true
   errorMessage.value = ''
   try {
     const res = await api.listTasks(currentQuery())
-    tasks.value = res.data
-    totalCount.value = res.meta.totalCount
-    nextCursor.value = res.meta.nextCursor
+    tasks.value = clientNarrow(res.data)
+    totalCount.value = res.meta.total
+    nextCursor.value = res.meta.nextCursor ?? null
   }
   catch (e) {
     errorMessage.value = (e as Error).message
@@ -80,8 +98,8 @@ async function loadMore() {
   isLoadingMore.value = true
   try {
     const res = await api.listTasks({ ...currentQuery(), cursor: nextCursor.value })
-    tasks.value = [...tasks.value, ...res.data]
-    nextCursor.value = res.meta.nextCursor
+    tasks.value = [...tasks.value, ...clientNarrow(res.data)]
+    nextCursor.value = res.meta.nextCursor ?? null
   }
   catch (e) {
     errorMessage.value = (e as Error).message
@@ -91,27 +109,27 @@ async function loadMore() {
   }
 }
 
-async function loadDepartments() {
-  try {
-    departments.value = await api.listDepartments()
-  }
-  catch {
-    // Staff can read departments, but a failure here only costs the filter.
-    departments.value = []
-  }
-}
-
-// Debounce typing so each keystroke does not become a request.
+// The search box filters the LOADED rows — the API has no q parameter. Kept in
+// the URL anyway so a shared link carries it.
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 watch(search, (value) => {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(() => setFilter('q', value.trim()), 250)
 })
 
-// One watcher drives loading: any URL change reloads from the first page.
-watch(() => route.query, load, { immediate: true, deep: true })
+const shownTasks = computed(() => {
+  const query = search.value.trim().toLowerCase()
+  if (!query) return tasks.value
+  return tasks.value.filter(t =>
+    t.title.toLowerCase().includes(query)
+    || (t.roomNumber ?? '').toLowerCase().includes(query)
+    || (t.description ?? '').toLowerCase().includes(query)
+    || t.id.startsWith(query),
+  )
+})
 
-onMounted(loadDepartments)
+// One watcher drives loading: any server-filter change reloads from page one.
+watch(() => [route.query.status, route.query.scope], load, { immediate: true })
 
 const STATUS_TABS = [
   { value: '', label: 'All' },
@@ -119,13 +137,15 @@ const STATUS_TABS = [
   { value: 'IN_PROGRESS', label: 'Active' },
   // Leaders read this as their review queue; staff as "waiting on review".
   { value: 'SUBMITTED', label: 'In review' },
-  { value: 'FINISHED,VERIFIED', label: 'Closed' },
+  { value: 'FINISHED', label: 'Finished' },
+  { value: 'VERIFIED', label: 'Verified' },
 ]
 
 const SCOPE_TABS = [
   { value: 'unclaimed', label: 'To claim' },
   { value: 'mine', label: 'Mine' },
   { value: 'helping', label: 'Helping' },
+  { value: 'late-response', label: 'Late response' },
   { value: 'breached', label: 'Breached' },
 ]
 </script>
@@ -146,10 +166,10 @@ const SCOPE_TABS = [
 
     <div class="relative">
       <SearchIcon class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-      <Input v-model="search" placeholder="Search title, location, reference…" class="pl-9" />
+      <Input v-model="search" placeholder="Filter the loaded tasks…" class="pl-9" />
     </div>
 
-    <!-- Status tabs; horizontally scrollable so they never wrap on a phone. -->
+    <!-- Status + scope chips; horizontally scrollable so they never wrap. -->
     <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
       <button
         v-for="tab in STATUS_TABS"
@@ -174,28 +194,9 @@ const SCOPE_TABS = [
       </button>
     </div>
 
-    <div v-if="departments.length > 1" class="flex items-center gap-2">
-      <Select
-        :model-value="toSelectValue(departmentId)"
-        @update:model-value="value => setFilter('dept', fromSelectValue(value))"
-      >
-        <SelectTrigger class="w-full">
-          <SelectValue placeholder="All departments" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem :value="SELECT_EMPTY">All departments</SelectItem>
-          <SelectItem v-for="dept in departments" :key="dept.id" :value="dept.id">{{ dept.name }}</SelectItem>
-        </SelectContent>
-      </Select>
-      <Button
-        v-if="hasFilters"
-        variant="outline"
-        size="icon"
-        aria-label="Clear filters"
-        title="Clear filters"
-        @click="clearFilters"
-      >
-        <FilterXIcon class="h-4 w-4" />
+    <div v-if="hasFilters" class="flex justify-end">
+      <Button variant="outline" size="sm" @click="clearFilters">
+        <FilterXIcon class="h-4 w-4" /> Clear filters
       </Button>
     </div>
 
@@ -209,7 +210,7 @@ const SCOPE_TABS = [
     </div>
 
     <EmptyState
-      v-else-if="tasks.length === 0"
+      v-else-if="shownTasks.length === 0"
       :icon="LayoutListIcon"
       title="No tasks match"
       :description="hasFilters ? 'Try clearing a filter or a different search.' : 'Nothing to show at this property yet.'"
@@ -219,7 +220,7 @@ const SCOPE_TABS = [
 
     <template v-else>
       <div class="space-y-3">
-        <TaskCard v-for="task in tasks" :key="task.id" :task="task" />
+        <TaskCard v-for="task in shownTasks" :key="task.id" :task="task" />
       </div>
 
       <Button

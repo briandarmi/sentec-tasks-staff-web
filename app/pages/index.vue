@@ -38,16 +38,17 @@ async function load() {
   isLoading.value = true
   errorMessage.value = ''
   try {
-    // Two scoped calls rather than one broad fetch filtered on the client: the
-    // server decides what this user may see, so asking narrowly keeps the two
-    // lists honest even as the visibility rules change.
-    const [mineRes, queueRes, offers] = await Promise.all([
-      api.listTasks({ scope: 'mine', limit: 100 }),
-      api.listTasks({ scope: 'unclaimed', limit: 100 }),
+    // "Mine" is the real assignedStaffId filter (a plain staff actor is
+    // clamped to it server-side anyway). The API has no "unclaimed" filter:
+    // the [DR-15] auto-scope already returns own work plus the department's
+    // unclaimed queue, so the queue tab filters that result to pool rows.
+    const [mineRes, scopedRes, offers] = await Promise.all([
+      api.listTasks({ assignedStaffId: session.userId.value ?? undefined, limit: 100 }),
+      api.listTasks({ limit: 100 }),
       api.listOffers(),
     ])
     mine.value = mineRes.data
-    queue.value = queueRes.data
+    queue.value = scopedRes.data.filter(task => !task.assignment || task.assignment.kind !== 'STAFF')
     offerCount.value = offers.length
   }
   catch (e) {
@@ -69,8 +70,8 @@ function canClaimCard(task: TaskListItem) {
 
 function claimLabel(task: TaskListItem) {
   const a = task.assignment
-  if (a?.kind === 'TEAM') return `Claim from ${a.team?.name ?? 'the team'}`
-  if (a?.kind === 'DEPARTMENT') return `Claim from ${a.department?.name ?? 'the department'}`
+  if (a?.kind === 'TEAM') return `Claim from ${a.teamName ?? 'the team'}`
+  if (a?.kind === 'DEPARTMENT') return `Claim from ${a.departmentName ?? 'the department'}`
   return 'Claim this'
 }
 
@@ -106,7 +107,7 @@ onMounted(load)
         <h2 class="text-lg font-bold tracking-tight">
           {{ session.displayName.value ? `Hi, ${session.displayName.value.split(' ')[0]}` : 'My work' }}
         </h2>
-        <p class="text-xs text-muted-foreground">Your tasks at {{ session.activeTenant.value?.name ?? 'this property' }}.</p>
+        <p class="text-xs text-muted-foreground">Your tasks at {{ session.activeHotel.value?.name ?? 'this property' }}.</p>
       </div>
       <div class="flex items-center gap-1">
         <Button size="icon" variant="ghost" class="relative" aria-label="Offers" @click="navigateTo('/offers')">

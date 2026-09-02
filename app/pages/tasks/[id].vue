@@ -5,7 +5,6 @@ import {
   ArrowRightLeftIcon,
   HandIcon,
   InfoIcon,
-  ListChecksIcon,
   MapPinIcon,
   RotateCcwIcon,
   SendIcon,
@@ -15,8 +14,9 @@ import {
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
+import { useSourceApps } from '~/composables/useSourceApps'
 import type { BoardColumn, TaskDetail } from '~/utils/clientFakeApi'
-import { fullName, initials, isClaimable, priorityMeta, relativeTime, taskRef } from '~/utils/task-ui'
+import { displayName, initials, isClaimable, priorityMeta, relativeTime, taskRef } from '~/utils/task-ui'
 
 definePageMeta({ title: 'Task' })
 
@@ -25,13 +25,14 @@ const router = useRouter()
 const api = useTasksApi()
 const session = useSession()
 const caps = useCaps()
+const sourceApps = useSourceApps()
 
 const id = computed(() => String(route.params.id))
 const task = ref<TaskDetail | null>(null)
 const columns = ref<BoardColumn[]>([])
 const isLoading = ref(false)
 const errorMessage = ref('')
-/** Set when the task itself cannot be shown at all (403 / 404), not a failed action. */
+/** Set when the task itself cannot be shown at all (404), not a failed action. */
 const loadFailed = ref(false)
 /**
  * A child's post-success refetch failing is NOT a page failure — the action
@@ -45,15 +46,19 @@ const assignOpen = ref(false)
 const comment = ref('')
 
 const assignment = computed(() => task.value?.assignment ?? null)
-const assignee = computed(() => assignment.value?.user ?? null)
-const isMine = computed(() => assignment.value?.kind === 'STAFF' && assignment.value.userId === session.userId.value)
-const isHelper = computed(() => Boolean(task.value?.collaborators.some(c => c.userId === session.userId.value)))
+const isMine = computed(() => assignment.value?.kind === 'STAFF' && assignment.value.staffId === session.userId.value)
+const isHelper = computed(() => Boolean(task.value?.collaborators?.some(c => c.staffId === session.userId.value)))
 const heldBySomeoneElse = computed(() => assignment.value?.kind === 'STAFF' && !isMine.value)
 /** The pool this task sits in, when it does — what the Claim button names. */
 const poolName = computed(() => {
   const a = assignment.value
   if (!a || a.kind === 'STAFF') return null
-  return a.kind === 'TEAM' ? a.team?.name ?? 'a team' : a.department?.name ?? 'a department'
+  return a.kind === 'TEAM' ? a.teamName ?? 'a team' : a.departmentName ?? 'a department'
+})
+
+const sourceBadge = computed(() => {
+  if (!task.value || task.value.sourceProduct === 'sentec-tasks') return null
+  return sourceApps.badge(task.value.sourceProduct)
 })
 
 /**
@@ -80,13 +85,22 @@ const isReturning = ref(false)
 const returnError = ref('')
 
 /**
- * The move sheet mirrors the server's guards: NEW is unreachable (that is what
- * return-to-pool is for), and VERIFIED is leader sign-off.
+ * The move sheet mirrors the API's guards: NEW is unreachable (that is what
+ * return-to-pool is for), SUBMITTED is only reachable through submission,
+ * VERIFIED is leader sign-off — and a SUBMITTED task is frozen for staff and
+ * offers only park/cancel to leaders (review is the deciding action).
  */
-const moveColumns = computed(() => columns.value.filter(column =>
-  column.status !== 'NEW' && (column.status !== 'VERIFIED' || caps.isLeader.value),
+const moveColumns = computed(() => columns.value.filter((column) => {
+  if (!column.status || column.status === 'NEW' || column.status === 'SUBMITTED') return false
+  if (column.status === 'VERIFIED' && !caps.isLeader.value) return false
+  if (task.value?.status === 'SUBMITTED' && !['PENDING', 'CANCELLED'].includes(column.status)) return false
+  return true
+}))
+const canMove = computed(() => Boolean(
+  task.value
+  && moveColumns.value.length
+  && (caps.isLeader.value || (isMine.value && task.value.status !== 'SUBMITTED')),
 ))
-const canMove = computed(() => Boolean(task.value && moveColumns.value.length && (caps.isLeader.value || isMine.value)))
 
 /** Helper changes close with the task — but SUBMITTED still takes them. */
 const HELPER_CLOSED = new Set(['FINISHED', 'VERIFIED', 'CANCELLED'])
@@ -99,8 +113,9 @@ async function load() {
   errorMessage.value = ''
   try {
     task.value = await api.getTask(id.value)
+    void sourceApps.ensureLoaded()
     try {
-      columns.value = (await api.getBoard()).columns
+      columns.value = (await api.getKanbanBoard()).columns
     }
     catch {
       // A property without a provisioned board still shows the task, just with
@@ -145,7 +160,7 @@ function move(payload: { columnId: string, description: string | null }) {
   })
 }
 
-function assign(payload: { userId: string, remark: string | null }) {
+function assign(payload: { staffId: string, remark: string | null }) {
   return act(async () => {
     await api.assignTask({ taskId: id.value, ...payload })
     assignOpen.value = false
@@ -196,7 +211,7 @@ function applyDetail(detail: TaskDetail) {
   refreshError.value = ''
 }
 
-/** Absolute due times: staff plan the corridor route around the clock time, not a countdown. */
+/** Absolute due times: staff plan the corridor route around clock time, not a countdown. */
 function formatAbsolute(iso: string | null | undefined) {
   if (!iso) return '—'
   const date = new Date(iso)
@@ -248,27 +263,27 @@ onMounted(load)
                it lives with the title, not buried under the metadata rows. -->
           <p v-if="task.description" class="text-sm leading-relaxed text-foreground/85">{{ task.description }}</p>
           <p class="flex flex-wrap items-center gap-x-1 text-xs font-medium text-muted-foreground">
-            <span>{{ taskRef(task.id) }} · opened {{ relativeTime(task.createDate) }}</span>
-            <span v-if="task.partner" class="inline-flex items-center gap-1">
+            <span>{{ taskRef(task.id) }} · opened {{ relativeTime(task.createdAt) }}</span>
+            <span v-if="sourceBadge" class="inline-flex items-center gap-1">
               · via
               <span
-                v-if="task.partner.badgeColor"
+                v-if="sourceBadge.color"
                 class="h-1.5 w-1.5 rounded-full"
-                :style="{ backgroundColor: task.partner.badgeColor }"
+                :style="{ backgroundColor: sourceBadge.color }"
                 aria-hidden="true"
               />
-              {{ task.partner.name }}
+              {{ sourceBadge.label }}
             </span>
           </p>
         </CardHeader>
         <CardContent class="flex flex-wrap gap-1.5">
-          <Badge v-if="task.location" variant="secondary" class="gap-1">
-            <MapPinIcon class="h-3 w-3" />{{ task.location }}
+          <Badge v-if="task.roomNumber" variant="secondary" class="gap-1">
+            <MapPinIcon class="h-3 w-3" />{{ task.roomNumber }}
           </Badge>
           <Badge v-if="task.department" variant="outline">{{ task.department.name }}</Badge>
-          <Badge v-if="task.item" variant="outline">{{ task.item.name }}</Badge>
+          <Badge v-if="task.itemName && task.itemName !== task.title" variant="outline">{{ task.itemName }}</Badge>
           <Badge v-if="task.quantity && task.quantity > 1" variant="outline">×{{ task.quantity }}</Badge>
-          <Badge v-if="task.item?.category" variant="outline">{{ task.item.category.name }}</Badge>
+          <Badge v-if="task.categoryName" variant="outline">{{ task.categoryName }}</Badge>
         </CardContent>
       </Card>
 
@@ -327,7 +342,7 @@ onMounted(load)
       -->
       <Alert v-if="heldBySomeoneElse && !caps.canAssign.value && !isHelper">
         <InfoIcon />
-        <AlertTitle>{{ fullName(assignee) }} is handling this</AlertTitle>
+        <AlertTitle>{{ displayName(assignment?.staffName) }} is handling this</AlertTitle>
         <AlertDescription>
           Only a team leader can hand it over. Ask yours if it needs to move to you.
         </AlertDescription>
@@ -343,11 +358,11 @@ onMounted(load)
             <UserRoundIcon class="h-4 w-4 shrink-0 text-muted-foreground" />
             <span class="text-muted-foreground">Assignee</span>
             <span class="ml-auto flex min-w-0 items-center gap-2 font-medium">
-              <template v-if="assignee">
+              <template v-if="assignment?.kind === 'STAFF'">
                 <Avatar class="h-5 w-5">
-                  <AvatarFallback class="bg-primary/10 text-[9px] font-semibold text-primary">{{ initials(assignee) }}</AvatarFallback>
+                  <AvatarFallback class="bg-primary/10 text-[9px] font-semibold text-primary">{{ initials(assignment.staffName) }}</AvatarFallback>
                 </Avatar>
-                <span class="truncate">{{ fullName(assignee) }}</span>
+                <span class="truncate">{{ displayName(assignment.staffName) }}</span>
                 <span v-if="isMine" class="text-xs text-muted-foreground">(you)</span>
               </template>
               <span v-else-if="poolName" class="truncate text-muted-foreground">{{ poolName }} pool</span>
@@ -357,10 +372,10 @@ onMounted(load)
           <div v-if="assignment?.remark" class="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
             “{{ assignment.remark }}”
           </div>
-          <div v-if="task.requestedFor" class="flex items-center gap-2">
+          <div v-if="task.guestName" class="flex items-center gap-2">
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">Requested for</span>
-            <span class="ml-auto truncate font-medium">{{ task.requestedFor }}</span>
+            <span class="ml-auto truncate font-medium">{{ task.guestName }}</span>
           </div>
           <div v-if="task.sla" class="flex items-center gap-2">
             <span class="h-4 w-4" />
@@ -385,28 +400,16 @@ onMounted(load)
               :class="task.resolutionSlaStatus === 'BREACHED' ? 'text-destructive' : ''"
             >{{ formatAbsolute(task.resolutionDueAt) }}</span>
           </div>
-          <div v-if="task.externalRef" class="flex items-center gap-2">
+          <div v-if="task.dueAt" class="flex items-center gap-2">
             <span class="h-4 w-4" />
-            <span class="text-muted-foreground">Partner reference</span>
-            <span class="ml-auto truncate font-mono text-xs">{{ task.externalRef }}</span>
+            <span class="text-muted-foreground">Due</span>
+            <span class="ml-auto font-medium tabular-nums">{{ formatAbsolute(task.dueAt) }}</span>
           </div>
+          <p v-if="task.notes" class="rounded-lg bg-muted/60 px-3 py-2 text-foreground">{{ task.notes }}</p>
         </CardContent>
       </Card>
 
-      <!-- Checklist steps are labels, not tick-boxes: proof of completion is
-           the photo/note gate at submission, not self-ticked boxes. -->
-      <Card v-if="task.checklist.length">
-        <CardHeader class="pb-2">
-          <CardTitle class="flex items-center gap-2 text-sm">
-            <ListChecksIcon class="h-4 w-4" /> Checklist
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <ol class="list-decimal space-y-1 pl-5 text-sm text-foreground">
-            <li v-for="(step, index) in task.checklist" :key="index">{{ step }}</li>
-          </ol>
-        </CardContent>
-      </Card>
+      <TaskContextCard :task-id="task.id" />
 
       <DelegateCard :task="task" @updated="refresh" />
 
@@ -417,7 +420,7 @@ onMounted(load)
       <Card>
         <CardHeader class="pb-2"><CardTitle class="text-sm">Activity</CardTitle></CardHeader>
         <CardContent>
-          <TaskTimeline :history="task.history" :comments="task.comments" />
+          <TaskTimeline :task="task" />
           <div class="mt-4 flex items-end gap-2">
             <Textarea
               v-model="comment"
@@ -449,9 +452,9 @@ onMounted(load)
 
       <AssignSheet
         v-model:open="assignOpen"
-        :department-id="task.departmentId"
+        :department-id="task.hotelDepartmentId"
         :department-name="task.department?.name ?? null"
-        :current-assignee-id="assignment?.userId ?? null"
+        :current-assignee-id="assignment?.staffId ?? null"
         :busy="acting"
         @assign="assign"
       />

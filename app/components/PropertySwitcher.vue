@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CheckIcon, UsersIcon } from '@lucide/vue'
+import { CheckIcon } from '@lucide/vue'
 import { useSession } from '~/composables/useSession'
 
 const props = defineProps<{ open: boolean }>()
@@ -8,11 +8,11 @@ const emit = defineEmits<{ 'update:open': [boolean] }>()
 
 const session = useSession()
 
-const properties = computed(() => session.tenants.value)
-const activeId = computed(() => session.tenantId.value)
+const properties = computed(() => session.hotels.value)
+const activeId = computed(() => session.hotelId.value)
 
 function pick(id: string) {
-  session.setTenantId(id)
+  session.setHotelId(id)
   emit('update:open', false)
 }
 </script>
@@ -35,13 +35,9 @@ function pick(id: string) {
           @click="pick(property.id)"
         >
           <span class="min-w-0 flex-1">
+            <!-- The hotels claim already folds group grants in; the API's staff
+                 shape cannot say which reach is direct vs granted. -->
             <span class="block truncate font-medium">{{ property.name }}</span>
-            <!-- Reach via a group grant is worth showing: it explains why a
-                 property the user has no posting at is on this list at all. -->
-            <span v-if="property.viaGroupGrant" class="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
-              <UsersIcon class="h-3 w-3" />
-              via group access
-            </span>
           </span>
           <CheckIcon v-if="property.id === activeId" class="h-4 w-4 shrink-0 text-primary" />
         </button>
