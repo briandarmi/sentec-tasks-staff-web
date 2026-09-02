@@ -24,6 +24,8 @@ function toggleDark() {
 }
 
 /* ── Brand ─────────────────────────────────────────────────────────────── */
+const iconMarkSizes = [16, 24, 32, 48, 64]
+
 const namingRules = [
   { context: 'The company, corporate brand, GSM identity', use: 'Sentinel Tech', domain: 'sentineltech.com' },
   { context: 'The product trademark, used for the software', use: 'Sentec', domain: 'sentec.io' },
@@ -254,6 +256,52 @@ const switches = ref({ a: true, b: false })
         <div class="border-border flex items-center justify-center rounded-xl border bg-white p-10">
           <SentinelTechLogo variant="single-color-black" label="Sentinel Tech" class="w-64 max-w-full" />
         </div>
+      </section>
+
+      <section class="flex flex-col gap-4">
+        <h3 class="font-heading text-xl font-bold">Logo — Icon Mark</h3>
+        <p class="text-muted-foreground text-sm">
+          The shield on its own, for the places a lockup cannot go: favicons, app
+          chrome, avatars, and anything under roughly 32px where SENTINEL TECH would
+          be a grey smear. Three colorways rather than the lockup's four — with no
+          wordmark left to protect, <code class="text-xs">reverse</code> collapses
+          into full colour, because the shield is Sentinel Blue in both.
+        </p>
+        <div class="grid gap-3 sm:grid-cols-3">
+          <div class="border-border flex items-center justify-center rounded-xl border bg-white p-10">
+            <SentinelTechIcon variant="full-color" label="Sentinel Tech" class="size-20" />
+          </div>
+          <div class="flex items-center justify-center rounded-xl p-10" style="background:#2B2D31">
+            <SentinelTechIcon variant="single-color-white" label="Sentinel Tech" class="size-20" />
+          </div>
+          <div class="border-border flex items-center justify-center rounded-xl border bg-white p-10">
+            <SentinelTechIcon variant="single-color-black" label="Sentinel Tech" class="size-20" />
+          </div>
+        </div>
+
+        <h4 class="text-muted-foreground text-sm font-semibold">At the sizes it actually ships at</h4>
+        <p class="text-muted-foreground text-sm">
+          Worth checking rather than trusting: the mark at the sizes the browser tab
+          and the console chrome really use. The favicon is cut at 16, 32 and 48.
+        </p>
+        <div class="border-border flex flex-wrap items-end gap-8 rounded-xl border bg-white p-10">
+          <div v-for="px in iconMarkSizes" :key="px" class="flex flex-col items-center gap-2">
+            <SentinelTechIcon variant="full-color" :style="{ width: `${px}px`, height: `${px}px` }" />
+            <span class="text-muted-foreground text-xs">{{ px }}px</span>
+          </div>
+        </div>
+
+        <Alert variant="neutral">
+          <InfoIcon />
+          <AlertTitle>Crop to the shield — never shrink the whole lockup</AlertTitle>
+          <AlertDescription>
+            The lockup is roughly 3:1, so squeezing it into a 16px square tab leaves a
+            shield about 5px wide with an illegible wordmark beside it. That is why
+            the icon mark is a separate asset: the same shield artwork on a square
+            viewBox trimmed to the shield's own bounding box, so it fills the space
+            it is given.
+          </AlertDescription>
+        </Alert>
       </section>
 
       <section class="flex flex-col gap-4">

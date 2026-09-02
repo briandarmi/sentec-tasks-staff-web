@@ -1,0 +1,54 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+
+/**
+ * Sentinel Tech icon mark — the shield alone, without the SENTINEL TECH wordmark.
+ *
+ * Same artwork as the shield inside `SentinelTechLogo.vue`, on a square viewBox
+ * cropped to the shield's own bounding box. The design system ships this as its
+ * own asset for the places a lockup cannot go: favicons, app chrome, avatars,
+ * and anything below roughly 32px, where the wordmark would be a grey smear.
+ *
+ * THREE fixed colorways, not the lockup's four. `reverse` exists only to keep the
+ * wordmark legible on a dark ground; with no wordmark it collapses into
+ * `full-color`, because the shield is Sentinel Blue in both.
+ *
+ * `current-color` is the app-chrome case, not a brand colorway: it inherits the
+ * surrounding text colour so the caller can size and tint with utilities. Use a
+ * named colorway for any real brand placement, where the ink is fixed.
+ *
+ * The path is a verbatim copy of the shield in `SentinelTechLogo.vue`, cropped.
+ * Some apps also carry it in `public/img/logo.svg` for the favicon, which cannot
+ * render a component — the Tasks consoles do, the Butler consoles keep their own
+ * mark there. Update whichever copies an app has together.
+ */
+const props = withDefaults(defineProps<{
+  variant?: 'full-color' | 'single-color-white' | 'single-color-black' | 'current-color'
+  /** Accessible name. Omit when the mark sits beside a visible wordmark. */
+  label?: string
+}>(), {
+  variant: 'full-color',
+})
+
+const fill = computed(() => ({
+  'full-color': '#27A5F7',
+  'single-color-white': '#FFFFFF',
+  'single-color-black': '#000000',
+  'current-color': 'currentColor',
+}[props.variant]))
+</script>
+
+<template>
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="268.43 271.49 321.48 321.48"
+    :fill="fill"
+    fill-rule="evenodd"
+    clip-rule="evenodd"
+    :role="props.label ? 'img' : undefined"
+    :aria-hidden="props.label ? undefined : true"
+  >
+    <title v-if="props.label">{{ props.label }}</title>
+    <path d="M525.72 371.41l1.19 0.34c15.01,4.33 29.77,9.47 44.37,15.04l1.98 0.75 0.13 -2.12c1.67,-26.59 1.98,-52.99 2.12,-79.62l0.01 -1.04 -0.96 -0.4c-103.64,-43.83 -187.14,-43.82 -290.78,-0.02l-0.95 0.4 -0 1.04c-0.11,52.73 0.64,103.06 14.51,154.39l0.47 1.75 1.66 -0.73c26.35,-11.59 53.23,-21.46 81.57,-26.85l1.82 -0.35 0.8 1.67c3.78,7.86 8.12,15.68 13.37,22.66 1.45,1.93 2.93,3.67 4.45,5.37l0 -81.32 -1.71 0.15c-21.25,1.92 -42.28,5.95 -62.79,11.82l-2.78 0.8 -0.28 -2.88c-1.7,-17.57 -2.24,-35.23 -2.4,-52.87l-0.02 -1.73 1.63 -0.57c63.94,-22.25 127.88,-22.26 191.83,-0.05l1.64 0.57 -0.02 1.74c-0.14,10.3 -0.31,20.52 -0.81,30.81l-0.06 1.23zm-68.9 92.29c1.54,-1.73 3.03,-3.49 4.5,-5.45 5.3,-7.06 9.68,-14.97 13.48,-22.92l0.79 -1.65 1.8 0.31c11.95,2.08 23.7,5.03 35.3,8.57l2.3 0.7 -0.7 2.3c-2.55,8.36 -5.68,16.55 -9.61,24.36 -16.04,31.9 -43.18,52.95 -74.45,68.82l-1.09 0.55 -1.09 -0.55c-33.42,-16.94 -55.91,-35.71 -74.13,-68.44 -15.25,5.37 -30.45,11.7 -44.89,18.96 28.37,56.17 62.93,78.14 119.47,103.42l0.64 0.29 0.64 -0.29c86.77,-38.95 126.58,-83.72 140.82,-179.1l0.18 -1.18 -1.09 -0.48c-35.41,-15.58 -72.57,-25.9 -111.16,-29.38l-1.7 -0.15 0 81.31z" />
+  </svg>
+</template>

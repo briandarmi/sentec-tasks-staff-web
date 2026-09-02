@@ -5,9 +5,14 @@ import { computed } from 'vue'
  * Sentinel Tech corporate lockup — the shield with the negative-space "T", with
  * SENTINEL in bold caps and TECH tracked out beneath.
  *
- * This is the COMPANY mark. It is not the Sentec product mark in
- * `AppLogo.vue`, and the two are not interchangeable — see the naming rule on
- * the design-system page.
+ * This is the full horizontal lockup, and it is the COMPANY mark — see the naming
+ * rule on the design-system page. `SentinelTechIcon.vue` is the same shield with
+ * the wordmark dropped and the viewBox cropped to the shield's own bounding box;
+ * reach for that one wherever the wordmark would not stay legible, and for this
+ * one only where it will.
+ *
+ * `AppLogo.vue` is a separate question: it is whichever mark the app itself wears
+ * — this shield in the Tasks consoles, the Butler mark in the Butler ones.
  *
  * Artwork is a verbatim copy of the design system's
  * `assets/logos/sentinel-tech-horizontal-full-color.svg`, which unlike the
