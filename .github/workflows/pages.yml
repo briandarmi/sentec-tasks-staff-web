@@ -1,0 +1,67 @@
+# Builds the SPA shell and publishes it to GitHub Pages.
+#
+# The site is a *project* page, so it is served under `/<repo>/`. That path is
+# passed to Nuxt as NUXT_APP_BASE_URL and read in nuxt.config.ts; nothing here
+# hardcodes the repository name, so a fork publishes under its own name.
+#
+# The app runs entirely against its in-browser mock (see README), so there is
+# no backend to point at and no secret to inject.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [feat/overview-compliance]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes a queued one but never cancels
+# a deploy that is already in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the pnpm version from `packageManager` in package.json.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm test
+
+      - name: Generate static shell
+        run: pnpm generate
+        env:
+          NUXT_APP_BASE_URL: /${{ github.event.repository.name }}/
+
+      - uses: actions/configure-pages@v5
+        with:
+          # Turns Pages on (source: GitHub Actions) if the repo has not done so yet.
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .output/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

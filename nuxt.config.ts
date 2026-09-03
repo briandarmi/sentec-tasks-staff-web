@@ -1,6 +1,16 @@
 import tailwindcss from '@tailwindcss/vite'
 import { externalizeInlineScripts } from './build/externalize-inline-scripts'
 
+/**
+ * Where the shell is mounted. `/` on S3 + CloudFront; a GitHub Pages project
+ * site lives under `/<repo>/`, which the Pages workflow passes in as
+ * `NUXT_APP_BASE_URL` at build time. Every URL Nuxt emits — router, `_nuxt/`
+ * chunks, the externalised bootstrap scripts — honours `app.baseURL`; the
+ * `<head>` links below are the one place we have to prefix by hand.
+ */
+const baseURL = process.env.NUXT_APP_BASE_URL || '/'
+const withBase = (path: string) => `${baseURL.replace(/\/$/, '')}${path}`
+
 export default defineNuxtConfig({
   // Single-page app: no server rendering, no per-route HTML.
   ssr: false,
@@ -8,8 +18,9 @@ export default defineNuxtConfig({
   compatibilityDate: '2025-01-01',
   /**
    * `nuxt generate` would otherwise crawl every <NuxtLink> and emit one shell
-   * per route. This app is served from S3 behind CloudFront, which rewrites
-   * 403/404 to /index.html, so a single shell serves every path.
+   * per route. A single shell serves every path on both hosts: CloudFront
+   * rewrites 403/404 to /index.html, and GitHub Pages serves the `404.html`
+   * copy the static preset emits alongside it (status 404, same shell).
    */
   nitro: {
     preset: 'static',
@@ -30,6 +41,7 @@ export default defineNuxtConfig({
     'nitro:init': externalizeInlineScripts,
   },
   app: {
+    baseURL,
     head: {
       meta: [
         /**
@@ -49,8 +61,8 @@ export default defineNuxtConfig({
          * inherit from, so `currentColor` would resolve to black.
          * favicon.ico stays as the fallback for browsers that ignore SVG icons.
          */
-        { rel: 'icon', type: 'image/svg+xml', href: '/img/logo.svg' },
-        { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' },
+        { rel: 'icon', type: 'image/svg+xml', href: withBase('/img/logo.svg') },
+        { rel: 'icon', type: 'image/x-icon', href: withBase('/favicon.ico') },
       ],
     },
   },
