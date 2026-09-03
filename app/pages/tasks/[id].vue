@@ -60,6 +60,8 @@ const sourceBadge = computed(() => {
   if (!task.value || task.value.sourceProduct === 'sentec-tasks') return null
   return sourceApps.badge(task.value.sourceProduct)
 })
+/** The originating app by its full registry name — every task has one, this app included. */
+const createdBy = computed(() => (task.value ? sourceApps.nameOf(task.value.sourceProduct) : null))
 
 /**
  * Claim is offered when nobody personally holds the task: unassigned, or
@@ -245,27 +247,35 @@ onMounted(load)
     <template v-else-if="task">
       <Card>
         <CardHeader class="gap-2">
-          <div class="flex items-center justify-between gap-2">
-            <div class="flex items-center gap-1.5">
-              <StatusPill :status="task.status" />
-              <span
-                v-if="task.priority !== 'NORMAL'"
-                class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                :class="priorityMeta(task.priority).badge"
-              >
-                {{ priorityMeta(task.priority).label }}
-              </span>
+          <!-- Same scan order as the cards: where, then how urgent, then what.
+               The room is the thing someone mid-corridor looks for first. -->
+          <div class="flex items-start justify-between gap-2">
+            <p v-if="task.roomNumber" class="flex items-center gap-1.5 text-2xl font-bold tabular-nums tracking-tight text-foreground">
+              <MapPinIcon class="h-5 w-5 text-muted-foreground" />
+              {{ task.roomNumber }}
+            </p>
+            <p v-else class="text-sm font-medium text-muted-foreground">{{ task.locationTypeName ?? 'No room' }}</p>
+            <div class="ml-auto shrink-0">
+              <SlaBadge :task="task" :status="task.status" show-countdown />
             </div>
-            <SlaBadge :task="task" :status="task.status" show-countdown />
           </div>
           <CardTitle class="text-lg leading-snug">{{ task.title }}</CardTitle>
           <!-- The request itself is what the person walking there needs first —
                it lives with the title, not buried under the metadata rows. -->
           <p v-if="task.description" class="text-sm leading-relaxed text-foreground/85">{{ task.description }}</p>
-          <p class="flex flex-wrap items-center gap-x-1 text-xs font-medium text-muted-foreground">
-            <span>{{ taskRef(task.id) }} · opened {{ relativeTime(task.createdAt) }}</span>
-            <span v-if="sourceBadge" class="inline-flex items-center gap-1">
-              · via
+          <div class="flex flex-wrap items-center gap-1.5">
+            <StatusPill :status="task.status" />
+            <span
+              v-if="task.priority !== 'NORMAL'"
+              class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
+              :class="priorityMeta(task.priority).badge"
+            >
+              {{ priorityMeta(task.priority).label }}
+            </span>
+            <!-- Only when the task came from elsewhere: a Butler request has a
+                 guest waiting on the other end. The dot is the registry's
+                 colour — data, not a theme token. -->
+            <Badge v-if="sourceBadge" variant="outline" class="gap-1 text-muted-foreground">
               <span
                 v-if="sourceBadge.color"
                 class="h-1.5 w-1.5 rounded-full"
@@ -273,13 +283,13 @@ onMounted(load)
                 aria-hidden="true"
               />
               {{ sourceBadge.label }}
-            </span>
+            </Badge>
+          </div>
+          <p class="text-xs font-medium text-muted-foreground">
+            {{ taskRef(task.id) }} · opened {{ relativeTime(task.createdAt) }}
           </p>
         </CardHeader>
         <CardContent class="flex flex-wrap gap-1.5">
-          <Badge v-if="task.roomNumber" variant="secondary" class="gap-1">
-            <MapPinIcon class="h-3 w-3" />{{ task.roomNumber }}
-          </Badge>
           <Badge v-if="task.department" variant="outline">{{ task.department.name }}</Badge>
           <Badge v-if="task.itemName && task.itemName !== task.title" variant="outline">{{ task.itemName }}</Badge>
           <Badge v-if="task.quantity && task.quantity > 1" variant="outline">×{{ task.quantity }}</Badge>
@@ -376,6 +386,15 @@ onMounted(load)
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">Requested for</span>
             <span class="ml-auto truncate font-medium">{{ task.guestName }}</span>
+          </div>
+          <!-- Which system raised it, by full name — the badge above only
+               marks tasks from elsewhere; this row answers the question for
+               every task, and shows the raw code when the registry has no
+               entry rather than hiding a real fact. -->
+          <div v-if="createdBy" class="flex items-center gap-2">
+            <span class="h-4 w-4" />
+            <span class="text-muted-foreground">Created by</span>
+            <span class="ml-auto truncate font-medium">{{ createdBy }}</span>
           </div>
           <div v-if="task.sla" class="flex items-center gap-2">
             <span class="h-4 w-4" />

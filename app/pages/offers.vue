@@ -90,7 +90,9 @@ onMounted(load)
 
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
-        <h2 class="text-lg font-bold tracking-tight">Offers</h2>
+        <h2 class="text-lg font-bold tracking-tight">
+          Offers<template v-if="offers.length"> ({{ offers.length }})</template>
+        </h2>
         <p class="text-xs text-muted-foreground">Tasks colleagues want to hand to you. They move only if you accept.</p>
       </div>
       <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
@@ -125,13 +127,11 @@ onMounted(load)
     <div v-else class="space-y-3">
       <Card v-for="offer in offers" :key="offer.id">
         <CardContent class="space-y-2 pt-6">
-          <div class="flex items-start justify-between gap-2">
-            <NuxtLink :to="`/tasks/${offer.taskId}`" class="min-w-0 text-sm font-semibold text-foreground underline-offset-2 active:text-primary">
-              {{ offer.taskTitle }}
-            </NuxtLink>
-            <span class="shrink-0 text-[11px] text-muted-foreground">{{ relativeTime(offer.createdAt) }}</span>
-          </div>
-          <p class="text-xs text-muted-foreground">From {{ fromName(offer) }}</p>
+          <NuxtLink :to="`/tasks/${offer.taskId}`" class="block text-sm font-semibold text-foreground underline-offset-2 active:text-primary">
+            {{ offer.taskTitle }}
+          </NuxtLink>
+          <!-- One docket line: who, and how long it has been waiting on you. -->
+          <p class="text-xs text-muted-foreground">From {{ fromName(offer) }} · {{ relativeTime(offer.createdAt) }}</p>
           <p v-if="offer.note" class="rounded-lg bg-muted/60 px-3 py-2 text-sm text-foreground">“{{ offer.note }}”</p>
           <div class="flex gap-2 pt-1">
             <Button

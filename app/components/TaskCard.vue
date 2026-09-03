@@ -38,35 +38,39 @@ const sourceBadge = computed(() => {
     class="block rounded-xl border border-l-[3px] bg-card p-3.5 shadow-sm transition-colors active:bg-accent/50 hover:bg-accent/30"
     :class="accent"
   >
+    <!-- Scan order at arm's length in a corridor: the SLA stripe, then the
+         room, then the running clock — the title only after that. -->
     <div class="flex items-start justify-between gap-2">
-      <div class="flex items-center gap-1.5">
-        <StatusPill :status="task.status" />
-        <!-- Only when it deviates: a NORMAL badge on every card is noise. -->
-        <span
-          v-if="task.priority !== 'NORMAL'"
-          class="inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold"
-          :class="priorityMeta(task.priority).badge"
-        >
-          {{ priorityMeta(task.priority).label }}
-        </span>
+      <p v-if="task.roomNumber" class="flex items-center gap-1 text-sm font-bold tabular-nums text-foreground">
+        <MapPinIcon class="h-3.5 w-3.5 text-muted-foreground" />
+        {{ task.roomNumber }}
+      </p>
+      <p v-else class="text-xs font-medium text-muted-foreground">{{ task.locationTypeName ?? 'No room' }}</p>
+      <div class="ml-auto shrink-0">
+        <SlaBadge :task="task" :status="task.status" show-countdown />
       </div>
-      <span class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ relativeTime(task.createdAt) }}</span>
     </div>
 
-    <p class="mt-2 text-sm font-semibold leading-snug text-foreground">{{ task.title }}</p>
+    <p class="mt-1.5 text-sm font-semibold leading-snug text-foreground">{{ task.title }}</p>
     <p v-if="task.description" class="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{{ task.description }}</p>
 
     <div class="mt-2.5 flex flex-wrap items-center gap-1.5">
-      <Badge v-if="task.roomNumber" variant="secondary" class="gap-1 text-[10px] font-medium">
-        <MapPinIcon class="h-2.5 w-2.5" />
-        {{ task.roomNumber }}
-      </Badge>
+      <StatusPill :status="task.status" />
+      <!-- Only when it deviates: a NORMAL badge on every card is noise. -->
+      <span
+        v-if="task.priority !== 'NORMAL'"
+        class="inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold"
+        :class="priorityMeta(task.priority).badge"
+      >
+        {{ priorityMeta(task.priority).label }}
+      </span>
       <Badge v-if="task.department" variant="outline" class="text-[10px]">{{ task.department.name }}</Badge>
       <Badge v-if="task.quantity && task.quantity > 1" variant="outline" class="text-[10px]">×{{ task.quantity }}</Badge>
       <!-- The originating app matters operationally: a Butler task has a guest
            waiting on the other end. The dot is the registry's colour — data,
-           not a theme token. -->
-      <Badge v-if="sourceBadge" variant="outline" class="gap-1 text-[10px] text-muted-foreground">
+           not a theme token — and it sits at the row's edge so it reads the
+           same on every card. -->
+      <Badge v-if="sourceBadge" variant="outline" class="ml-auto gap-1 text-[10px] text-muted-foreground">
         <span
           v-if="sourceBadge.color"
           class="h-1.5 w-1.5 rounded-full"
@@ -78,10 +82,9 @@ const sourceBadge = computed(() => {
     </div>
 
     <div class="mt-3 flex items-center justify-between gap-2">
-      <div class="flex min-w-0 items-center gap-2">
-        <SlaBadge :task="task" :status="task.status" show-countdown />
-        <span class="truncate text-[11px] font-medium text-muted-foreground">{{ taskRef(task.id) }}</span>
-      </div>
+      <span class="truncate text-[11px] font-medium text-muted-foreground">
+        {{ taskRef(task.id) }} · {{ relativeTime(task.createdAt) }}
+      </span>
       <div class="flex items-center gap-1.5">
         <Avatar v-if="assigneeName" class="h-6 w-6" :title="assigneeName">
           <AvatarFallback

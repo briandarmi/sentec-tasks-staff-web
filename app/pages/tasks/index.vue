@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { FilterXIcon, LayoutListIcon, RefreshCwIcon, SearchIcon } from '@lucide/vue'
+import { FilterXIcon, LayersIcon, LayoutListIcon, RefreshCwIcon, SearchIcon } from '@lucide/vue'
 import { useTasksApi, type TaskQuery } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
+import { useCaps } from '~/composables/useCaps'
+import { useSourceApps } from '~/composables/useSourceApps'
+import { useNow } from '~/composables/useNow'
 import type { TaskListItem } from '~/utils/clientFakeApi'
+import { groupIntoLanes } from '~/utils/source-lanes'
 
 definePageMeta({ title: 'Tasks' })
 
@@ -11,6 +15,9 @@ const route = useRoute()
 const router = useRouter()
 const api = useTasksApi()
 const session = useSession()
+const caps = useCaps()
+const sourceApps = useSourceApps()
+void sourceApps.ensureLoaded()
 
 /**
  * Filters live in the URL, not in component state — a filtered view is
@@ -21,7 +28,8 @@ const session = useSession()
  * labeled where they happen: "To claim" narrows the fetched page to pool rows
  * client-side (the API's staff auto-scope already returns own + unclaimed
  * work, but has no unclaimed-only parameter), and the search box filters the
- * loaded page only — the API has no free-text search.
+ * loaded page only — the API has no free-text search. The queue chips also
+ * carry the server's total for their filter (see `refreshCounts`).
  */
 const search = ref(String(route.query.q ?? ''))
 const status = computed(() => String(route.query.status ?? ''))
@@ -75,9 +83,43 @@ function currentQuery(): TaskQuery {
 const clientNarrow = (rows: TaskListItem[]) =>
   scope.value === 'unclaimed' ? rows.filter(t => !t.assignment || t.assignment.kind !== 'STAFF') : rows
 
+/**
+ * Server totals on the chips that people use as queues — "Mine", "Helping",
+ * and for leaders "In review" — one `limit=1` list call each, read for
+ * `meta.total` only. Fire-and-forget: a slow or failed count never delays the
+ * list, the chip just shows its plain label until (or unless) the number lands.
+ */
+const counts = ref<Record<string, number | null>>({})
+
+async function fetchCount(key: string, query: TaskQuery) {
+  try {
+    const res = await api.listTasks({ ...query, limit: 1 })
+    counts.value = { ...counts.value, [key]: res.meta.total }
+  }
+  catch {
+    counts.value = { ...counts.value, [key]: null }
+  }
+}
+
+function refreshCounts() {
+  const userId = session.userId.value
+  if (userId) {
+    void fetchCount('mine', { assignedStaffId: userId })
+    void fetchCount('helping', { helping: '1' })
+  }
+  // Leaders read "In review" as their own queue; for staff it is just a status.
+  if (caps.isLeader.value) void fetchCount('SUBMITTED', { status: 'SUBMITTED' })
+}
+
+function withCount(label: string, key?: string) {
+  const n = key ? counts.value[key] : null
+  return typeof n === 'number' ? `${label} (${n})` : label
+}
+
 async function load() {
   isLoading.value = true
   errorMessage.value = ''
+  refreshCounts()
   try {
     const res = await api.listTasks(currentQuery())
     tasks.value = clientNarrow(res.data)
@@ -128,23 +170,36 @@ const shownTasks = computed(() => {
   )
 })
 
+/**
+ * "Group by source" rearranges the loaded rows into one lane per originating
+ * app, most urgent lane first — a display toggle, not a filter, so it stays
+ * client state and never enters the URL. Hidden when the registry failed to
+ * load: grouping without names would produce a single "Other" lane.
+ */
+const groupBySource = ref(false)
+const canGroupBySource = computed(() => sourceApps.status.value !== 'failed')
+const now = useNow()
+const lanes = computed(() => groupIntoLanes(shownTasks.value, sourceApps.byCode.value, now.value))
+
 // One watcher drives loading: any server-filter change reloads from page one.
 watch(() => [route.query.status, route.query.scope], load, { immediate: true })
 
-const STATUS_TABS = [
+interface Chip { value: string, label: string, countKey?: string }
+
+const STATUS_TABS: Chip[] = [
   { value: '', label: 'All' },
   { value: 'NEW', label: 'New' },
   { value: 'IN_PROGRESS', label: 'Active' },
   // Leaders read this as their review queue; staff as "waiting on review".
-  { value: 'SUBMITTED', label: 'In review' },
+  { value: 'SUBMITTED', label: 'In review', countKey: 'SUBMITTED' },
   { value: 'FINISHED', label: 'Finished' },
   { value: 'VERIFIED', label: 'Verified' },
 ]
 
-const SCOPE_TABS = [
+const SCOPE_TABS: Chip[] = [
   { value: 'unclaimed', label: 'To claim' },
-  { value: 'mine', label: 'Mine' },
-  { value: 'helping', label: 'Helping' },
+  { value: 'mine', label: 'Mine', countKey: 'mine' },
+  { value: 'helping', label: 'Helping', countKey: 'helping' },
   { value: 'late-response', label: 'Late response' },
   { value: 'breached', label: 'Breached' },
 ]
@@ -179,7 +234,7 @@ const SCOPE_TABS = [
         :class="status === tab.value ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
         @click="setFilter('status', tab.value)"
       >
-        {{ tab.label }}
+        {{ withCount(tab.label, tab.countKey) }}
       </button>
       <span class="w-px shrink-0 self-stretch bg-border" aria-hidden="true" />
       <button
@@ -190,12 +245,26 @@ const SCOPE_TABS = [
         :class="scope === s.value ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
         @click="setFilter('scope', scope === s.value ? '' : s.value)"
       >
-        {{ s.label }}
+        {{ withCount(s.label, s.countKey) }}
       </button>
     </div>
 
-    <div v-if="hasFilters" class="flex justify-end">
-      <Button variant="outline" size="sm" @click="clearFilters">
+    <div v-if="canGroupBySource || hasFilters" class="flex items-center justify-between gap-2">
+      <!-- A switch, not a chip: it rearranges the rows below, it does not
+           narrow them, so it lives outside the filter strip. -->
+      <button
+        v-if="canGroupBySource"
+        type="button"
+        role="switch"
+        :aria-checked="groupBySource"
+        class="flex min-h-9 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        :class="groupBySource ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+        @click="groupBySource = !groupBySource"
+      >
+        <LayersIcon class="h-3.5 w-3.5" /> Group by source
+      </button>
+      <span v-else />
+      <Button v-if="hasFilters" variant="outline" size="sm" @click="clearFilters">
         <FilterXIcon class="h-4 w-4" /> Clear filters
       </Button>
     </div>
@@ -219,7 +288,28 @@ const SCOPE_TABS = [
     </EmptyState>
 
     <template v-else>
-      <div class="space-y-3">
+      <!-- Lanes: the same cards, re-partitioned by originating app with the
+           lane holding a fire on top. The square is the registry's colour —
+           data, not a theme token; the Other lane has none. -->
+      <div v-if="groupBySource" class="space-y-5">
+        <section v-for="lane in lanes" :key="lane.key" class="space-y-2">
+          <h3 class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <span
+              class="h-2.5 w-2.5 shrink-0 rounded-sm"
+              :class="lane.color ? '' : 'bg-muted-foreground/40'"
+              :style="lane.color ? { backgroundColor: lane.color } : undefined"
+              aria-hidden="true"
+            />
+            {{ lane.label }}
+            <span class="rounded-full bg-muted px-1.5 tabular-nums">{{ lane.tasks.length }}</span>
+          </h3>
+          <div class="space-y-3">
+            <TaskCard v-for="task in lane.tasks" :key="task.id" :task="task" />
+          </div>
+        </section>
+      </div>
+
+      <div v-else class="space-y-3">
         <TaskCard v-for="task in shownTasks" :key="task.id" :task="task" />
       </div>
 

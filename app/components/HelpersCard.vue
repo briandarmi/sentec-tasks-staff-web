@@ -4,7 +4,7 @@ import { UserRoundMinusIcon, UsersRoundIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import type { TaskDetail } from '~/utils/clientFakeApi'
-import { displayName } from '~/utils/task-ui'
+import { displayName, initials } from '~/utils/task-ui'
 
 const props = defineProps<{
   task: TaskDetail
@@ -92,27 +92,36 @@ async function remove(userId: string) {
       </Alert>
 
       <p v-if="helpers.length === 0" class="py-1 text-xs text-muted-foreground">No helpers.</p>
-      <div
-        v-for="helper in helpers"
-        :key="helper.staffId"
-        class="flex min-h-11 items-center justify-between gap-2 rounded-lg border bg-card px-3 py-2"
-      >
-        <span class="min-w-0 truncate text-sm font-medium">{{ displayName(helper.staffName) }}</span>
-        <Button
-          v-if="canManage || canLeave(helper.staffId)"
-          size="sm"
-          variant="ghost"
-          class="text-muted-foreground hover:text-destructive"
-          :disabled="Boolean(removingUserId)"
-          :aria-busy="removingUserId === helper.staffId"
-          :aria-label="`${canLeave(helper.staffId) && !canManage ? 'Leave' : 'Remove'} ${displayName(helper.staffName)}`"
-          @click="remove(helper.staffId)"
+      <!-- One chip per helper — initials first, so a glance at the row says
+           who is on this without reading every name. -->
+      <div v-else class="flex flex-wrap gap-2">
+        <div
+          v-for="helper in helpers"
+          :key="helper.staffId"
+          class="flex min-h-11 max-w-full items-center gap-2 rounded-full border bg-card py-1 pl-1 pr-2"
         >
-          <UserRoundMinusIcon class="h-4 w-4" />
-          {{ removingUserId === helper.staffId
-            ? (canLeave(helper.staffId) && !canManage ? 'Leaving…' : 'Removing…')
-            : (canLeave(helper.staffId) && !canManage ? 'Leave' : 'Remove') }}
-        </Button>
+          <Avatar class="h-7 w-7 shrink-0">
+            <AvatarFallback class="bg-primary/10 text-[10px] font-semibold text-primary">
+              {{ initials(helper.staffName) }}
+            </AvatarFallback>
+          </Avatar>
+          <span class="min-w-0 truncate text-sm font-medium">{{ displayName(helper.staffName) }}</span>
+          <Button
+            v-if="canManage || canLeave(helper.staffId)"
+            size="sm"
+            variant="ghost"
+            class="-mr-1 h-9 rounded-full text-muted-foreground hover:text-destructive"
+            :disabled="Boolean(removingUserId)"
+            :aria-busy="removingUserId === helper.staffId"
+            :aria-label="`${canLeave(helper.staffId) && !canManage ? 'Leave' : 'Remove'} ${displayName(helper.staffName)}`"
+            @click="remove(helper.staffId)"
+          >
+            <UserRoundMinusIcon class="h-4 w-4" />
+            {{ removingUserId === helper.staffId
+              ? (canLeave(helper.staffId) && !canManage ? 'Leaving…' : 'Removing…')
+              : (canLeave(helper.staffId) && !canManage ? 'Leave' : 'Remove') }}
+          </Button>
+        </div>
       </div>
 
       <div v-if="canManage" class="flex items-end gap-2 pt-1">

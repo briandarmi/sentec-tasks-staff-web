@@ -7,11 +7,14 @@ import {
   TASK_STATUS_META,
   displayName,
   dueIn,
+  dueLabel,
+  formatClockTime,
   initials,
   isClaimable,
   isOpen,
   priorityMeta,
   relativeTime,
+  runningDueAt,
   slaAccent,
   slaState,
   statusMeta,
@@ -67,6 +70,38 @@ describe('SLA presentation', () => {
     expect(dueIn('2026-08-25T03:30:00.000Z', now)).toMatchObject({ overdue: false })
     expect(dueIn('2026-08-25T02:30:00.000Z', now)).toMatchObject({ overdue: true })
     expect(dueIn(null, now)).toBeNull()
+  })
+
+  it('runs the response clock until pickup, the resolution clock while worked, none once submitted', () => {
+    const clocks = { responseDueAt: '2026-08-25T03:30:00.000Z', resolutionDueAt: '2026-08-25T05:00:00.000Z' }
+    expect(runningDueAt({ status: 'NEW', ...clocks })).toBe(clocks.responseDueAt)
+    expect(runningDueAt({ status: 'IN_PROGRESS', ...clocks })).toBe(clocks.resolutionDueAt)
+    expect(runningDueAt({ status: 'PENDING', ...clocks })).toBe(clocks.resolutionDueAt)
+    expect(runningDueAt({ status: 'SUBMITTED', ...clocks })).toBeNull()
+    expect(runningDueAt({ status: 'FINISHED', ...clocks })).toBeNull()
+    expect(runningDueAt({ status: 'NEW', resolutionDueAt: clocks.resolutionDueAt })).toBeNull()
+  })
+
+  it('labels a due time by urgency: countdown, amber inside 30 minutes, "due HH:MM · over" once breached', () => {
+    const now = Date.parse('2026-08-25T03:00:00.000Z')
+    expect(dueLabel('2026-08-25T05:00:00.000Z', now)).toEqual({ label: '2h left', tone: 'ok' })
+    expect(dueLabel('2026-08-25T03:20:00.000Z', now)).toEqual({ label: '20m left', tone: 'soon' })
+    expect(dueLabel('2026-08-25T03:30:00.000Z', now)?.tone).toBe('soon')
+    const late = dueLabel('2026-08-25T02:35:00.000Z', now)!
+    expect(late.tone).toBe('breached')
+    expect(late.label).toBe(`due ${formatClockTime('2026-08-25T02:35:00.000Z')} · 25m over`)
+    expect(dueLabel(null, now)).toBeNull()
+  })
+
+  it('formats a wall-clock time and never says "Invalid Date"', () => {
+    // Built from the Date's local getters, like the helper, so the expectation
+    // holds in every host time zone (the dev host is not in WIB).
+    const iso = '2026-08-25T03:07:00.000Z'
+    const date = new Date(iso)
+    expect(formatClockTime(iso)).toBe(`${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`)
+    expect(formatClockTime(iso)).toMatch(/^\d{2}:\d{2}$/)
+    expect(formatClockTime(null)).toBe('—')
+    expect(formatClockTime('not a date')).toBe('—')
   })
 })
 

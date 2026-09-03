@@ -98,8 +98,8 @@ repo is not checked out, so a standalone clone still builds).
 | Route         | What it is                                                      |
 | ------------- | --------------------------------------------------------------- |
 | `/`           | My work — assigned to me, plus my department's unclaimed queue   |
-| `/tasks`      | Full list; server-side filters live in the URL, paging is keyset |
-| `/tasks/[id]` | Detail: claim (pool-aware), assign, return, delegate, helpers, submit / review, move, comment, attach & upload |
+| `/tasks`      | Full list; server-side filters live in the URL, paging is keyset; queue chips carry server totals; optional group-by-source lanes, most urgent lane first |
+| `/tasks/[id]` | Detail: room-first header, claim (pool-aware), assign, return, delegate, helpers, submit / review (with the other pending reviews), move, comment, attach & upload |
 | `/tasks/new`  | Raise a task, with a live preview off the API's own resolver     |
 | `/board`      | Board view of the property's columns                            |
 | `/offers`     | Delegation offers waiting on my accept or decline               |
@@ -147,6 +147,41 @@ after a refresh. Sign-out clears everything on the device, including the
 selected property — correct for a shared shift device, and the profile screen
 says so.
 
+## Kept in step with the remote staff app
+
+The remote `sentec-tasks-web` (SentinelTech-com, `master`) is the reference
+this app is periodically re-aligned with. Its 2026-09-03 redesign
+(`docs/superpowers/specs/2026-09-03-staff-app-redesign-design.md` there) was
+ported as **information architecture, not palette** — the Sentinel Tech Design
+System stays untouched, per the standing decision:
+
+- **Three signals, kept apart.** SLA urgency is the only meaning of the
+  red/amber tones (card stripe, running clock — amber inside 30 minutes,
+  breached reads `due HH:MM · 25m over`); the source app is a small dot in the
+  registry's own colour (data, never a token); lifecycle status keeps its own
+  pill. Scan order on cards and the detail header: stripe, room, clock, title.
+- **Queue chips carry server totals** (`Mine (4)`, `Helping (1)`, and for
+  leaders `In review (2)`) from `limit=1` list calls read for `meta.total`;
+  a failed count leaves the plain label. "To claim" is the remote's "Team pool"
+  and stays a client-side view — the API has no unclaimed filter.
+- **Group by source** is a display toggle over the loaded rows (client state,
+  never in the URL): one lane per originating app, the lane holding a breached
+  task first, then due-soon, then the rest; unregistered codes fold into
+  "Other". It hides itself when the registry fetch failed. The pure grouping
+  lives in `app/utils/source-lanes.ts`, pinned by `tests/source-lanes.spec.ts`.
+- **Review is a sign-off slip**: submitted at `HH:MM · on time / late` from the
+  verdict stamped at submission, "Request changes" reads as the non-happy path,
+  and up to three other SUBMITTED tasks are listed beneath as "Also pending"
+  (best effort — a failed fetch renders nothing). The detail gains a
+  "Created by" row naming the source app for every task.
+
+Deliberately **not** ported: the brass/teal tokens and neutral status chips
+(design decision above); inline dashed panels in place of the return dialog and
+the move/assign sheets (this app's secondary flows are sheets and dialogs by
+design); proof-photo thumbnails (the mock has no object store, so `filepath`
+is a placeholder URL that would render as a broken image — the photo count and
+link list stay); the `.design-sync` tooling (remote-only).
+
 ## Deploying to GitHub Pages
 
 [`.github/workflows/pages.yml`](.github/workflows/pages.yml) builds the shell
@@ -174,6 +209,16 @@ NUXT_APP_BASE_URL=/sentec-tasks-staff-web/ pnpm generate
 # then serve .output/public at that sub-path, e.g.
 # mkdir -p /tmp/pages && ln -sfn "$PWD/.output/public" /tmp/pages/sentec-tasks-staff-web && npx serve /tmp/pages
 ```
+
+Deploying from a branch other than the repository's default needs one more
+thing: the `github-pages` environment only admits the branches listed in its
+deployment-branch policy (Settings → Environments → github-pages), and GitHub
+seeds that list with the default branch at the time Pages was enabled. A deploy
+from an unlisted branch fails at the deploy step with "not allowed to deploy to
+github-pages due to environment protection rules" even though the build passed.
+Add the branch there (or via
+`gh api -X POST repos/<owner>/<repo>/environments/github-pages/deployment-branch-policies -f name=<branch> -f type=branch`)
+and re-run the failed job.
 
 The repository ships its own `pnpm-lock.yaml` so the workflow can run
 `pnpm install --frozen-lockfile`. Inside the shared workspace pnpm reads only

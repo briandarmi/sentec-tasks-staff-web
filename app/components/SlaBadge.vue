@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ClockIcon } from '@lucide/vue'
-import type { SlaStatus } from '~/utils/clientFakeApi'
-import { dueIn, slaState } from '~/utils/task-ui'
+import type { SlaStatus, TaskStatus } from '~/utils/clientFakeApi'
+import { dueLabel, runningDueAt, slaState } from '~/utils/task-ui'
 import { useNow } from '~/composables/useNow'
 
 const props = defineProps<{
@@ -13,7 +13,7 @@ const props = defineProps<{
     resolutionDueAt?: string | null
   }
   /** The task's status, which decides which SLA clock is still running. */
-  status?: string
+  status?: TaskStatus
   /** Show the live countdown alongside the state. Off on dense cards. */
   showCountdown?: boolean
 }>()
@@ -24,17 +24,27 @@ const state = computed(() => slaState(props.task))
 const now = useNow()
 
 /**
- * Which clock is actually running: until the task is picked up it is the
- * response target, after that the resolution target. Showing the wrong one is
- * worse than showing none, so a finished or submitted task shows no countdown
- * at all — submitted work's clock stopped at submission.
+ * Only the clock that is actually running: the response target until the task
+ * is picked up, the resolution target after that. Submitted or closed work
+ * shows no countdown at all — its clock stopped and the verdict badge says how
+ * it went. Once breached the label says when it was due as well as by how much.
  */
 const countdown = computed(() => {
   if (!props.showCountdown) return null
-  if (props.status && !['NEW', 'IN_PROGRESS', 'PENDING'].includes(props.status)) return null
-  const due = props.status === 'NEW' ? props.task.responseDueAt : props.task.resolutionDueAt
-  return dueIn(due ?? null, now.value)
+  const due = props.status ? runningDueAt({ status: props.status, ...props.task }) : props.task.resolutionDueAt ?? null
+  return dueLabel(due, now.value)
 })
+
+/**
+ * SLA urgency is the ONE thing these colours mean here: red for breached,
+ * amber for due within the half hour, neutral otherwise. Lifecycle status has
+ * its own pill and never borrows them.
+ */
+const COUNTDOWN_TONE = {
+  ok: 'bg-muted text-muted-foreground',
+  soon: 'bg-warning-tint text-warning-tint-foreground',
+  breached: 'bg-destructive/10 text-destructive',
+} as const
 
 const meta = computed(() => {
   switch (state.value) {
@@ -46,7 +56,7 @@ const meta = computed(() => {
 </script>
 
 <template>
-  <span v-if="meta || countdown" class="inline-flex items-center gap-1.5">
+  <span v-if="meta || countdown" class="inline-flex flex-wrap items-center justify-end gap-1.5">
     <span
       v-if="meta"
       class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
@@ -57,8 +67,8 @@ const meta = computed(() => {
     </span>
     <span
       v-if="countdown"
-      class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums"
-      :class="countdown.overdue ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'"
+      class="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums"
+      :class="COUNTDOWN_TONE[countdown.tone]"
     >
       <ClockIcon v-if="!meta" class="h-3 w-3" />
       {{ countdown.label }}

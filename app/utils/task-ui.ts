@@ -142,6 +142,49 @@ export function dueIn(iso: string | null, nowMs = Date.now()): { label: string, 
   return diff >= 0 ? { label: `${value} left`, overdue: false } : { label: `${value} over`, overdue: true }
 }
 
+/** Wall-clock "HH:MM" in the viewer's zone; '—' when there is nothing to show. */
+export function formatClockTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+/** A running clock inside this window reads as "soon" — amber, not yet red. */
+export const DUE_SOON_MS = 30 * 60_000
+
+/**
+ * Which SLA clock is actually running: the response target until the task is
+ * picked up, the resolution target while it is worked or parked. Submitted and
+ * closed work has no running clock — its verdict is already stamped, and
+ * showing a countdown there would be showing the wrong number.
+ */
+export function runningDueAt(task: { status: TaskStatus, responseDueAt?: string | null, resolutionDueAt?: string | null }): string | null {
+  switch (task.status) {
+    case 'NEW': return task.responseDueAt ?? null
+    case 'IN_PROGRESS':
+    case 'PENDING': return task.resolutionDueAt ?? null
+    default: return null
+  }
+}
+
+export type DueTone = 'ok' | 'soon' | 'breached'
+
+/**
+ * The due label for a running clock. While there is time it is the countdown
+ * ("40m left", amber once inside DUE_SOON_MS); once breached it says WHEN the
+ * task was due as well as by how much — "due 14:30 · 25m over" — because a
+ * leader triaging late work needs both, and a bare "25m over" answers only
+ * one of the two questions. Null when there is no target, like `dueIn`.
+ */
+export function dueLabel(iso: string | null, nowMs = Date.now()): { label: string, tone: DueTone } | null {
+  const countdown = dueIn(iso, nowMs)
+  if (!countdown) return null
+  if (countdown.overdue) return { label: `due ${formatClockTime(iso)} · ${countdown.label}`, tone: 'breached' }
+  const remaining = Date.parse(iso!) - nowMs
+  return { label: countdown.label, tone: remaining <= DUE_SOON_MS ? 'soon' : 'ok' }
+}
+
 /** Minutes rendered as a duration, for SLA targets in config screens. */
 export function formatMinutes(minutes: number): string {
   if (minutes < 60) return `${minutes} min`
