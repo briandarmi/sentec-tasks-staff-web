@@ -62,12 +62,12 @@ async function logout() {
     </Card>
 
     <Card>
-      <CardContent class="flex items-center justify-between pt-6">
+      <CardContent class="flex flex-wrap items-center justify-between gap-3 pt-6">
         <div>
           <p class="text-sm font-medium">Appearance</p>
-          <p class="text-xs text-muted-foreground">Toggle light / dark theme.</p>
+          <p class="text-xs text-muted-foreground">Follow your device, or pin light or dark.</p>
         </div>
-        <ThemeToggle />
+        <ThemeModeSelect />
       </CardContent>
     </Card>
 

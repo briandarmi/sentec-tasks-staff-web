@@ -1,8 +1,26 @@
 <script setup lang="ts">
-import { MoonIcon, SunIcon } from '@lucide/vue'
-import { useTheme } from '~/composables/useTheme'
+import { LaptopIcon, MoonIcon, SmartphoneIcon, SunIcon } from '@lucide/vue'
+import { themeSlug, useTheme } from '~/composables/useTheme'
 
-const { isDark, toggle } = useTheme()
+/**
+ * Click-to-cycle theme control: device, then dark, then light.
+ *
+ * Device mode follows the OS/browser and is the default, so it leads the
+ * rotation. Its icon is the hardware in use rather than a third abstract
+ * symbol, which is what makes "this follows your machine" legible at a glance.
+ */
+const { preference, nextPreference, isDevice, isHandheld, cycle } = useTheme()
+
+const LABEL = { device: 'Device', light: 'Light', dark: 'Dark' } as const
+
+const icon = computed(() => {
+  if (isDevice.value) return isHandheld.value ? SmartphoneIcon : LaptopIcon
+  return preference.value === 'dark' ? MoonIcon : SunIcon
+})
+
+const label = computed(
+  () => `Theme: ${LABEL[themeSlug(preference.value)]}. Switch to ${LABEL[themeSlug(nextPreference.value)]}.`,
+)
 </script>
 
 <template>
@@ -10,11 +28,10 @@ const { isDark, toggle } = useTheme()
     variant="ghost"
     size="icon"
     class="text-muted-foreground hover:text-foreground"
-    :title="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
-    :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
-    @click="toggle"
+    :title="label"
+    :aria-label="label"
+    @click="cycle"
   >
-    <SunIcon v-if="isDark" class="h-4 w-4" />
-    <MoonIcon v-else class="h-4 w-4" />
+    <component :is="icon" class="h-4 w-4" />
   </Button>
 </template>
