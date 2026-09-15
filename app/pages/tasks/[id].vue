@@ -438,9 +438,14 @@ onMounted(load)
 
       <Card>
         <CardHeader class="pb-2"><CardTitle class="text-sm">Activity</CardTitle></CardHeader>
-        <CardContent>
+        <CardContent class="space-y-4">
+          <!-- The same history twice, on purpose: the strip answers "how is
+               this going against the clock" at a glance, the list below says
+               who did what and when. -->
+          <TaskTimelineChart :task="task" />
+          <Separator />
           <TaskTimeline :task="task" />
-          <div class="mt-4 flex items-end gap-2">
+          <div class="flex items-end gap-2">
             <Textarea
               v-model="comment"
               placeholder="Add a comment…"
