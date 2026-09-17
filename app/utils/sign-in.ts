@@ -78,6 +78,36 @@ export const GENERIC_AUTH_NOTICE: AuthNotice = {
   cancelled: false,
 }
 
+/**
+ * True when the API refused a request because the session itself is gone:
+ * HTTP 401 / code `UNAUTHORIZED` — the `st_session` cookie past its 12-hour
+ * window, revoked by a sign-out elsewhere, or unknown after a server restart.
+ * A 403 is NOT this: that is a live session the API will not let do one
+ * thing, and the user stays signed in. Read by `useSession.request`, which
+ * signs out and sends the user to `/login?reason=expired` on a match.
+ */
+export function isSessionInvalidError(err: unknown): boolean {
+  const e = err as { status?: number | null, code?: string | null } | null
+  return e?.status === 401 || e?.code === 'UNAUTHORIZED'
+}
+
+/** The login screen's notice for `?reason=expired`. Calm tone: nothing failed, time passed. */
+export const SESSION_EXPIRED_NOTICE: AuthNotice = {
+  title: 'Signed out',
+  message: 'Your session has ended. Sign in again to continue where you left off.',
+  cancelled: true,
+}
+
+/**
+ * The notice for the `?reason=` a sign-out landed with; null for anything
+ * else. Only `expired` is known — the value is attacker-writable and never
+ * rendered.
+ */
+export function sessionEndedNotice(raw: unknown): AuthNotice | null {
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return value === 'expired' ? SESSION_EXPIRED_NOTICE : null
+}
+
 export function isAuthErrorCode(value: unknown): value is AuthErrorCode {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(AUTH_ERROR_COPY, value)
 }

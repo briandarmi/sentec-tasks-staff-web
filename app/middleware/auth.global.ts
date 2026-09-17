@@ -45,6 +45,11 @@ export default defineNuxtRouteMiddleware((to) => {
     const { authError, ...rest } = to.query
     const query: Record<string, string> = {}
     if (typeof authError === 'string') query.authError = authError
+    // Boot found a stored session the server no longer knows: say so, once.
+    if (session.expiredOnRestore.value) {
+      query.reason = 'expired'
+      session.expiredOnRestore.value = false
+    }
     const target = useRouter().resolve({ path: to.path, query: rest }).fullPath
     if (target !== '/') query.redirect = target
     return navigateTo({ path: '/login', query })

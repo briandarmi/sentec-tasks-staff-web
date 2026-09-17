@@ -24,12 +24,14 @@ const SHARED = [
   'app/utils/task-ui.ts',
   'app/utils/select-empty.ts',
   'app/utils/sign-in.ts',
+  'app/utils/session-cookie.ts',
   'tests/mock-api.spec.ts',
   'tests/admin-config.spec.ts',
   'tests/staff-flows.spec.ts',
   'tests/task-ui.spec.ts',
   'tests/api-fidelity.spec.ts',
   'tests/sign-in.spec.ts',
+  'tests/session-cookie.spec.ts',
 ]
 
 if (!existsSync(sibling)) {

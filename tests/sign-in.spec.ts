@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { AUTH_ERROR_COPY, GENERIC_AUTH_NOTICE, appPathFromLocation, authErrorNotice, buildReturnTo, safeRedirectPath } from '~/utils/sign-in'
+import { AUTH_ERROR_COPY, GENERIC_AUTH_NOTICE, SESSION_EXPIRED_NOTICE, appPathFromLocation, authErrorNotice, buildReturnTo, isSessionInvalidError, safeRedirectPath, sessionEndedNotice } from '~/utils/sign-in'
+import { ApiError, handleFakeApiRequest } from '~/utils/clientFakeApi'
 
 // The app's side of the redirect-based sign-in round trip: the returnTo it
 // hands the API and the closed set of ?authError= codes it renders. Pinned so
@@ -94,5 +95,44 @@ describe('appPathFromLocation', () => {
   it('refuses another origin', () => {
     expect(appPathFromLocation('https://evil.example/login', 'http://localhost:3000', '/')).toBeNull()
     expect(appPathFromLocation('not a url', 'http://localhost:3000', '/')).toBeNull()
+  })
+})
+
+// The forced sign-out (2026-09-17): what counts as a dead session, and the
+// login screen's notice for it. The teardown + redirect in useSession.request
+// needs the Nuxt runtime and is reviewed by hand — see README.
+describe('isSessionInvalidError', () => {
+  it('matches a 401 by status or by code, and nothing else', () => {
+    expect(isSessionInvalidError({ status: 401 })).toBe(true)
+    expect(isSessionInvalidError({ code: 'UNAUTHORIZED' })).toBe(true)
+    // A 403 is a live session lacking a permission — the user stays signed in.
+    expect(isSessionInvalidError({ status: 403, code: 'FORBIDDEN' })).toBe(false)
+    expect(isSessionInvalidError({ status: 400, code: 'BAD_REQUEST' })).toBe(false)
+    expect(isSessionInvalidError(null)).toBe(false)
+    expect(isSessionInvalidError(new Error('network'))).toBe(false)
+  })
+
+  it('recognises what the mock throws for a cookie it no longer knows', () => {
+    let thrown: unknown
+    try {
+      handleFakeApiRequest('/v1/auth/session', { headers: { cookie: 'st_session=00000000-0000-4000-8000-000000000000' } })
+    }
+    catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(ApiError)
+    expect((thrown as ApiError).status).toBe(401)
+    expect(isSessionInvalidError(thrown)).toBe(true)
+  })
+})
+
+describe('sessionEndedNotice', () => {
+  it('knows only ?reason=expired, and never renders the raw value', () => {
+    expect(sessionEndedNotice('expired')).toEqual(SESSION_EXPIRED_NOTICE)
+    expect(sessionEndedNotice(['expired'])).toEqual(SESSION_EXPIRED_NOTICE)
+    expect(SESSION_EXPIRED_NOTICE.cancelled).toBe(true)
+    expect(sessionEndedNotice('<script>')).toBeNull()
+    expect(sessionEndedNotice(undefined)).toBeNull()
+    expect(sessionEndedNotice('')).toBeNull()
   })
 })

@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { InboxIcon, KeyRoundIcon, MailIcon, WandSparklesIcon } from '@lucide/vue'
 import { demoFollowApiLink, demoGoogleCallbackUrl, demoGoogleConsent, demoLogins, demoOutbox } from '~/utils/clientFakeApi'
 import type { DemoGoogleIdentity, DemoMail } from '~/utils/clientFakeApi'
-import { appPathFromLocation, authErrorNotice, buildReturnTo, safeRedirectPath } from '~/utils/sign-in'
+import { appPathFromLocation, authErrorNotice, buildReturnTo, safeRedirectPath, sessionEndedNotice } from '~/utils/sign-in'
 import { useSession } from '~/composables/useSession'
 
 definePageMeta({ layout: false })
@@ -42,6 +42,8 @@ const returnTo = () => buildReturnTo(window.location.origin, runtimeConfig.app.b
 
 /** What a redirect leg reported, read from the URL — a closed set, never the raw value. */
 const authNotice = computed(() => authErrorNotice(route.query.authError))
+/** Why the user is back here when it was not their choice: `?reason=expired` from a forced sign-out. */
+const endedNotice = computed(() => sessionEndedNotice(route.query.reason))
 
 /**
  * The frontline roles this workspace is built for. Everyone else — property
@@ -194,6 +196,11 @@ async function followApiLink(url: string) {
         <Alert v-if="authNotice" :variant="authNotice.cancelled ? 'default' : 'destructive'">
           <AlertTitle>{{ authNotice.title }}</AlertTitle>
           <AlertDescription>{{ authNotice.message }}</AlertDescription>
+        </Alert>
+        <!-- The session ended (401, or unknown on reload) and the app signed out. -->
+        <Alert v-else-if="endedNotice">
+          <AlertTitle>{{ endedNotice.title }}</AlertTitle>
+          <AlertDescription>{{ endedNotice.message }}</AlertDescription>
         </Alert>
 
         <Button class="min-h-11 w-full" variant="outline" type="button" :disabled="Boolean(busy)" @click="continueWithGoogle">

@@ -1,5 +1,7 @@
 import { computed } from 'vue'
 import type { ApiError, Envelope, Staff } from '~/utils/clientFakeApi'
+import { isSessionInvalidError } from '~/utils/sign-in'
+import { cookiePathFor, isSecureOrigin, readCookie, writeCookie } from '~/utils/session-cookie'
 
 /**
  * Signed-in state against the real Sentec Tasks API contract.
@@ -15,12 +17,18 @@ import type { ApiError, Envelope, Staff } from '~/utils/clientFakeApi'
  * `Cookie: st_session=…` header — the shape is the contract's, the protection
  * is necessarily the server's.
  *
- * The session id is the ONE thing persisted across a refresh, in
- * `sessionStorage` so it dies with the tab — the same 12-hour shift-device
- * discipline the real cookie has (Max-Age=43200).
+ * The session id is the ONE thing persisted across a refresh — since
+ * 2026-09-17 in a cookie of its own (`SameSite=Strict`, `Secure` on https,
+ * scoped to this app's base path) with the same 12-hour `Max-Age=43200` the
+ * real `st_session` cookie has, so the shift-device discipline is the
+ * browser's to enforce rather than the tab's. Nothing else is stored: identity
+ * and the CSRF token are recovered from GET /v1/auth/session on boot. It was
+ * in sessionStorage before; a leftover there is adopted once and removed.
  */
 
 const SESSION_KEY = 'sentec-tasks-session'
+/** Mirrors the real cookie's Max-Age. The mock's session row expires on the same clock. */
+const SESSION_COOKIE_MAX_AGE_S = 12 * 60 * 60
 
 export interface ReachableHotel {
   id: string
@@ -34,6 +42,12 @@ export function useSession() {
   const hotelId = useState<string | null>('activeHotelId', () => null)
   /** True while the initial recovery attempt is in flight, to avoid a login flash. */
   const isRestoring = useState<boolean>('sessionRestoring', () => true)
+  /**
+   * Set once when boot found a stored session id the server no longer knows
+   * (the 12-hour window passed while the tab was closed, or a sign-out from
+   * elsewhere). The auth middleware reads it — once — to say why on `/login`.
+   */
+  const expiredOnRestore = useState<boolean>('sessionExpiredOnRestore', () => false)
 
   const isAuthenticated = computed(() => Boolean(sessionId.value && staff.value))
   const isOperator = computed(() => Boolean(staff.value?.isOperator))
@@ -57,23 +71,31 @@ export function useSession() {
     hotelNames.value = next
   }
 
+  const cookiePath = cookiePathFor(useRuntimeConfig().app.baseURL)
+
   function readStoredSession() {
     if (!import.meta.client) return null
+    const fromCookie = readCookie(SESSION_KEY)
+    if (fromCookie) return fromCookie
+    // Pre-2026-09-17 builds kept the id in sessionStorage. Move it once.
     try {
-      return sessionStorage.getItem(SESSION_KEY)
+      const legacy = sessionStorage.getItem(SESSION_KEY)
+      if (legacy) {
+        sessionStorage.removeItem(SESSION_KEY)
+        writeStoredSession(legacy)
+        return legacy
+      }
     }
-    catch {
-      return null
-    }
+    catch { /* storage unavailable — nothing to migrate */ }
+    return null
   }
 
   function writeStoredSession(id: string | null) {
     if (!import.meta.client) return
     try {
-      if (id) sessionStorage.setItem(SESSION_KEY, id)
-      else sessionStorage.removeItem(SESSION_KEY)
+      writeCookie(SESSION_KEY, id, { path: cookiePath, maxAgeSeconds: SESSION_COOKIE_MAX_AGE_S, secure: isSecureOrigin() })
     }
-    catch { /* storage unavailable — sign-in just will not survive a refresh */ }
+    catch { /* cookies blocked — sign-in just will not survive a refresh */ }
   }
 
   function adopt(payload: { sessionId: string, csrfToken: string, staff: Staff }) {
@@ -95,16 +117,30 @@ export function useSession() {
   async function request<T = unknown>(path: string, opts: { method?: string, body?: unknown, query?: Record<string, unknown>, hotelId?: string | null } = {}): Promise<Envelope<T>> {
     const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
     const scope = opts.hotelId === undefined ? hotelId.value : opts.hotelId
-    const res = handleFakeApiRequest(path, {
-      method: opts.method,
-      body: opts.body as Record<string, unknown> | undefined,
-      query: opts.query as Record<string, string> | undefined,
-      headers: {
-        ...(sessionId.value ? { cookie: `st_session=${sessionId.value}` } : {}),
-        ...(csrfToken.value ? { 'x-csrf-token': csrfToken.value } : {}),
-        ...(scope ? { 'x-hotel-id': scope } : {}),
-      },
-    })
+    let res: ReturnType<typeof handleFakeApiRequest>
+    try {
+      res = handleFakeApiRequest(path, {
+        method: opts.method,
+        body: opts.body as Record<string, unknown> | undefined,
+        query: opts.query as Record<string, string> | undefined,
+        headers: {
+          ...(sessionId.value ? { cookie: `st_session=${sessionId.value}` } : {}),
+          ...(csrfToken.value ? { 'x-csrf-token': csrfToken.value } : {}),
+          ...(scope ? { 'x-hotel-id': scope } : {}),
+        },
+      })
+    }
+    catch (err) {
+      // A 401 while signed in means the cookie session is gone server-side:
+      // the 12-hour window passed, a sign-out elsewhere, a server restart.
+      // Forget it here and go to /login; the error still propagates so the
+      // calling screen stops its own flow. Not for the logout call itself —
+      // that is the user leaving, and a 401 there just means "already gone".
+      if (isSessionInvalidError(err) && isAuthenticated.value && path !== '/v1/auth/logout') {
+        await signOutAfterSessionExpiry(forgetSession)
+      }
+      throw err
+    }
     return (res.body ?? { version: 'v1', data: null }) as Envelope<T>
   }
 
@@ -190,7 +226,9 @@ export function useSession() {
       return false
     }
     try {
-      return await recover(stored)
+      const ok = await recover(stored)
+      if (!ok) expiredOnRestore.value = true
+      return ok
     }
     finally {
       isRestoring.value = false
@@ -220,12 +258,30 @@ export function useSession() {
     }
     catch { /* already gone server-side; local teardown still has to happen */ }
 
+    forgetSession()
+  }
+
+  /**
+   * Forget everything on this device — identity, session id, every cached
+   * payload, the selected property — without talking to the API. The local
+   * half of `logout`, and the whole of a sign-out the server forced.
+   */
+  function forgetSession() {
     sessionId.value = null
     csrfToken.value = null
     staff.value = null
     hotelId.value = null
     writeStoredSession(null)
     clearNuxtState()
+  }
+
+  /**
+   * Tear the session down because the API no longer accepts it. Unlike
+   * `logout` this does NOT call `POST /v1/auth/logout`: the cookie is already
+   * dead, so the call could only 401 again. Callers send the user to `/login`.
+   */
+  function expireSession() {
+    forgetSession()
   }
 
   function setHotelId(next: string) {
@@ -246,15 +302,50 @@ export function useSession() {
     isOperator,
     isAuthenticated,
     isRestoring,
+    expiredOnRestore,
     login,
     googleSignInUrl,
     requestMagicLink,
     adoptCookieSession,
     logout,
+    expireSession,
     restore,
     request,
     setHotelId,
   }
+}
+
+/**
+ * The one in-flight forced sign-out. A screen fires several requests at once
+ * (board, counts, staff list) and every one of them 401s when the session
+ * dies; only the first tears down and navigates, the rest wait on the same
+ * promise so `/login` is not pushed onto the history stack several times.
+ */
+let sessionExpiryInFlight: Promise<void> | null = null
+
+/**
+ * Forget the session and go to `/login?reason=expired`, remembering the page
+ * the user was on so a fresh sign-in puts them back (`safeRedirectPath` on the
+ * login screen keeps it in-app).
+ */
+function signOutAfterSessionExpiry(forget: () => void): Promise<void> {
+  if (sessionExpiryInFlight) return sessionExpiryInFlight
+  sessionExpiryInFlight = (async () => {
+    try {
+      forget()
+      const route = useRoute()
+      if (route.path !== '/login') {
+        await navigateTo({
+          path: '/login',
+          query: route.fullPath === '/' ? { reason: 'expired' } : { reason: 'expired', redirect: route.fullPath },
+        })
+      }
+    }
+    finally {
+      sessionExpiryInFlight = null
+    }
+  })()
+  return sessionExpiryInFlight
 }
 
 /**
