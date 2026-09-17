@@ -1,5 +1,7 @@
 /**
- * In-browser mock of the REAL Sentec Tasks API (sentec-tasks-api @ 0c8e1bd).
+ * In-browser mock of the REAL Sentec Tasks API (sentec-tasks-api master
+ * @ c3f52ad, plus the passwordless sign-in branch
+ * feat/google-and-magic-link-auth @ 48756a3 — see "Passwordless sign-in").
  *
  * Wire-faithful by decision: exact paths, envelope, error codes and message
  * literals, UUID ids, X-Hotel-Id scoping, cookie-session + CSRF shape, and the
@@ -13,6 +15,11 @@
  *   Authorization: Bearer partner:<partnerId>    → partner actor (active only)
  *   Authorization: Bearer <token from login>     → staff bearer actor
  *   Cookie: st_session=<session id>              → cookie actor (CSRF applies)
+ *
+ * The two browser-facing sign-in legs (Google callback, magic-link verify)
+ * answer a 302 whose Set-Cookie a browser mock cannot honour, so the session
+ * id rides in the response's `headers['set-cookie']` for the client to adopt
+ * — the same seam as the login response's `_sessionCookie`.
  *
  * Deliberately NOT simulated: CORS, the 1 MiB body cap, SQS event egress
  * (events are queued in-memory for inspection only… no, see below: the real
@@ -438,11 +445,29 @@ export interface Envelope<T = unknown> {
   errors?: ApiErrorBody[]
 }
 
-/** Transport result: status + enveloped body (null only for 204). */
+/** Transport result: status + enveloped body (null for 204 and for a 302). */
 export interface FakeResponse<T = unknown> {
   status: number
   body: Envelope<T> | null
+  /**
+   * The browser-facing sign-in legs only: the 302's Location, and — on
+   * success — the st_session Set-Cookie a browser mock cannot honour, so the
+   * client adopts it from here instead (see the header comment).
+   */
+  headers?: { 'location': string, 'set-cookie'?: string }
 }
+
+/**
+ * The ?authError= vocabulary the two redirecting sign-in legs append on
+ * failure (openapi AuthErrorCode / internal/authflow). A CLOSED set: the apps
+ * render their own copy per code and a generic line for anything else — never
+ * the raw query value. Two are deliberately coarse and must stay so:
+ * no_account also covers "deactivated", link_invalid also covers expired and
+ * already-used; splitting either makes the query string an account oracle.
+ */
+export type AuthErrorCode
+  = 'google_denied' | 'invalid_state' | 'expired_flow' | 'exchange_failed' | 'id_token_invalid' | 'email_unverified'
+    | 'link_invalid' | 'no_account' | 'invalid_return_to' | 'unavailable'
 
 // ════════════════════════ Error model ════════════════════════
 
@@ -855,6 +880,161 @@ function randomToken(): string {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+/** One place mints the cookie session for all three sign-in paths (staff.SetSessionCookie). */
+function startCookieSession(acct: SeedAccount): Session {
+  const session: Session = { id: newId(), staffId: acct.id, csrfToken: randomToken(), expiresAt: Date.now() + SESSION_TTL_MS }
+  sessions.set(session.id, session)
+  return session
+}
+
+// ════════════════════════ Passwordless sign-in (48756a3) ════════════════════════
+//
+// Google Sign-In (backend authorization-code flow with PKCE) and the emailed
+// magic link. Both authenticate a pre-existing ACTIVE staff row by lowercased
+// email — no auto-provisioning — and converge on the same st_session cookie
+// password login mints, so there is no new actor kind. Simulated here:
+//
+//   - CORS_ALLOWED_ORIGINS doubles as the post-sign-in redirect allow-list;
+//     its FIRST entry is the fallback target. The mock's list is this app's
+//     own origin (node: http://localhost:3000).
+//   - The st_oauth_flow cookie is one slot, not a table — a cookie is per
+//     browser — holding state + sealed returnTo, cleared on every terminal
+//     outcome. "Google" is a consent URL the login screen recognises and
+//     renders as an account chooser; the authorization code it hands back
+//     names the chosen identity, and the callback "exchanges" it.
+//   - The mail transport is the API's MAIL_DEV_CONSOLE one: the link is
+//     printed to the console and kept in an outbox the login screen can open.
+//   - Rate limits: the per-address magic-link budget (3 per 15 min, charged on
+//     SUCCESS — every request costs an email). The per-IP budgets are not
+//     simulated: a browser mock has exactly one client.
+
+const ALLOWED_ORIGINS: string[] = [typeof location !== 'undefined' ? location.origin : 'http://localhost:3000']
+/** This service's own public origin (API_BASE_URL): where an emailed link and the Google redirect_uri point. */
+const API_BASE_URL = 'https://api.sentec-tasks.example'
+const MOCK_GOOGLE_AUTH_ORIGIN = 'https://accounts.google.example'
+const MOCK_GOOGLE_CLIENT_ID = '261178633818-mock.apps.googleusercontent.example'
+const OAUTH_FLOW_TTL_MS = 10 * 60_000
+const MAGIC_LINK_TTL_MS = 15 * 60_000
+const MAGIC_LINK_RATE_MAX = 3
+const MAGIC_LINK_RATE_WINDOW_MS = 15 * 60_000
+
+interface MagicLinkToken { token: string, staffId: Id, expiresAt: number, consumedAt: number | null }
+const magicLinkTokens: MagicLinkToken[] = []
+const magicLinkRequests = new Map<string, { count: number, windowStart: number }>()
+let oauthFlow: { state: string, returnTo: string, expiresAt: number } | null = null
+
+/** What the dev-console mail transport printed: the login screen's "demo inbox". */
+export interface DemoMail { to: string, subject: string, link: string, sentAt: string }
+const mailOutbox: DemoMail[] = []
+
+/**
+ * Identities the mock's Google account chooser offers. The seeded staff, plus
+ * two that exercise the callback's refusals: an address with no staff row
+ * (→ no_account) and one Google reports as unverified (→ email_unverified).
+ */
+export interface DemoGoogleIdentity { email: string, name: string, emailVerified: boolean, hasAccount: boolean }
+const OUTSIDER_IDENTITIES: DemoGoogleIdentity[] = [
+  { email: 'someone.else@gmail.example', name: 'Someone without a staff account', emailVerified: true, hasAccount: false },
+  { email: 'unverified@gmail.example', name: 'An unverified Google address', emailVerified: false, hasAccount: false },
+]
+
+/**
+ * httpx.parseOrigin: scheme://host[:port], lowercased, default ports dropped;
+ * refuses anything that is not http(s), carries credentials, or is opaque.
+ */
+function parseOrigin(raw: string): string | null {
+  // eslint-disable-next-line no-control-regex
+  if (/[\\\u0000-\u001F\u007F]/.test(raw)) return null
+  let url: URL
+  try {
+    url = new URL(raw)
+  }
+  catch {
+    return null
+  }
+  if (url.username || url.password) return null
+  const scheme = url.protocol.slice(0, -1).toLowerCase()
+  if (scheme !== 'http' && scheme !== 'https') return null
+  const host = url.hostname.toLowerCase()
+  if (!host || host.endsWith('.')) return null
+  return `${scheme}://${host}${url.port ? `:${url.port}` : ''}`
+}
+
+/** httpx.AllowedRedirect: the raw URL back when its ORIGIN is allow-listed — parsed, never a prefix match. */
+function allowedRedirect(raw: string): string | null {
+  if (!raw) return null
+  const origin = parseOrigin(raw)
+  if (!origin) return null
+  return ALLOWED_ORIGINS.some(entry => parseOrigin(entry) === origin) ? raw : null
+}
+
+/** httpx.DefaultRedirect: the allow-list's first parseable entry, as a bare origin. */
+function defaultRedirect(): string | null {
+  for (const entry of ALLOWED_ORIGINS) {
+    const origin = parseOrigin(entry)
+    if (origin) return origin
+  }
+  return null
+}
+
+/** httpx.RedirectWithError: ?authError=<code> appended to the target. */
+function withAuthError(target: string, code: AuthErrorCode): string {
+  const url = new URL(target)
+  url.searchParams.set('authError', code)
+  return url.toString()
+}
+
+/**
+ * magiclink.resolveTarget: an absent returnTo falls back silently; a present
+ * but non-allow-listed one falls back too, carrying invalid_return_to, and
+ * the rejected value is never echoed.
+ */
+function resolveRedirectTarget(raw: string | undefined): { target: string | null, code: AuthErrorCode | null } {
+  if (raw) {
+    const allowed = allowedRedirect(raw)
+    if (allowed) return { target: allowed, code: null }
+    return { target: defaultRedirect(), code: 'invalid_return_to' }
+  }
+  return { target: defaultRedirect(), code: null }
+}
+
+/** A 302 with its Location and, on success, the st_session Set-Cookie seam. */
+const redirect = (location: string, sessionId?: Id): FakeResponse<never> => ({
+  status: 302,
+  body: null,
+  headers: { location, ...(sessionId ? { 'set-cookie': `st_session=${sessionId}` } : {}) },
+})
+
+/** Deliberately shallow, like the Go: exactly one @, something on each side, no spaces. */
+function looksLikeEmail(s: string): boolean {
+  if (!s || s.length > 320 || /[ \t\r\n]/.test(s)) return false
+  const at = s.indexOf('@')
+  return at > 0 && at === s.lastIndexOf('@') && at < s.length - 1
+}
+
+/** Fixed-window budget charged on SUCCESS: true = allowed (and counted). */
+function allowMagicLinkRequest(email: string): boolean {
+  const now = Date.now()
+  const bucket = magicLinkRequests.get(email)
+  const window = bucket && now - bucket.windowStart < MAGIC_LINK_RATE_WINDOW_MS ? bucket : { count: 0, windowStart: now }
+  if (window.count >= MAGIC_LINK_RATE_MAX) return false
+  window.count += 1
+  magicLinkRequests.set(email, window)
+  return true
+}
+
+/** The mock's Google: the authorization code names the identity it was granted for. */
+const googleCodeFor = (email: string) => `4/mock.${encodeURIComponent(email)}`
+
+function exchangeGoogleCode(code: string | undefined): DemoGoogleIdentity | null {
+  if (!code || !code.startsWith('4/mock.')) return null
+  const email = decodeURIComponent(code.slice('4/mock.'.length)).toLowerCase()
+  const outsider = OUTSIDER_IDENTITIES.find(i => i.email === email)
+  if (outsider) return outsider
+  const acct = staffAccounts.find(s => s.email === email)
+  return acct ? { email: acct.email, name: acct.name, emailVerified: true, hasAccount: true } : { email, name: email, emailVerified: true, hasAccount: false }
+}
+
 // ════════════════════════ Actor resolution (EitherAuth) ════════════════════════
 
 export interface Actor {
@@ -1081,6 +1261,36 @@ function advanceAcrossSchedule(hotelRef: Id, schedule: OperatingSchedule | null,
 /** Floors toward −∞ (Butler Math.floor parity). */
 const elapsedMinutes = (fromIso: string, toIso: string) => Math.floor((Date.parse(toIso) - Date.parse(fromIso)) / 60_000)
 
+/**
+ * ElapsedScheduleMinutes: the inverse of advanceAcrossSchedule — the OPEN
+ * minutes between two instants, accumulated in milliseconds and floored ONCE
+ * at the end (never per window). Nil schedule = always-open = plain
+ * elapsedMinutes, and so is `to <= from` (same floored, possibly negative,
+ * answer — Butler parity; no clamping of our own).
+ * Property: elapsedScheduleMinutes(t, advanceAcrossSchedule(t, m)) === m.
+ */
+function elapsedScheduleMinutes(hotelRef: Id, schedule: OperatingSchedule | null, fromIso: string, toIso: string): number {
+  const fromMs = Date.parse(fromIso)
+  const toMs = Date.parse(toIso)
+  if (!schedule || toMs <= fromMs) return elapsedMinutes(fromIso, toIso)
+  const offsetMs = hotelOffsetMinutes(hotelRef) * 60_000
+  const DAY = 1440 * 60_000
+  const end = toMs + offsetMs
+  let cursor = fromMs + offsetMs
+  let openMs = 0
+  for (let day = 0; day < 3650 && cursor < end; day++) {
+    const dayStart = Math.floor(cursor / DAY) * DAY
+    const local = new Date(dayStart)
+    for (const window of openWindowsOn(schedule, local.toISOString().slice(0, 10), local.getUTCDay())) {
+      const from = Math.max(cursor, dayStart + window.opens * 60_000)
+      const to = Math.min(end, dayStart + window.closes * 60_000)
+      if (from < to) openMs += to - from
+    }
+    cursor = dayStart + DAY
+  }
+  return Math.floor(openMs / 60_000)
+}
+
 /** Inclusive at the boundary: exactly-on-time is ON_TIME. */
 function computeSlaStatusAt(nowIso2: string, dueIso: string | null): SlaStatus {
   if (!dueIso) return 'EMPTY'
@@ -1214,33 +1424,39 @@ function pushHistory(t: Task, staffId: Id | null, status: string, description: s
 }
 
 /**
- * computeSlaUpdates — the four [DR-4] rules, applied on EVERY transition:
- * (a) leaving IN_PROGRESS accumulates resolutionDuration from the latest
- *     IN_PROGRESS history row; (b) first entry into IN_PROGRESS stamps
- *     responseDuration + verdict, once; (c) every entry into IN_PROGRESS
- *     resets the resolution verdict; (d) the resolution verdict stamps on
- *     entering SUBMITTED unconditionally, or on entering FINISHED not-from-
- *     SUBMITTED while still EMPTY — review latency is never billed to staff.
+ * computeSlaUpdates — the [DR-4] rules as redefined by the API's 2026-09-02
+ * SLA spec (c3f52ad). Both durations are SCHEDULE-AWARE elapsed minutes from
+ * activation — open hours only, the exact inverse of the due-date arithmetic —
+ * and each is written only together with its verdict, so the pair can never
+ * disagree again:
+ * (b) first entry into IN_PROGRESS stamps responseDuration + verdict, once;
+ *     a claim or acknowledgement never stops the response clock, and a later
+ *     return-to-pool or delegation never restarts it;
+ * (c) every entry into IN_PROGRESS resets the resolution verdict to EMPTY.
+ *     resolutionDuration is NOT nulled: between a review bounce and the next
+ *     submission it still holds the superseded attempt, which readers treat
+ *     as such whenever the verdict reads EMPTY;
+ * (d) entering SUBMITTED (unconditionally), or FINISHED not-from-SUBMITTED
+ *     while still EMPTY, stamps resolutionDuration + verdict at one instant.
+ *     Rework re-stamps both, still measured from activation — the resolution
+ *     that counts is the one that sticks; PENDING/parked time counts; review
+ *     and pending detours after work stopped re-stamp nothing.
+ * The old rule (a) — accumulating IN_PROGRESS time on the way out — is gone:
+ * leaving IN_PROGRESS stamps nothing. The schedule is resolved lazily, only
+ * when something actually stamps.
  */
 function computeSlaUpdates(t: Task, oldStatus: TaskStatus, newStatus: TaskStatus, at: string) {
-  if (oldStatus === 'IN_PROGRESS' && newStatus !== 'IN_PROGRESS') {
-    const latest = [...taskHistory]
-      .filter(h => h.taskId === t.id && h.status === 'IN_PROGRESS')
-      .sort((a, b) => b.seq - a.seq)[0]
-    if (latest) t.resolutionDuration = (t.resolutionDuration ?? 0) + elapsedMinutes(latest.createdAt, at)
-  }
+  const elapsedFromActivation = () => elapsedScheduleMinutes(t.hotelRef, scheduleFor(t.hotelRef, t.hotelDepartmentId), t.activationDate, at)
   if (newStatus === 'IN_PROGRESS' && oldStatus !== 'IN_PROGRESS') {
     if (t.responseSlaStatus === 'EMPTY') {
-      t.responseDuration = elapsedMinutes(t.activationDate, at)
+      t.responseDuration = elapsedFromActivation()
       t.responseSlaStatus = computeSlaStatusAt(at, t.responseDueAt)
     }
     t.resolutionSlaStatus = 'EMPTY'
   }
-  if (newStatus === 'SUBMITTED') {
+  if (newStatus === 'SUBMITTED' || (newStatus === 'FINISHED' && oldStatus !== 'SUBMITTED' && t.resolutionSlaStatus === 'EMPTY')) {
     t.resolutionSlaStatus = computeSlaStatusAt(at, t.resolutionDueAt)
-  }
-  else if (newStatus === 'FINISHED' && oldStatus !== 'SUBMITTED' && t.resolutionSlaStatus === 'EMPTY') {
-    t.resolutionSlaStatus = computeSlaStatusAt(at, t.resolutionDueAt)
+    t.resolutionDuration = elapsedFromActivation()
   }
 }
 
@@ -1425,42 +1641,48 @@ function seedDemoData() {
   seedHistoryRow(IDS.task.towels0710, IDS.staff.budi, 'IN_PROGRESS', null, '2026-08-25T02:09:00.000Z')
   taskCollaborators.push({ id: newId(), hotelRef: H, taskId: IDS.task.towels0710, staffId: IDS.staff.made, staffName: null, addedBy: IDS.staff.sari, isActive: true, createdAt: '2026-08-25T02:30:00.000Z' })
 
-  // Parked: accumulated 30 IN_PROGRESS minutes, verdict still EMPTY.
+  // Parked after 30 minutes' work. The resolution clock is still running:
+  // verdict EMPTY and no duration yet — parked time counts, and nothing is
+  // stamped until the work actually stops (2026-09-02 SLA spec).
   seedTaskRow({
     id: IDS.task.transferHold, hotelRef: H, status: 'PENDING', title: 'Airport transfer', description: 'Guest to confirm flight time',
     sourceProduct: 'sentec-butler', sourceChannel: 'guest', itemRef: IDS.item.transfer,
     slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpFrontOffice,
-    activationDate: '2026-08-25T00:30:00.000Z', responseDuration: 11, responseSlaStatus: 'ON_TIME', resolutionDuration: 30,
+    activationDate: '2026-08-25T00:30:00.000Z', responseDuration: 11, responseSlaStatus: 'ON_TIME',
   })
   seedAssignmentRow(IDS.task.transferHold, 'STAFF', { staffId: IDS.staff.sari }, IDS.staff.agus, 'Covering Front Office tonight', true, '2026-08-25T00:39:00.000Z')
   seedHistoryRow(IDS.task.transferHold, IDS.staff.sari, 'IN_PROGRESS', null, '2026-08-25T00:41:00.000Z')
   seedHistoryRow(IDS.task.transferHold, IDS.staff.sari, 'PENDING', 'Guest to confirm flight time', '2026-08-25T01:11:00.000Z')
 
-  // Finished directly (no proof gates on this item), verdict ON_TIME.
+  // Finished directly (no proof gates on this item), verdict ON_TIME. Both
+  // durations run from activation: response 4 (→ IN_PROGRESS 23:04),
+  // resolution 26 (→ FINISHED 23:26), stamped with their verdicts.
   seedTaskRow({
     id: IDS.task.towelsDone, hotelRef: H, status: 'FINISHED', title: 'Extra towels',
     sourceProduct: 'sentec-butler', sourceChannel: 'guest', itemRef: IDS.item.towels, roomNumber: '1015', quantity: 1,
     slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
-    activationDate: '2026-08-24T23:00:00.000Z', responseDuration: 4, resolutionDuration: 22,
+    activationDate: '2026-08-24T23:00:00.000Z', responseDuration: 4, resolutionDuration: 26,
     responseSlaStatus: 'ON_TIME', resolutionSlaStatus: 'ON_TIME',
   })
   seedAssignmentRow(IDS.task.towelsDone, 'STAFF', { staffId: IDS.staff.budi }, IDS.staff.budi, null, true, '2026-08-24T23:04:00.000Z')
   seedHistoryRow(IDS.task.towelsDone, IDS.staff.budi, 'IN_PROGRESS', null, '2026-08-24T23:04:00.000Z')
   seedHistoryRow(IDS.task.towelsDone, IDS.staff.budi, 'FINISHED', null, '2026-08-24T23:26:00.000Z')
 
-  // PMS-dispatched, worked by Maintenance, verified by a leader.
+  // PMS-dispatched Monday 09:00 WIB — inside Engineering Hours, so the
+  // schedule-aware clocks read like wall-clock ones: response 8 (→ 09:08),
+  // resolution 40 (→ FINISHED 09:40). Worked by Maintenance, verified later.
   seedTaskRow({
     id: IDS.task.plumbingVerified, hotelRef: H, status: 'VERIFIED', title: 'Plumbing / leak', description: 'Slow drain reported by the PMS housekeeping sweep',
     sourceProduct: 'sentec-pms', sourceChannel: 'admin', itemRef: IDS.item.plumbing, roomNumber: '0402',
     slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpMaintenance,
-    activationDate: '2026-08-24T18:00:00.000Z', responseDuration: 38, resolutionDuration: 58,
+    activationDate: '2026-08-24T02:00:00.000Z', responseDuration: 8, resolutionDuration: 40,
     responseSlaStatus: 'ON_TIME', resolutionSlaStatus: 'ON_TIME',
   })
-  seedAssignmentRow(IDS.task.plumbingVerified, 'STAFF', { staffId: IDS.staff.joko }, null, null, true, '2026-08-24T18:30:00.000Z')
-  seedHistoryRow(IDS.task.plumbingVerified, IDS.staff.joko, 'IN_PROGRESS', null, '2026-08-24T18:38:00.000Z')
-  seedHistoryRow(IDS.task.plumbingVerified, IDS.staff.joko, 'FINISHED', null, '2026-08-24T19:36:00.000Z')
-  seedHistoryRow(IDS.task.plumbingVerified, IDS.staff.sari, 'VERIFIED', null, '2026-08-24T21:14:00.000Z')
-  taskAttachments.push({ id: newId(), hotelRef: H, taskId: IDS.task.plumbingVerified, staffId: null, filetype: 'PDF', filepath: 'https://cdn.sentec-pms.example/workorders/WO-2214.pdf', isRemoved: false, createdAt: '2026-08-24T18:05:00.000Z' })
+  seedAssignmentRow(IDS.task.plumbingVerified, 'STAFF', { staffId: IDS.staff.joko }, null, null, true, '2026-08-24T02:05:00.000Z')
+  seedHistoryRow(IDS.task.plumbingVerified, IDS.staff.joko, 'IN_PROGRESS', null, '2026-08-24T02:08:00.000Z')
+  seedHistoryRow(IDS.task.plumbingVerified, IDS.staff.joko, 'FINISHED', null, '2026-08-24T02:40:00.000Z')
+  seedHistoryRow(IDS.task.plumbingVerified, IDS.staff.sari, 'VERIFIED', null, '2026-08-24T04:14:00.000Z')
+  taskAttachments.push({ id: newId(), hotelRef: H, taskId: IDS.task.plumbingVerified, staffId: null, filetype: 'PDF', filepath: 'https://cdn.sentec-pms.example/workorders/WO-2214.pdf', isRemoved: false, createdAt: '2026-08-24T02:03:00.000Z' })
   taskContextEntries.push(
     { id: newId(), hotelRef: H, taskId: IDS.task.plumbingVerified, sourceAppCode: 'sentec-pms', label: 'Work order', value: 'WO-2214', url: 'https://pms.sentec.example/wo/2214', sort: 0 },
     { id: newId(), hotelRef: H, taskId: IDS.task.plumbingVerified, sourceAppCode: 'sentec-pms', label: 'Loyalty tier', value: 'Platinum', url: null, sort: 1 },
@@ -1492,7 +1714,7 @@ function seedDemoData() {
     sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.roomCleaning,
     guestRef: IDS.guest.marcus, guestName: 'Marcus Reid', visitRef: 'V-88104',
     locationId: IDS.location.room0908, slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
-    activationDate: '2026-08-25T01:15:00.000Z', responseDuration: 8, resolutionDuration: 57,
+    activationDate: '2026-08-25T01:15:00.000Z', responseDuration: 8, resolutionDuration: 65,
     responseSlaStatus: 'ON_TIME', resolutionSlaStatus: 'BREACHED',
     completionNote: 'Deep-cleaned and restocked. AC filter rinsed while I was in there.',
     submittedBy: IDS.staff.budi, submittedAt: '2026-08-25T02:20:00.000Z',
@@ -2077,8 +2299,7 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
       throw unauthorized('invalid email or password')
     }
     if (ctx.query.delivery === 'cookie') {
-      const session: Session = { id: newId(), staffId: acct.id, csrfToken: randomToken(), expiresAt: now + SESSION_TTL_MS }
-      sessions.set(session.id, session)
+      const session = startCookieSession(acct)
       // The Set-Cookie seam: a browser mock cannot mint an HttpOnly cookie, so
       // the session id rides in data._sessionCookie for the client to replay
       // as `Cookie: st_session=…`. The REAL response carries no such field.
@@ -2087,6 +2308,103 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
     const token = randomToken()
     staffBearerTokens.set(token, { staffId: acct.id, expiresAt: now + SESSION_TTL_MS })
     return ok({ token, staff: sessionStaffModel(acct) })
+  }
+
+  // ── Google Sign-In: JSON leg. Returns the URL rather than 302ing so the app
+  // can render a 400/429/503 itself instead of stranding the user on the API.
+  if (method === 'GET' && path === '/v1/auth/google/url') {
+    let returnTo: string
+    if (ctx.query.returnTo) {
+      const allowed = allowedRedirect(ctx.query.returnTo)
+      if (!allowed) throw badRequest('returnTo is not an allowed origin')
+      returnTo = allowed
+    }
+    else {
+      const fallback = defaultRedirect()
+      if (!fallback) throw badRequest('no allowed redirect origin is configured')
+      returnTo = fallback
+    }
+    const state = randomToken()
+    // The flow cookie: PKCE verifier + nonce stay server-side, returnTo is
+    // sealed in rather than sent to Google.
+    oauthFlow = { state, returnTo, expiresAt: Date.now() + OAUTH_FLOW_TTL_MS }
+    const url = new URL('/o/oauth2/v2/auth', MOCK_GOOGLE_AUTH_ORIGIN)
+    url.searchParams.set('client_id', MOCK_GOOGLE_CLIENT_ID)
+    url.searchParams.set('redirect_uri', `${API_BASE_URL}/v1/auth/google/callback`)
+    url.searchParams.set('response_type', 'code')
+    url.searchParams.set('scope', 'openid email profile')
+    url.searchParams.set('state', state)
+    url.searchParams.set('code_challenge_method', 'S256')
+    return ok({ url: url.toString() })
+  }
+
+  // ── Google Sign-In: browser leg. Redirects on success AND failure; the flow
+  // cookie is cleared on every terminal outcome so a verifier is never reused.
+  if (method === 'GET' && path === '/v1/auth/google/callback') {
+    const fallback = defaultRedirect()
+    if (!fallback) throw badRequest('no allowed redirect origin is configured')
+    const flow = oauthFlow
+    oauthFlow = null
+    if (ctx.query.error) {
+      // Google reports cancellation and its own failures here, not by omitting the code.
+      return redirect(withAuthError(fallback, ctx.query.error === 'access_denied' ? 'google_denied' : 'exchange_failed'))
+    }
+    if (!flow || flow.expiresAt < Date.now()) return redirect(withAuthError(fallback, 'expired_flow'))
+    // Re-validated rather than trusted because it came out of our own cookie:
+    // the allow-list may have been tightened since the flow started.
+    const target = allowedRedirect(flow.returnTo) ?? fallback
+    if (ctx.query.state !== flow.state) return redirect(withAuthError(target, 'invalid_state'))
+    const identity = exchangeGoogleCode(ctx.query.code)
+    if (!identity) return redirect(withAuthError(target, 'exchange_failed'))
+    if (!identity.emailVerified) return redirect(withAuthError(target, 'email_unverified'))
+    // No auto-provisioning: unknown and deactivated are the same no_account.
+    const acct = staffAccounts.find(s => s.email === identity.email && s.isActive)
+    if (!acct) return redirect(withAuthError(target, 'no_account'))
+    if (!allowedRedirect(flow.returnTo)) return redirect(withAuthError(fallback, 'invalid_return_to'))
+    return redirect(target, startCookieSession(acct).id)
+  }
+
+  // ── Magic link: XHR leg. ALWAYS 202 with an identical body for an unknown,
+  // deactivated or live address alike — anything else is an existence oracle.
+  if (method === 'POST' && path === '/v1/auth/magic-link/request') {
+    const email = asTrimmed(body.email).toLowerCase()
+    if (!looksLikeEmail(email)) throw badRequest('a valid email is required')
+    const returnTo = typeof body.returnTo === 'string' ? body.returnTo : ''
+    if (returnTo && !allowedRedirect(returnTo)) throw badRequest('returnTo is not an allowed origin')
+    if (!allowMagicLinkRequest(email)) throw new ApiError('RATE_LIMITED', 'too many sign-in link requests')
+    // The token is generated in every case; only persist-and-send branches.
+    const token = randomToken()
+    const acct = staffAccounts.find(s => s.email === email && s.isActive)
+    if (acct) {
+      // A new link supersedes the previous unconsumed one: only the newest email works.
+      for (const row of magicLinkTokens) {
+        if (row.staffId === acct.id && row.consumedAt === null) row.consumedAt = Date.now()
+      }
+      magicLinkTokens.push({ token, staffId: acct.id, expiresAt: Date.now() + MAGIC_LINK_TTL_MS, consumedAt: null })
+      const link = new URL('/v1/auth/magic-link/verify', API_BASE_URL)
+      link.searchParams.set('token', token)
+      if (returnTo) link.searchParams.set('returnTo', returnTo)
+      const mail: DemoMail = { to: email, subject: 'Your Sentec Tasks sign-in link', link: link.toString(), sentAt: nowIso() }
+      mailOutbox.unshift(mail)
+      // MAIL_DEV_CONSOLE parity: the link is printed, not emailed.
+      if (typeof window !== 'undefined') console.info(`[mail dev console] To: ${mail.to}\nSubject: ${mail.subject}\n${mail.link}`)
+    }
+    return ok({ status: 'sent' }, 202)
+  }
+
+  // ── Magic link: browser leg (what the mail client opens). One code —
+  // link_invalid — for malformed, unknown, expired, consumed and deactivated.
+  if (method === 'GET' && path === '/v1/auth/magic-link/verify') {
+    const { target, code } = resolveRedirectTarget(ctx.query.returnTo)
+    if (!target) throw badRequest('no allowed redirect origin is configured')
+    if (code) return redirect(withAuthError(target, code))
+    const row = magicLinkTokens.find(t => t.token === ctx.query.token)
+    if (!row || row.consumedAt !== null || row.expiresAt < Date.now()) return redirect(withAuthError(target, 'link_invalid'))
+    // Single use, burned CLOSED before anything else can fail.
+    row.consumedAt = Date.now()
+    const acct = account(row.staffId)
+    if (!acct || !acct.isActive) return redirect(withAuthError(target, 'link_invalid'))
+    return redirect(target, startCookieSession(acct).id)
   }
 
   // Everything below requires an actor.
@@ -3468,6 +3786,14 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
 
 // ════════════════════════ The mux ════════════════════════
 
+const RAW_ROUTES = new Set([
+  'POST /v1/auth/staff/login',
+  'GET /v1/auth/google/url',
+  'GET /v1/auth/google/callback',
+  'POST /v1/auth/magic-link/request',
+  'GET /v1/auth/magic-link/verify',
+])
+
 /**
  * Handle one request against the mock API. Success returns {status, body};
  * failures throw ApiError (whose .plain flag marks the mux-level text 404/405
@@ -3504,8 +3830,9 @@ export function handleFakeApiRequest(path: string, opts: RequestOpts = {}): Fake
     return ok(created, 201)
   }
 
-  // Login is the one unauthenticated route besides /healthz.
-  const needsActor = !(method === 'POST' && path === '/v1/auth/staff/login')
+  // The sign-in routes mount RAW — no EitherAuth, no CSRF — since a request
+  // that has no credential yet is their entire point.
+  const needsActor = !RAW_ROUTES.has(`${method} ${path}`)
   const actor: Actor = needsActor
     ? resolveActor(headers)
     : { isService: false, actingUser: '', staffId: null, role: 'staff', deptId: null, createTask: false, hotels: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
@@ -3543,4 +3870,80 @@ export function demoLogins(): DemoLogin[] {
 /** Hotel names for pickers — resolved locally, since /v1/platform/tenants is operator-only. */
 export function demoHotelName(hotelRef: Id): string {
   return tenants.find(t => t.hotelRef === hotelRef)?.name ?? hotelRef
+}
+
+/**
+ * Test seam for the schedule arithmetic, resolved the way the service does
+ * (department schedule → tenant default → always-open). Lets the specs pin
+ * the round-trip property between the due-date walk and its inverse without
+ * waiting for a real clock.
+ */
+export function demoSlamath(hotelRef: Id, hotelDepartmentId: Id | null) {
+  const schedule = scheduleFor(hotelRef, hotelDepartmentId)
+  return {
+    advance: (startIso: string, minutes: number) => advanceAcrossSchedule(hotelRef, schedule, startIso, minutes),
+    elapsed: (fromIso: string, toIso: string) => elapsedScheduleMinutes(hotelRef, schedule, fromIso, toIso),
+  }
+}
+
+/** The mock's CORS_ALLOWED_ORIGINS — what a returnTo must sit on. */
+export function demoAllowedOrigins(): string[] {
+  return [...ALLOWED_ORIGINS]
+}
+
+/**
+ * Recognise the mock's Google consent URL (from GET /v1/auth/google/url) and
+ * hand back what the login screen needs to play Google: the state to echo and
+ * the identities to offer. Null for any other URL — a real one is navigated to.
+ */
+export function demoGoogleConsent(url: string): { state: string, redirectUri: string, identities: DemoGoogleIdentity[] } | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  }
+  catch {
+    return null
+  }
+  if (parsed.origin !== MOCK_GOOGLE_AUTH_ORIGIN) return null
+  const state = parsed.searchParams.get('state') ?? ''
+  const redirectUri = parsed.searchParams.get('redirect_uri') ?? `${API_BASE_URL}/v1/auth/google/callback`
+  const identities = [
+    ...demoLogins().map(d => ({ email: d.email, name: d.name, emailVerified: true, hasAccount: true })),
+    ...OUTSIDER_IDENTITIES,
+  ]
+  return { state, redirectUri, identities }
+}
+
+/**
+ * What the mock's Google does when an account is picked (or the consent
+ * screen is cancelled): the callback URL it would send the browser to.
+ */
+export function demoGoogleCallbackUrl(consent: { state: string, redirectUri: string }, choice: { email: string } | 'cancel'): string {
+  const url = new URL(consent.redirectUri)
+  url.searchParams.set('state', consent.state)
+  if (choice === 'cancel') url.searchParams.set('error', 'access_denied')
+  else url.searchParams.set('code', googleCodeFor(choice.email))
+  return url.toString()
+}
+
+/** The dev-console outbox, newest first — optionally for one address. */
+export function demoOutbox(to?: string): DemoMail[] {
+  const email = to?.trim().toLowerCase()
+  return mailOutbox.filter(m => !email || m.to === email)
+}
+
+/**
+ * Follow a link into the API as a browser would (the emailed sign-in link, or
+ * the mock Google's callback): the 302's Location, plus the session id its
+ * Set-Cookie carried on success. The client adopts that id where the cookie
+ * seam already lives and then recovers identity + CSRF from
+ * GET /v1/auth/session — exactly what the real app does after the redirect.
+ */
+export function demoFollowApiLink(url: string): { location: string, sessionCookie: string | null } {
+  const parsed = new URL(url)
+  const query = Object.fromEntries(parsed.searchParams.entries())
+  const res = handleFakeApiRequest(parsed.pathname, { query })
+  if (res.status !== 302 || !res.headers) throw new Error(`expected a redirect from ${parsed.pathname}, got ${res.status}`)
+  const cookie = res.headers['set-cookie']
+  return { location: res.headers.location, sessionCookie: cookie ? parseCookie(cookie, 'st_session') : null }
 }

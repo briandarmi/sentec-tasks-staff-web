@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { ApiError, IDS, handleFakeApiRequest as call } from '~/utils/clientFakeApi'
+import { ApiError, IDS, demoAllowedOrigins, demoFollowApiLink, demoGoogleCallbackUrl, demoGoogleConsent, demoOutbox, handleFakeApiRequest as call } from '~/utils/clientFakeApi'
 
-// Core wire-contract pins for the mock of sentec-tasks-api (@ 0c8e1bd):
+// Core wire-contract pins for the mock of sentec-tasks-api (master @ c3f52ad,
+// sign-in branch @ 48756a3):
 // envelope shape, auth model (cookie + CSRF, bearer stand-ins), hotel scoping,
 // and the transport quirks (plain-text 404, null-vs-[] serialization) that a
 // faithful client has to survive.
@@ -187,5 +188,121 @@ describe('staff directory reads', () => {
     const hk = call('/v1/staff/assignable', { headers: h(leader, H), query: { departmentId: IDS.dept.smtpHousekeeping } }).body!.data as Array<{ id: string }>
     expect(hk.some(row => row.id === IDS.staff.budi)).toBe(true)
     expect(hk.some(row => row.id === IDS.staff.joko)).toBe(false)
+  })
+})
+
+describe('passwordless sign-in (feat/google-and-magic-link-auth @ 48756a3)', () => {
+  // Leaves behind: a few cookie sessions and consumed magic-link tokens.
+
+  const origin = demoAllowedOrigins()[0]!
+  const returnTo = `${origin}/login?redirect=%2Ftasks%2Fabc`
+  const sessionFor = (cookie: string) => call('/v1/auth/session', { headers: { cookie: `st_session=${cookie}` } }).body!.data as { csrfToken: string, staff: { email: string } }
+
+  function startGoogle(to = returnTo) {
+    const url = (call('/v1/auth/google/url', { query: { returnTo: to } }).body!.data as { url: string }).url
+    return demoGoogleConsent(url)!
+  }
+
+  it('google/url hands back the authorization URL and refuses a returnTo off the allow-list', () => {
+    const res = call('/v1/auth/google/url', { query: { returnTo } })
+    expect(res.status).toBe(200)
+    const url = new URL((res.body!.data as { url: string }).url)
+    expect(url.searchParams.get('state')!.length).toBeGreaterThan(20)
+    expect(url.searchParams.get('redirect_uri')).toMatch(/\/v1\/auth\/google\/callback$/)
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256')
+    // Parsed origin, never a prefix match: a look-alike host is refused too.
+    expect(errOf(() => call('/v1/auth/google/url', { query: { returnTo: 'https://evil.example/login' } })).message).toBe('returnTo is not an allowed origin')
+    expect(errOf(() => call('/v1/auth/google/url', { query: { returnTo: `${origin}.evil.example/login` } })).message).toBe('returnTo is not an allowed origin')
+    // No returnTo at all falls back to the allow-list's first entry.
+    expect(call('/v1/auth/google/url').status).toBe(200)
+  })
+
+  it('the callback mints the same st_session cookie password login does and 302s to the sealed returnTo', () => {
+    const consent = startGoogle()
+    const { location, sessionCookie } = demoFollowApiLink(demoGoogleCallbackUrl(consent, { email: 'staff@aston.example' }))
+    expect(location).toBe(returnTo)
+    expect(sessionCookie).toBeTruthy()
+    // Nothing secret rode in the redirect: the app recovers identity + CSRF from /v1/auth/session.
+    const recovered = sessionFor(sessionCookie!)
+    expect(recovered.staff.email).toBe('staff@aston.example')
+    expect(recovered.csrfToken.length).toBeGreaterThan(20)
+    // And it is an ordinary cookie actor from here on — CSRF applies to mutations.
+    expect(call('/v1/tasks', { headers: { 'cookie': `st_session=${sessionCookie}`, 'x-hotel-id': H } }).status).toBe(200)
+    expect(errOf(() => call('/v1/tasks/claim', { method: 'POST', headers: { 'cookie': `st_session=${sessionCookie}`, 'x-hotel-id': H }, body: { taskId: IDS.task.turndownPool } })).message).toBe('invalid CSRF token')
+  })
+
+  it('refuses with one coarse code per cause, always by redirect, and burns the flow either way', () => {
+    // Cancelled at Google: reported on the fallback origin, not the sealed returnTo.
+    const first = startGoogle()
+    const cancelled = demoFollowApiLink(demoGoogleCallbackUrl(first, 'cancel'))
+    expect(cancelled.location).toBe(`${origin}/?authError=google_denied`)
+    expect(cancelled.sessionCookie).toBeNull()
+    // The flow cookie was cleared by that terminal outcome: a replayed callback has no flow.
+    const replayed = demoFollowApiLink(demoGoogleCallbackUrl(first, { email: 'staff@aston.example' }))
+    expect(replayed.location).toBe(`${origin}/?authError=expired_flow`)
+    // A state that does not match the flow: login-CSRF defence.
+    const consent = startGoogle()
+    const forged = demoFollowApiLink(demoGoogleCallbackUrl({ ...consent, state: 'forged' }, { email: 'staff@aston.example' }))
+    expect(forged.location).toBe(`${returnTo}&authError=invalid_state`)
+    // No auto-provisioning; an unverified address is refused outright.
+    expect(demoFollowApiLink(demoGoogleCallbackUrl(startGoogle(), { email: 'someone.else@gmail.example' })).location).toBe(`${returnTo}&authError=no_account`)
+    expect(demoFollowApiLink(demoGoogleCallbackUrl(startGoogle(), { email: 'unverified@gmail.example' })).location).toBe(`${returnTo}&authError=email_unverified`)
+    // A code Google would not have issued fails the exchange.
+    const bad = new URL(demoGoogleCallbackUrl(startGoogle(), { email: 'staff@aston.example' }))
+    bad.searchParams.set('code', 'garbage')
+    expect(demoFollowApiLink(bad.toString()).location).toBe(`${returnTo}&authError=exchange_failed`)
+  })
+
+  it('magic-link/request answers a byte-identical 202 for unknown and live addresses, mailing only the live one', () => {
+    const unknown = call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'nobody@aston.example', returnTo } })
+    const live = call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'Leader@Aston.example ', returnTo } })
+    expect(unknown.status).toBe(202)
+    expect(live.status).toBe(202)
+    expect(unknown.body).toEqual(live.body)
+    expect(live.body).toEqual({ version: 'v1', data: { status: 'sent' } })
+    expect(demoOutbox('nobody@aston.example')).toHaveLength(0)
+    const [mail] = demoOutbox('leader@aston.example')
+    expect(mail!.subject).toBe('Your Sentec Tasks sign-in link')
+    const link = new URL(mail!.link)
+    expect(link.pathname).toBe('/v1/auth/magic-link/verify')
+    expect(link.searchParams.get('token')!.length).toBeGreaterThan(20)
+    expect(link.searchParams.get('returnTo')).toBe(returnTo)
+    // The only non-202s say nothing about the address.
+    expect(errOf(() => call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'not-an-email', returnTo } })).message).toBe('a valid email is required')
+    expect(errOf(() => call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'leader@aston.example', returnTo: 'https://evil.example/' } })).message).toBe('returnTo is not an allowed origin')
+  })
+
+  it('verify is single-use and redirects on failure with link_invalid, never JSON', () => {
+    const [mail] = demoOutbox('leader@aston.example')
+    const first = demoFollowApiLink(mail!.link)
+    expect(first.location).toBe(returnTo)
+    expect(sessionFor(first.sessionCookie!).staff.email).toBe('leader@aston.example')
+    // A scanner's second fetch burns closed, not open.
+    const second = demoFollowApiLink(mail!.link)
+    expect(second.location).toBe(`${returnTo}&authError=link_invalid`)
+    expect(second.sessionCookie).toBeNull()
+    // Malformed token: same single code.
+    expect(demoFollowApiLink(`https://api.sentec-tasks.example/v1/auth/magic-link/verify?token=nope&returnTo=${encodeURIComponent(returnTo)}`).location)
+      .toBe(`${returnTo}&authError=link_invalid`)
+    // A returnTo that travelled through the mailbox is re-validated; a bad one goes to the fallback and is never echoed.
+    const foreign = demoFollowApiLink('https://api.sentec-tasks.example/v1/auth/magic-link/verify?token=nope&returnTo=https%3A%2F%2Fevil.example%2F')
+    expect(foreign.location).toBe(`${origin}/?authError=invalid_return_to`)
+  })
+
+  it('a newer link supersedes the previous unconsumed one', () => {
+    call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'staff@aston.example', returnTo } })
+    call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'staff@aston.example', returnTo } })
+    const [newest, older] = demoOutbox('staff@aston.example')
+    expect(demoFollowApiLink(older!.link).location).toBe(`${returnTo}&authError=link_invalid`)
+    expect(demoFollowApiLink(newest!.link).sessionCookie).toBeTruthy()
+  })
+
+  it('rate-limits requests per address on SUCCESS: three per window, then 429', () => {
+    for (let i = 0; i < 3; i++) {
+      expect(call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'operator@sentineltech.example', returnTo } }).status).toBe(202)
+    }
+    const limited = errOf(() => call('/v1/auth/magic-link/request', { method: 'POST', body: { email: 'operator@sentineltech.example', returnTo } }))
+    expect(limited.status).toBe(429)
+    expect(limited.message).toBe('too many sign-in link requests')
   })
 })

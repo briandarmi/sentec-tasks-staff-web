@@ -18,7 +18,9 @@ with no partner connected at all.
 There is no server in this workspace; the app runs against an in-browser mock:
 [`app/utils/clientFakeApi.ts`](app/utils/clientFakeApi.ts). Since 2026-09-02
 that mock is **wire-faithful to `sentec-tasks-api`** (Go + PostgreSQL, pinned
-at commit `0c8e1bd`): the exact paths, methods, response envelope, UUID ids,
+at `master` commit `c3f52ad` plus the passwordless sign-in branch
+`feat/google-and-magic-link-auth` @ `48756a3`, re-aligned 2026-09-16): the
+exact paths, methods, response envelope, UUID ids,
 `X-Hotel-Id` scoping, error codes and message literals, and the serialization
 quirks (`data: null` for an empty task list but `[]` for config lists;
 `meta.total`, not `totalCount`; `meta.warnings: null` on a clean create) —
@@ -34,6 +36,13 @@ mock cannot BE, it simulates at the seam and says so:
 - **The httpOnly cookie** — the session id rides in the login response's
   `_sessionCookie` (a mock-only field) and is replayed as `Cookie: st_session=…`;
   the CSRF discipline (`X-CSRF-Token` on every mutation) is real.
+- **The two redirecting sign-in legs** (Google callback, magic-link verify)
+  answer a real 302 whose `Location` the mock reports in `headers`, with the
+  `Set-Cookie` it cannot honour beside it; the login screen "follows" that
+  redirect in-app and adopts the id through the same seam. Google itself is
+  an account chooser the screen renders in place of the consent page, and the
+  mail transport is the API's own dev-console one (link printed, plus a
+  "demo inbox" on the screen).
 - **S3** — presigned uploads validate exactly what the API validates and hand
   back real-shaped storage keys; the bytes go nowhere and signed GET URLs are
   stable placeholders.
@@ -65,7 +74,7 @@ The seed also carries `made@aston.example` (staff **without** the createTask
 claim) and `joko@aston.example` (Maintenance staff) for exercising the gates.
 
 ```bash
-pnpm test          # 102 tests over this repo's own copy of everything
+pnpm test          # 144 tests over this repo's own copy of everything
 pnpm typecheck     # vue-tsc across app + templates
 pnpm build         # static SPA into .output/public
 pnpm check:shared  # byte-compares the duplicated files with the admin console
@@ -73,7 +82,7 @@ pnpm check:shared  # byte-compares the duplicated files with the admin console
 
 ## Kept in step by hand
 
-Eight files are **duplicated** between this app and the admin console:
+Nine files are **duplicated** between this app and the admin console:
 
 | File                             | Why both apps need it              |
 | -------------------------------- | ---------------------------------- |
@@ -85,9 +94,11 @@ Eight files are **duplicated** between this app and the admin console:
 | `app/utils/clientFakeApi.ts`     | Same mock, same seed data          |
 | `app/utils/task-ui.ts`           | Same status and SLA presentation   |
 | `app/utils/select-empty.ts`      | Reka UI's reserved-empty-value fix |
+| `app/utils/sign-in.ts`           | Same returnTo and authError copy   |
 
 Plus `tests/mock-api.spec.ts`, `tests/admin-config.spec.ts`,
-`tests/staff-flows.spec.ts`, `tests/api-fidelity.spec.ts` and
+`tests/staff-flows.spec.ts`, `tests/api-fidelity.spec.ts`,
+`tests/sign-in.spec.ts` and
 `tests/task-ui.spec.ts`, duplicated for a reason: each repo tests the copy it
 ships. A change to any file above belongs in both apps in the same change, and
 `pnpm check:shared` fails when the copies differ (it skips when the sibling
@@ -119,10 +130,17 @@ raise work at all.
 - **Claim never steals; assign is the hand-over.** A pool task (TEAM or
   DEPARTMENT) is claimable by its members only; department sync refuses
   cross-department claims/assigns except by an admin.
-- **SLA clocks chain and accumulate.** `resolutionDueAt` is open-hours minutes
-  from `responseDueAt` (not from activation); `resolutionDuration` accumulates
-  time spent IN_PROGRESS; the resolution verdict stamps at submission and is
-  never re-judged by review latency.
+- **SLA clocks chain, and the numbers are stamped with their verdicts.**
+  `resolutionDueAt` is open-hours minutes from `responseDueAt` (not from
+  activation). Since the API's 2026-09-02 SLA spec (`c3f52ad`) both
+  `responseDuration` and `resolutionDuration` are **open-hours minutes from
+  activation** — response to the first IN_PROGRESS, resolution to the moment
+  work stopped (submission, or a direct FINISHED) — written at the same
+  instant as their verdict, so the pair can never disagree. Parked time
+  counts; leaving IN_PROGRESS writes nothing (the old accumulator is gone); a
+  review bounce resets the verdict but leaves the superseded number in place
+  until the resubmission re-stamps both from activation; approval and later
+  detours never re-stamp. The timeline reads a number only beside a verdict.
 - **SUBMITTED is frozen** for staff; a leader may only park or cancel it —
   review is the deciding action, leader-of-the-department or admin.
 - **No free-text search and no department filter on the list.** The search box
@@ -140,12 +158,25 @@ raise work at all.
 
 ## Auth
 
-`POST /v1/auth/staff/login?delivery=cookie` sets the `st_session` cookie
-(12-hour shift window) and returns the CSRF token the app echoes as
-`X-CSRF-Token` on every mutation; `GET /v1/auth/session` recovers the token
-after a refresh. Sign-out clears everything on the device, including the
-selected property — correct for a shared shift device, and the profile screen
-says so.
+Three ways in, one session. `POST /v1/auth/staff/login?delivery=cookie`
+(password, kept as the transition fallback), `GET /v1/auth/google/callback`
+(Google Sign-In, a backend authorization-code flow with PKCE) and
+`GET /v1/auth/magic-link/verify` (an emailed single-use link, 15 minutes) all
+set the same `st_session` cookie (12-hour shift window) — there is no separate
+actor kind, and neither passwordless path can create an account. The password
+login returns the CSRF token in its body; the two redirect-based paths hand the
+app nothing but the cookie, so it recovers the token from
+`GET /v1/auth/session`, exactly as it does after a refresh.
+
+The login screen offers Google first, the emailed link as the default for an
+address, and the password behind "use a password instead". Both passwordless
+paths return to the login screen itself (`returnTo`, deep link in its query),
+which renders the closed set of `?authError=` codes from
+[`app/utils/sign-in.ts`](app/utils/sign-in.ts) — never the raw value — and the
+auth middleware then honours the deep link. `POST /v1/auth/magic-link/request`
+always answers `202`, so the screen never confirms that an address exists.
+Sign-out clears everything on the device, including the selected property —
+correct for a shared shift device, and the profile screen says so.
 
 ## Kept in step with the remote staff app
 

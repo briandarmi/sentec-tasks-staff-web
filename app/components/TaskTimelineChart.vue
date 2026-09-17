@@ -51,6 +51,13 @@ function markerLabel(marker: TimelineMarker) {
 /**
  * What the clock did, in words: the actual time taken when it has stopped,
  * otherwise that it is still running. The verdict's tone colours the words.
+ *
+ * "Took" is the API's own measure (2026-09-02 SLA spec): open-hours minutes
+ * from activation to the moment work started (response) or stopped
+ * (resolution), stamped together with the verdict. The number is read only
+ * when a verdict exists — while the resolution verdict is EMPTY after a review
+ * bounce, `resolutionDuration` still holds the superseded attempt and must not
+ * be shown as if it measured the rework in progress.
  */
 function markerOutcome(marker: TimelineMarker) {
   if (marker.kind === 'now' || marker.kind === 'due') return null

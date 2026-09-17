@@ -258,7 +258,7 @@ describe('the status route guard chain', () => {
     expect(parked.status).toBe('PENDING')
   })
 
-  it('stamps response on first IN_PROGRESS only, and accumulates resolution minutes', () => {
+  it('stamps response on first IN_PROGRESS only; resolution stamps with its verdict, never on the way out', () => {
     const a = admin()
     const t = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Clock test', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
     // NEW → PENDING is a park, not a response.
@@ -268,10 +268,18 @@ describe('the status route guard chain', () => {
     const started = data(call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: t.id, columnId: columnFor(a, 'IN_PROGRESS') } }))
     expect(started.responseDuration).not.toBeNull()
     expect(started.responseSlaStatus).toBe('ON_TIME')
-    // Leaving IN_PROGRESS accumulates; entering FINISHED (not via review) stamps.
+    // Leaving IN_PROGRESS stamps NOTHING (the old accumulator is gone) — a park
+    // after work started still shows no resolution number and no verdict.
+    const reparked = data(call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: t.id, columnId: columnFor(a, 'PENDING') } }))
+    expect(reparked.resolutionDuration).toBeNull()
+    expect(reparked.resolutionSlaStatus).toBe('EMPTY')
+    // Entering FINISHED (not via review) while EMPTY stamps duration + verdict together.
     const done = data(call('/v1/tasks/status', { method: 'PATCH', headers: h(a, H), body: { taskId: t.id, columnId: columnFor(a, 'FINISHED') } }))
     expect(done.resolutionDuration).not.toBeNull()
     expect(done.resolutionSlaStatus).toBe('ON_TIME')
+    // Both numbers run from activation, so a task worked within one minute reads 0, not null.
+    expect(done.responseDuration).toBeGreaterThanOrEqual(0)
+    expect(done.resolutionDuration).toBeGreaterThanOrEqual(done.responseDuration)
   })
 })
 

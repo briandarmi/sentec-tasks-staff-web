@@ -1,15 +1,19 @@
 import { computed } from 'vue'
-import type { Envelope, Staff } from '~/utils/clientFakeApi'
+import type { ApiError, Envelope, Staff } from '~/utils/clientFakeApi'
 
 /**
  * Signed-in state against the real Sentec Tasks API contract.
  *
- * Auth model: POST /v1/auth/staff/login?delivery=cookie sets the httpOnly
- * `st_session` cookie and returns {csrfToken, staff}; every mutation must echo
- * the CSRF token as X-CSRF-Token; GET /v1/auth/session recovers the token
- * after a refresh. A browser-side mock cannot mint an httpOnly cookie, so the
- * session id is held here and replayed as a `Cookie: st_session=…` header —
- * the shape is the contract's, the protection is necessarily the server's.
+ * Auth model: three sign-in paths — password (POST /v1/auth/staff/login
+ * ?delivery=cookie), Google Sign-In (GET /v1/auth/google/url → callback) and
+ * the emailed magic link (POST /v1/auth/magic-link/request → verify) — all
+ * mint the same httpOnly `st_session` cookie; there is no separate actor kind.
+ * Every mutation must echo the CSRF token as X-CSRF-Token; GET /v1/auth/session
+ * recovers the token after a refresh, and after either redirect-based sign-in,
+ * which hands the app nothing but the cookie. A browser-side mock cannot mint
+ * an httpOnly cookie, so the session id is held here and replayed as a
+ * `Cookie: st_session=…` header — the shape is the contract's, the protection
+ * is necessarily the server's.
  *
  * The session id is the ONE thing persisted across a refresh, in
  * `sessionStorage` so it dies with the tab — the same 12-hour shift-device
@@ -104,6 +108,10 @@ export function useSession() {
     return (res.body ?? { version: 'v1', data: null }) as Envelope<T>
   }
 
+  /** A failed sign-in call as the screen needs it: the API's code and message. */
+  const failure = (e: unknown) => ({ ok: false as const, code: (e as ApiError).code ?? 'ERROR', message: (e as Error).message })
+
+  /** Password login — kept as the transition fallback beside the two passwordless paths. */
   async function login(credentials: { email: string, password: string }) {
     const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
     try {
@@ -117,7 +125,60 @@ export function useSession() {
       return { ok: true as const }
     }
     catch (e) {
-      return { ok: false as const, message: (e as Error).message }
+      return failure(e)
+    }
+  }
+
+  /**
+   * GET /v1/auth/google/url: the Google authorization URL to navigate the
+   * browser to (a full-page navigation, not a fetch). It answers JSON rather
+   * than 302ing precisely so a 400, 429 or 503 here is something this screen
+   * can say, instead of a dead end on the API's own error page.
+   */
+  async function googleSignInUrl(returnTo: string) {
+    const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
+    try {
+      const res = handleFakeApiRequest('/v1/auth/google/url', { query: { returnTo } })
+      return { ok: true as const, url: (res.body?.data as { url: string }).url }
+    }
+    catch (e) {
+      return failure(e)
+    }
+  }
+
+  /**
+   * POST /v1/auth/magic-link/request. A 202 means "acted on your request",
+   * never "that account exists" — the body is byte-identical either way, and
+   * the screen must not word it any other way. Only 400 (malformed email or
+   * disallowed returnTo), 429 and 503 differ, none of which is about the
+   * address.
+   */
+  async function requestMagicLink(email: string, returnTo: string) {
+    const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
+    try {
+      handleFakeApiRequest('/v1/auth/magic-link/request', { method: 'POST', body: { email: email.trim(), returnTo } })
+      return { ok: true as const }
+    }
+    catch (e) {
+      return failure(e)
+    }
+  }
+
+  /**
+   * GET /v1/auth/session with a session id: adopt identity and CSRF token, or
+   * forget the id if the server no longer knows it.
+   */
+  async function recover(id: string) {
+    const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
+    try {
+      const res = handleFakeApiRequest('/v1/auth/session', { headers: { cookie: `st_session=${id}` } })
+      const data = res.body?.data as { csrfToken: string, staff: Staff }
+      adopt({ sessionId: id, csrfToken: data.csrfToken, staff: data.staff })
+      return true
+    }
+    catch {
+      writeStoredSession(null)
+      return false
     }
   }
 
@@ -128,20 +189,25 @@ export function useSession() {
       isRestoring.value = false
       return false
     }
-    const { handleFakeApiRequest } = await import('~/utils/clientFakeApi')
     try {
-      const res = handleFakeApiRequest('/v1/auth/session', { headers: { cookie: `st_session=${stored}` } })
-      const data = res.body?.data as { csrfToken: string, staff: Staff }
-      adopt({ sessionId: stored, csrfToken: data.csrfToken, staff: data.staff })
-      return true
-    }
-    catch {
-      writeStoredSession(null)
-      return false
+      return await recover(stored)
     }
     finally {
       isRestoring.value = false
     }
+  }
+
+  /**
+   * After a redirect-based sign-in (Google callback, magic-link verify) the
+   * session arrives as the cookie and nothing else — no token, no CSRF token
+   * in the URL. The app then recovers identity and CSRF from
+   * GET /v1/auth/session exactly as it does on a cold boot. A browser mock
+   * cannot set that cookie from a 302, so the id it carried is handed in here
+   * and stored where the cookie seam already lives; the recovery is the same.
+   */
+  async function adoptCookieSession(id: string) {
+    writeStoredSession(id)
+    return recover(id)
   }
 
   /**
@@ -181,6 +247,9 @@ export function useSession() {
     isAuthenticated,
     isRestoring,
     login,
+    googleSignInUrl,
+    requestMagicLink,
+    adoptCookieSession,
     logout,
     restore,
     request,

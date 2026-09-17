@@ -35,7 +35,7 @@ import type {
 
 /**
  * Typed client for the Sentec Tasks API — paths, methods and shapes are the
- * real contract (openapi @ 0c8e1bd). Every call goes through
+ * real contract (openapi @ c3f52ad). Every call goes through
  * `useSession().request`, which injects the session cookie, the CSRF echo and
  * the X-Hotel-Id scope. Nothing here takes a role as an argument: the server
  * decides what the caller may do, and the UI only decides what to ask for.
