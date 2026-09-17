@@ -289,6 +289,10 @@ async function followApiLink(url: string) {
             <Button class="min-h-11 w-full" type="submit" :disabled="Boolean(busy)">
               {{ busy === 'password' ? 'Signing in…' : 'Sign In' }}
             </Button>
+            <!-- The API keeps password login only as the transition fallback. -->
+            <p class="text-center text-xs text-muted-foreground">
+              Passwords are being phased out. The emailed link and Google work for every active account.
+            </p>
             <Button variant="ghost" size="sm" class="w-full" type="button" @click="showPassword = false">
               <MailIcon class="size-3.5" />
               Email me a sign-in link instead
