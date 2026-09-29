@@ -1,5 +1,5 @@
 import type { SlaStatus, TaskDetail, TaskHistory, TaskStatus } from '~/utils/clientFakeApi'
-import { TASK_STATUS_META, isOpen } from '~/utils/task-ui'
+import { TASK_STATUS_META, formatShortDate, isOpen, zonedParts } from '~/utils/task-ui'
 
 // The graphical timeline's model: pure arithmetic over a task detail, kept out
 // of the component so the geometry (where each phase and target lands on the
@@ -150,10 +150,10 @@ export function buildTaskTimeline(task: TimelineInput, nowMs = Date.now()): Task
  * minutes.
  */
 export function formatAxisTime(ms: number, spanMs: number): string {
-  const date = new Date(ms)
-  const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  const { hour, minute } = zonedParts(ms)
+  const time = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
   if (spanMs < 24 * 60 * MINUTE) return time
-  return `${date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`
+  return `${formatShortDate(ms)} ${time}`
 }
 
 /** Compact duration for the phase legend: "6m", "1h 20m", "2d 3h". */

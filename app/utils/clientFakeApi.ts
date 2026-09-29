@@ -1,7 +1,15 @@
 /**
  * In-browser mock of the REAL Sentec Tasks API (sentec-tasks-api master
  * @ c3f52ad, plus the passwordless sign-in branch
- * feat/google-and-magic-link-auth @ 48756a3 — see "Passwordless sign-in").
+ * feat/google-and-magic-link-auth @ 48756a3 — see "Passwordless sign-in" —
+ * plus the `feat/projects` branch @ fe5e99d (which contains the sign-in,
+ * per-hotel-membership, checklist, template/recurrence, roster-import and
+ * partner-dispatch branches): per-property roles, the requester rename,
+ * projects, checklist steps, templates and recurring tasks, the hotel
+ * timezone, time attribution and the roster import. Error literals and
+ * shapes for those come from the branch's Go handlers and openapi.yaml
+ * (reconciled 2026-09-29); the few places a browser mock cannot follow the
+ * server are marked "MOCK LIMIT".)
  *
  * Wire-faithful by decision: exact paths, envelope, error codes and message
  * literals, UUID ids, X-Hotel-Id scoping, cookie-session + CSRF shape, and the
@@ -80,16 +88,38 @@ export interface StaffAccount {
   email: string
   /** One display-name field — the real staff table has no first/last split. */
   name: string
-  role: StaffRole
   isActive: boolean
-  hotelDepartmentId: Id | null
-  createTask: boolean
   isOperator: boolean
 }
 
-/** The Staff read model every staff-surface response uses (never a hash). */
+/** A property the person can reach — directly or through a group grant. Sorted by name. */
+export interface Property {
+  hotelRef: Id
+  name: string
+}
+
+/**
+ * The person's standing at ONE property (feat/projects, commit 55db919): role,
+ * department and the create-task permission are per hotel now, not per
+ * account. The staff JWT dropped its role/deptId/createTask claims too — read
+ * everything from the membership whose hotelRef matches the selected hotel.
+ */
+export interface HotelMembership {
+  hotelRef: Id
+  role: StaffRole
+  hotelDepartmentId: Id | null
+  createTask: boolean
+}
+
+/**
+ * The Staff read model every staff-surface response uses (never a hash).
+ * `role`, `hotelDepartmentId`, `createTask` and `hotels` are GONE from the
+ * wire; `properties` is the reach, `memberships` the per-property standing
+ * (always an array — GET /v1/staff narrows it to the listed hotel).
+ */
 export interface Staff extends StaffAccount {
-  hotels: Id[]
+  properties: Property[]
+  memberships: HotelMembership[]
   groupGrants: Id[]
 }
 
@@ -274,8 +304,9 @@ export interface Task {
   itemRef: Id | null
   itemName: string
   categoryName: string | null
-  guestRef: Id | null
-  guestName: string | null
+  /** Renamed from guestRef/guestName (feat/projects 55d56c4); the create bodies already said requester*. */
+  requesterRef: Id | null
+  requesterName: string | null
   visitRef: string | null
   priority: TaskPriority
   locationId: Id | null
@@ -299,6 +330,11 @@ export interface Task {
   completionNote: string | null
   submittedBy: Id | null
   submittedAt: string | null
+  /** Set on tasks a recurring template made (feat/projects). */
+  templateId: Id | null
+  occurrenceKey: string | null
+  /** Storage column; the wire shows it as `project: {id, name}` on the read models. */
+  projectId: Id | null
   createdAt: string
   updatedAt: string
 }
@@ -415,6 +451,13 @@ export interface ChecklistItem {
   isDone: boolean
   doneBy: Id | null
   doneAt: string | null
+  /** A step may be handed to one person, who then gets read-only access to the task. */
+  assignedStaffId: Id | null
+  assignedStaffName: string | null
+  assignedBy: Id | null
+  assignedAt: string | null
+  /** ≤ 2000 chars; survives an untick. */
+  note: string | null
   createdAt: string
   updatedAt: string
 }
@@ -424,6 +467,8 @@ export interface TaskListItem extends Task {
   column: { id: Id, name: string, columnSort: number } | null
   sla: { id: Id, name: string } | null
   assignment: AssignmentRef | null
+  /** The project this task belongs to; project tasks leave the hotel board and default list. */
+  project: { id: Id, name: string } | null
 }
 
 export interface TaskDetail extends TaskListItem {
@@ -432,8 +477,151 @@ export interface TaskDetail extends TaskListItem {
   comments: TaskComment[] | null
   attachments: TaskAttachment[] | null
   collaborators: Collaborator[] | null
+  /** The steps, in sort order. There is no separate GET; this is the only read. */
+  checklist: ChecklistItem[]
   proofRequirements: { minProofPhotos: number, requiresCompletionNote: boolean }
   pendingOffer: { id: Id, toStaffId: Id, toStaffName: string | null, note: string | null, createdAt: string } | null
+}
+
+/** GET /v1/tasks/{id}/attribution — who held the task for how long, in open-schedule minutes. */
+export interface TaskTimeAttribution {
+  taskId: Id
+  activationDate: string
+  cutoffAt: string
+  cutoffReason: 'submitted' | 'open'
+  totalMinutes: number
+  unclaimedMinutes: number
+  pooledMinutes: number
+  holders: Array<{ staffId: Id, staffName?: string | null, minutes: number, holds: number }>
+  /** False means the split does not add up to the total — do not show it. */
+  reconciles: boolean
+}
+
+// ── Projects (feat/projects, ADR 0001) ──────────────────────────────────────
+
+export type ProjectStatus = 'ACTIVE' | 'COMPLETED' | 'CANCELLED'
+export type ProjectLevel = 'MANAGER' | 'MEMBER' | 'VIEWER'
+
+export interface ProjectProgress {
+  byStatus: Record<TaskStatus, number>
+  /** FINISHED + VERIFIED. */
+  done: number
+  /** Everything but CANCELLED. */
+  total: number
+  /** Rounded down. */
+  percent: number
+  overdue: number
+  unassigned: number
+}
+
+export interface Project {
+  id: Id
+  hotelRef: Id
+  name: string
+  description: string | null
+  startDate: string | null
+  endDate: string | null
+  status: ProjectStatus
+  completedAt: string | null
+  createdBy: Id | null
+  managerStaffId: Id | null
+  /** The caller's own level; null for a non-member admin. */
+  myLevel: ProjectLevel | null
+  late: boolean
+  /** Admins only: the project manager no longer has an active membership at this hotel. */
+  needsManager?: boolean
+  progress: ProjectProgress
+  /** On the complete response only. */
+  openTasks?: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectMember {
+  staffId: Id
+  name: string
+  level: ProjectLevel
+  source: 'MANUAL' | 'AUTO'
+  addedBy: Id | null
+  addedAt: string
+}
+
+// ── Task templates and recurring tasks (feat/projects) ──────────────────────
+
+export type RecurrenceKind = 'DAILY' | 'WEEKLY' | 'MONTHLY'
+
+/** Same names as the staff-create body; no DEPARTMENT kind. */
+export interface TaskTemplateAssignee {
+  assigneeKind: 'STAFF' | 'TEAM' | 'UNASSIGNED'
+  assigneeStaffId?: Id | null
+  assigneeTeamId?: Id | null
+}
+
+/** Task content without a due date, activation date or requester. */
+export interface TaskTemplateContent {
+  title: string
+  description?: string | null
+  itemRef?: Id | null
+  locationRef?: Id | null
+  roomNumber?: string | null
+  priority?: TaskPriority | null
+  quantity?: number | null
+  checklistLabels: string[]
+  assignee?: TaskTemplateAssignee | null
+}
+
+export interface TaskTemplateRecurrence {
+  kind: RecurrenceKind
+  /** Minutes after local midnight, 0–1439. */
+  timeMinutes: number
+  /** 0 = Sunday; required for WEEKLY. */
+  weekdays?: number[] | null
+  /** 1–28; required for MONTHLY. */
+  dayOfMonth?: number | null
+  /** Hotel-local dates, YYYY-MM-DD. */
+  startsOn?: string | null
+  endsOn?: string | null
+}
+
+export interface TaskTemplate {
+  id: Id
+  hotelRef: Id
+  name: string
+  isActive: boolean
+  content: TaskTemplateContent
+  recurrence: TaskTemplateRecurrence | null
+  /** Null when nothing will fire: manual-only, inactive, or past endsOn. */
+  nextRunAt: string | null
+  /** When the worker last handled this template, successfully or not. */
+  lastRunAt: string | null
+  /** The scheduled time of the last occurrence a task was created for. */
+  lastOccurrenceAt: string | null
+  lastTaskId: Id | null
+  /**
+   * Why the last run skipped its occurrence, created the task without its
+   * assignee, or paused a personal template whose owner lost access. Null
+   * after a clean run. Show it.
+   */
+  lastError: string | null
+  createdBy: Id | null
+  /** Set on a personal template (a staff member's own recurring task); null on a shared one. */
+  ownerStaffId: Id | null
+  ownerName: string | null
+  timezone: string
+  /** The next five runs, hotel offset applied. */
+  upcoming: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** POST /v1/staff/import — one row of the roster file. */
+export interface StaffImportRowResult {
+  line: number
+  email: string
+  outcome: 'created' | 'updated' | 'granted' | 'failed'
+  staffId?: Id
+  /** The row's refusal, in the API's own error shape. */
+  error?: ApiErrorBody
 }
 
 export interface ApiErrorBody { code: string, message: string }
@@ -445,7 +633,7 @@ export interface Envelope<T = unknown> {
   errors?: ApiErrorBody[]
 }
 
-/** Transport result: status + enveloped body (null for 204 and for a 302). */
+/** Transport result: status + enveloped body (null for 204, a 302, or a raw file). */
 export interface FakeResponse<T = unknown> {
   status: number
   body: Envelope<T> | null
@@ -455,6 +643,8 @@ export interface FakeResponse<T = unknown> {
    * client adopts it from here instead (see the header comment).
    */
   headers?: { 'location': string, 'set-cookie'?: string }
+  /** A raw download (GET /v1/staff/import/template): no envelope, Content-Disposition: attachment. */
+  raw?: { filename: string, contentType: string, content: string }
 }
 
 /**
@@ -601,6 +791,9 @@ export const IDS = {
   },
   guest: { amelia: uid('c2', 1), marcus: uid('c2', 2) },
   offer: { filterToMade: uid('c3', 1) },
+  project: { lobby: uid('c6', 1), poolDeck: uid('c6', 2) },
+  projectTask: { lobbyPaint: uid('c7', 1), lobbyLights: uid('c7', 2), lobbySignage: uid('c7', 3) },
+  template: { nightlyMinibar: uid('c8', 1), mondayFilters: uid('c8', 2), budiRounds: uid('c8', 3) },
 } as const
 
 // ════════════════════════ Seed data ════════════════════════
@@ -642,30 +835,53 @@ const hotelDepartments: HotelDepartment[] = [
 
 interface SeedAccount extends StaffAccount { password: string }
 
+/**
+ * Accounts are identity only. A password of '' is an account made by the
+ * roster import — it has no password and signs in by magic link or Google.
+ */
 const staffAccounts: SeedAccount[] = [
-  { id: IDS.staff.budi, email: 'staff@aston.example', name: 'Budi Santoso', role: 'staff', isActive: true, hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true, isOperator: false, password: 'staff123' },
-  { id: IDS.staff.sari, email: 'leader@aston.example', name: 'Sari Dewi', role: 'leader', isActive: true, hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true, isOperator: false, password: 'leader123' },
-  { id: IDS.staff.agus, email: 'admin@aston.example', name: 'Agus Wijaya', role: 'admin', isActive: true, hotelDepartmentId: null, createTask: true, isOperator: false, password: 'admin123' },
+  { id: IDS.staff.budi, email: 'staff@aston.example', name: 'Budi Santoso', isActive: true, isOperator: false, password: 'staff123' },
+  { id: IDS.staff.sari, email: 'leader@aston.example', name: 'Sari Dewi', isActive: true, isOperator: false, password: 'leader123' },
+  { id: IDS.staff.agus, email: 'admin@aston.example', name: 'Agus Wijaya', isActive: true, isOperator: false, password: 'admin123' },
   // A platform operator has ZERO staff_hotel rows: hotel-scoped routes refuse
   // them (auth.HotelFor requires membership for humans) — platform-only actor.
-  { id: IDS.staff.operator, email: 'operator@sentineltech.example', name: 'Platform Operator', role: 'admin', isActive: true, hotelDepartmentId: null, createTask: false, isOperator: true, password: 'operator123' },
-  { id: IDS.staff.rina, email: 'regional@aston.example', name: 'Rina Hartono', role: 'admin', isActive: true, hotelDepartmentId: null, createTask: true, isOperator: false, password: 'regional123' },
-  { id: IDS.staff.made, email: 'made@aston.example', name: 'Made Putra', role: 'staff', isActive: true, hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: false, isOperator: false, password: 'made12345' },
-  { id: IDS.staff.joko, email: 'joko@aston.example', name: 'Joko Susilo', role: 'staff', isActive: true, hotelDepartmentId: IDS.dept.smtpMaintenance, createTask: true, isOperator: false, password: 'joko12345' },
-  { id: IDS.staff.nur, email: 'nur@fave.example', name: 'Nur Aini', role: 'staff', isActive: true, hotelDepartmentId: IDS.dept.faveHousekeeping, createTask: true, isOperator: false, password: 'nur1234567' },
+  { id: IDS.staff.operator, email: 'operator@sentineltech.example', name: 'Platform Operator', isActive: true, isOperator: true, password: 'operator123' },
+  { id: IDS.staff.rina, email: 'regional@aston.example', name: 'Rina Hartono', isActive: true, isOperator: false, password: 'regional123' },
+  { id: IDS.staff.made, email: 'made@aston.example', name: 'Made Putra', isActive: true, isOperator: false, password: 'made12345' },
+  { id: IDS.staff.joko, email: 'joko@aston.example', name: 'Joko Susilo', isActive: true, isOperator: false, password: 'joko12345' },
+  { id: IDS.staff.nur, email: 'nur@fave.example', name: 'Nur Aini', isActive: true, isOperator: false, password: 'nur1234567' },
 ]
 
-/** staff_hotel rows: direct hotel access (group grants expand on top). */
-const staffHotels: Array<{ staffId: Id, hotelRef: Id }> = [
-  { staffId: IDS.staff.budi, hotelRef: IDS.hotel.simatupang },
-  { staffId: IDS.staff.budi, hotelRef: IDS.hotel.kuningan },
-  { staffId: IDS.staff.sari, hotelRef: IDS.hotel.simatupang },
-  { staffId: IDS.staff.agus, hotelRef: IDS.hotel.simatupang },
-  { staffId: IDS.staff.rina, hotelRef: IDS.hotel.kuningan },
-  { staffId: IDS.staff.made, hotelRef: IDS.hotel.simatupang },
-  { staffId: IDS.staff.joko, hotelRef: IDS.hotel.simatupang },
-  { staffId: IDS.staff.nur, hotelRef: IDS.hotel.fave },
+/**
+ * staff_hotel rows ARE the memberships now (feat/projects 55db919): direct
+ * hotel access, each row carrying that hotel's role, department and
+ * create-task permission. Group grants expand the REACH (`properties`) on top
+ * but add no membership row.
+ *
+ * MOCK ASSUMPTION, flagged for the API team: at a hotel reached only through
+ * a group grant there is no membership, so the person is treated as plain
+ * staff with no department and no create-task permission there (least
+ * privilege). The branch notes do not say what role a grant confers; the
+ * old account-wide model made Rina admin everywhere in the Aston group.
+ */
+interface MembershipRow { staffId: Id, hotelRef: Id, role: StaffRole, hotelDepartmentId: Id | null, createTask: boolean }
+const staffHotels: MembershipRow[] = [
+  { staffId: IDS.staff.budi, hotelRef: IDS.hotel.simatupang, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true },
+  { staffId: IDS.staff.budi, hotelRef: IDS.hotel.kuningan, role: 'staff', hotelDepartmentId: IDS.dept.kngnHousekeeping, createTask: true },
+  { staffId: IDS.staff.sari, hotelRef: IDS.hotel.simatupang, role: 'leader', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true },
+  { staffId: IDS.staff.agus, hotelRef: IDS.hotel.simatupang, role: 'admin', hotelDepartmentId: null, createTask: true },
+  { staffId: IDS.staff.rina, hotelRef: IDS.hotel.kuningan, role: 'admin', hotelDepartmentId: null, createTask: true },
+  { staffId: IDS.staff.made, hotelRef: IDS.hotel.simatupang, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: false },
+  { staffId: IDS.staff.joko, hotelRef: IDS.hotel.simatupang, role: 'staff', hotelDepartmentId: IDS.dept.smtpMaintenance, createTask: true },
+  { staffId: IDS.staff.nur, hotelRef: IDS.hotel.fave, role: 'staff', hotelDepartmentId: IDS.dept.faveHousekeeping, createTask: true },
 ]
+
+/** The membership row for (staff, hotel), or null where there is none. */
+const membershipAt = (staffId: Id | null | undefined, hotelRef: Id | null | undefined): MembershipRow | null =>
+  (staffId && hotelRef ? staffHotels.find(r => r.staffId === staffId && r.hotelRef === hotelRef) ?? null : null)
+
+/** The person's role at a hotel: the membership's, or plain `staff` where there is none (see above). */
+const roleAt = (staffId: Id | null | undefined, hotelRef: Id | null | undefined): StaffRole => membershipAt(staffId, hotelRef)?.role ?? 'staff'
 
 /** staff_tenant_group rows: cross-tenant grants (operator-managed). */
 const groupGrants: Array<{ staffId: Id, groupId: Id }> = [
@@ -801,11 +1017,13 @@ const terminologyOverrides: Array<{ hotelRef: Id, key: string, value: string }> 
   { hotelRef: IDS.hotel.simatupang, key: 'requester', value: 'Guest' },
 ]
 
+/** The vertical profile's terms; `project` joined with feat/projects (there is no `projects` key). */
 const TERMINOLOGY_DEFAULT_PROFILE: Record<string, string> = {
   requester: 'Requester',
   visit: 'Visit',
   location: 'Location',
   department: 'Department',
+  project: 'Project',
 }
 
 const sourceApps: SourceApp[] = [
@@ -828,9 +1046,9 @@ const partners: Partner[] = [
  * are simply absent. Codes in ERROR_CODES throw, exercising the
  * "requester lookup failed: …" warning path without taking PMS down globally.
  */
-const pmsVisits = new Map<string, { guestRef: Id, guestName: string, visitRef: string }>([
-  [`${IDS.hotel.simatupang}|1204`, { guestRef: IDS.guest.amelia, guestName: 'Amelia Chen', visitRef: 'V-88121' }],
-  [`${IDS.hotel.simatupang}|0908`, { guestRef: IDS.guest.marcus, guestName: 'Marcus Reid', visitRef: 'V-88104' }],
+const pmsVisits = new Map<string, { requesterRef: Id, requesterName: string, visitRef: string }>([
+  [`${IDS.hotel.simatupang}|1204`, { requesterRef: IDS.guest.amelia, requesterName: 'Amelia Chen', visitRef: 'V-88121' }],
+  [`${IDS.hotel.simatupang}|0908`, { requesterRef: IDS.guest.marcus, requesterName: 'Marcus Reid', visitRef: 'V-88104' }],
 ])
 const PMS_ERROR_CODES = new Set(['PMS-DOWN'])
 
@@ -856,6 +1074,49 @@ const taskCollaborators: Collaborator[] = []
 const taskOffers: TaskOffer[] = []
 const taskContextEntries: TaskContextEntry[] = []
 const checklistItems: ChecklistItem[] = []
+
+// ── Projects, templates, tenant settings (feat/projects) ────────────────────
+
+/** The stored project; the read model adds myLevel, late, needsManager, progress. */
+interface ProjectRow {
+  id: Id
+  hotelRef: Id
+  name: string
+  description: string | null
+  startDate: string | null
+  endDate: string | null
+  status: ProjectStatus
+  completedAt: string | null
+  createdBy: Id | null
+  createdAt: string
+  updatedAt: string
+}
+interface ProjectMemberRow { projectId: Id, staffId: Id, level: ProjectLevel, source: 'MANUAL' | 'AUTO', addedBy: Id | null, addedAt: string }
+const projects: ProjectRow[] = []
+const projectMembers: ProjectMemberRow[] = []
+
+/** The stored template; nextRunAt/upcoming are computed from the recurrence and the hotel zone. */
+interface TemplateRow {
+  id: Id
+  hotelRef: Id
+  name: string
+  isActive: boolean
+  /** Storage-side only: the wire model has no scope; personal = ownerStaffId set. */
+  scope: 'shared' | 'personal'
+  content: TaskTemplateContent
+  recurrence: TaskTemplateRecurrence | null
+  nextRunAt: string | null
+  lastRunAt: string | null
+  lastOccurrenceAt: string | null
+  lastTaskId: Id | null
+  lastError: string | null
+  createdBy: Id | null
+  ownerStaffId: Id | null
+  isArchived: boolean
+  createdAt: string
+  updatedAt: string
+}
+const taskTemplates: TemplateRow[] = []
 /** task.event_seq — bumped per lifecycle event, snapshotted onto history rows. */
 const eventSeq = new Map<Id, number>()
 
@@ -1041,10 +1302,14 @@ export interface Actor {
   isService: boolean
   actingUser: string
   staffId: Id | null
+  /** At the request's hotel (X-Hotel-Id); `staff` with no membership there. */
   role: StaffRole
   deptId: Id | null
   createTask: boolean
+  /** The reach claim: direct memberships ∪ every hotel of a granted group. */
   hotels: Id[]
+  /** Every membership, for routes that name no single hotel ("admin at any property"). */
+  memberships: HotelMembership[]
   partnerId: Id | null
   partnerName: string
   isOperator: boolean
@@ -1079,15 +1344,25 @@ function hotelsClaim(staffId: Id): Id[] {
   return [...new Set([...direct, ...viaGroups])]
 }
 
-function staffActor(acct: SeedAccount, session: Session | null): Actor {
+/**
+ * Roles are per property, so the actor's role/deptId/createTask are the
+ * membership at the hotel the request names in X-Hotel-Id — the same way the
+ * server resolves them after the hotel is known. With no header, or no
+ * membership there, the actor is plain staff with nothing else; routes that
+ * need an admin then say why (400 without a hotel, 403 without the role).
+ */
+function staffActor(acct: SeedAccount, session: Session | null, hotelHeader: string | undefined): Actor {
+  const hotelRef = isUuid(hotelHeader) ? hotelHeader.toLowerCase() : null
+  const membership = membershipAt(acct.id, hotelRef)
   return {
     isService: false,
     actingUser: '',
     staffId: acct.id,
-    role: acct.role,
-    deptId: acct.hotelDepartmentId,
-    createTask: acct.createTask,
+    role: membership?.role ?? 'staff',
+    deptId: membership?.hotelDepartmentId ?? null,
+    createTask: membership?.createTask ?? false,
     hotels: hotelsClaim(acct.id),
+    memberships: staffHotels.filter(r => r.staffId === acct.id).map(r => ({ hotelRef: r.hotelRef, role: r.role, hotelDepartmentId: r.hotelDepartmentId, createTask: r.createTask })),
     partnerId: null,
     partnerName: '',
     isOperator: acct.isOperator,
@@ -1116,19 +1391,19 @@ function resolveActor(headers: Record<string, string>): Actor {
     if (!match || !match[1]) throw unauthorized('missing bearer token')
     const token = match[1]
     if (token.startsWith('service:')) {
-      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
+      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
     }
     if (token.startsWith('partner:')) {
       const partner = partners.find(p => p.id === token.slice('partner:'.length))
       // A deactivated partner fails verification instantly — no caching.
       if (!partner || !partner.isActive) throw unauthorized('invalid token')
-      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], partnerId: partner.id, partnerName: partner.name, isOperator: false, sessionId: null, csrfToken: '' }
+      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: partner.id, partnerName: partner.name, isOperator: false, sessionId: null, csrfToken: '' }
     }
     const bearer = staffBearerTokens.get(token)
     if (!bearer || bearer.expiresAt < Date.now()) throw unauthorized('invalid token')
     const acct = account(bearer.staffId)
     if (!acct || !acct.isActive) throw unauthorized('invalid token')
-    return staffActor(acct, null)
+    return staffActor(acct, null, headers['x-hotel-id'])
   }
 
   const sessionId = parseCookie(headers.cookie, 'st_session')
@@ -1136,7 +1411,7 @@ function resolveActor(headers: Record<string, string>): Actor {
   if (!session || session.expiresAt < Date.now()) throw unauthorized('invalid token')
   const acct = account(session.staffId)
   if (!acct || !acct.isActive) throw unauthorized('invalid token')
-  return staffActor(acct, session)
+  return staffActor(acct, session, headers['x-hotel-id'])
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
@@ -1179,33 +1454,106 @@ function resolveHotelForActor(ctx: Ctx): Id {
   return id
 }
 
+/**
+ * Admin at ONE hotel. Roles are per property (feat/projects), so the check
+ * runs after the hotel is resolved: a human on a hotel-scoped admin route
+ * without X-Hotel-Id now gets the 400 from hotelFor, where it used to be 403.
+ * Service and operator actors pass — the operator reaches admin reads such as
+ * GET /v1/staff?hotelId= for any hotel from the platform screens.
+ */
+function requireAdminAt(ctx: Ctx, hotelRef: Id) {
+  if (ctx.actor.isService || ctx.actor.isOperator) return
+  if (roleAt(ctx.actor.staffId, hotelRef) !== 'admin') throw forbidden('admin access required')
+}
+
+/** Hotel-scoped admin route: resolve the hotel (400 without one), then the role there. */
 function requireAdmin(ctx: Ctx) {
-  if (ctx.actor.role !== 'admin') throw forbidden('admin access required')
+  if (ctx.actor.isService || ctx.actor.isOperator) return
+  requireAdminAt(ctx, hotelFor(ctx))
+}
+
+/**
+ * Routes that name no single hotel (the master department list, a staff
+ * PATCH touching only account-wide fields) admit an admin at ANY property
+ * the caller belongs to.
+ */
+function requireAdminAnywhere(ctx: Ctx) {
+  if (ctx.actor.isService || ctx.actor.isOperator) return
+  if (!ctx.actor.memberships.some(m => m.role === 'admin')) throw forbidden('admin access required')
 }
 
 function requireOperator(ctx: Ctx) {
   if (!ctx.actor.isOperator) throw forbidden('operator access required')
 }
 
-/** DB-truth department for (staff, hotel) — never the token's deptId claim. */
+/** DB-truth department for (staff, hotel): the membership row there — never the token's deptId claim. */
 function dbDept(staffId: Id | null, hotelRef: Id): Id | null {
-  const acct = account(staffId)
-  if (!acct?.hotelDepartmentId) return null
-  const dept = hotelDepartments.find(d => d.id === acct.hotelDepartmentId)
+  const membership = membershipAt(staffId, hotelRef)
+  if (!membership?.hotelDepartmentId) return null
+  const dept = hotelDepartments.find(d => d.id === membership.hotelDepartmentId)
   return dept && dept.hotelRef === hotelRef ? dept.id : null
+}
+
+/**
+ * Manager of the task's project: passes every leader/admin check on that
+ * project's tasks (assign, status, verify, review, edit, helpers,
+ * attachments, checklist) — ADR 0001.
+ */
+function managesProject(actor: Actor, t: Pick<Task, 'projectId'>): boolean {
+  return !!t.projectId && !!actor.staffId && projectMembers.some(m => m.projectId === t.projectId && m.staffId === actor.staffId && m.level === 'MANAGER')
+}
+
+/** Leader-of-the-task's-department, or the project manager, or an admin at the hotel. */
+function hasLeaderRights(actor: Actor, hotelRef: Id, t: Task): boolean {
+  if (actor.isService) return true
+  if (roleAt(actor.staffId, hotelRef) === 'admin') return true
+  if (managesProject(actor, t)) return true
+  return roleAt(actor.staffId, hotelRef) === 'leader' && !!t.hotelDepartmentId && dbDept(actor.staffId, hotelRef) === t.hotelDepartmentId
+}
+
+/** Any leader counts as "dept leader" for a task with no department (checklist routes). */
+function isDeptLeaderFor(actor: Actor, hotelRef: Id, t: Task): boolean {
+  if (roleAt(actor.staffId, hotelRef) !== 'leader') return false
+  return !t.hotelDepartmentId || dbDept(actor.staffId, hotelRef) === t.hotelDepartmentId
 }
 
 // ════════════════════════ SLA math (slamath) ════════════════════════
 
-/** Fixed offsets for the demo timezones; unknown zones fall back to UTC. */
-const TIMEZONE_OFFSET_MINUTES: Record<string, number> = {
-  'Asia/Jakarta': 420,
-  'Asia/Makassar': 480,
+/** True for a name Intl knows — the check PATCH /v1/tenant applies before storing a timezone. */
+function isValidTimezone(name: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: name })
+    return true
+  }
+  catch {
+    return false
+  }
 }
 
+const offsetFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/**
+ * The zone's UTC offset at an instant, from Intl rather than a fixed table,
+ * so an admin may set any IANA name through PATCH /v1/tenant. Unknown names
+ * read as UTC.
+ */
+function zoneOffsetMinutes(timezone: string, atMs: number): number {
+  let formatter = offsetFormatters.get(timezone)
+  if (!formatter) {
+    if (!isValidTimezone(timezone)) return 0
+    formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    offsetFormatters.set(timezone, formatter)
+  }
+  const parts = Object.fromEntries(formatter.formatToParts(new Date(atMs)).map(part => [part.type, part.value]))
+  const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second))
+  return Math.round((asUtc - Math.floor(atMs / 1000) * 1000) / 60_000)
+}
+
+const hotelTimezone = (hotelRef: Id): string => tenants.find(t => t.hotelRef === hotelRef)?.timezone ?? 'UTC'
+
+/** The hotel's offset now. Indonesia has no DST, so one offset serves the whole schedule walk. */
 function hotelOffsetMinutes(hotelRef: Id): number {
-  const timezone = tenants.find(t => t.hotelRef === hotelRef)?.timezone ?? ''
-  return TIMEZONE_OFFSET_MINUTES[timezone] ?? 0
+  return zoneOffsetMinutes(hotelTimezone(hotelRef), Date.now())
 }
 
 function openWindowsOn(schedule: OperatingSchedule, localDate: string, weekday: number): Array<{ opens: number, closes: number }> {
@@ -1326,14 +1674,21 @@ function taskListItem(t: Task): TaskListItem {
   const dept = findHotelDept(t.hotelDepartmentId)
   const column = t.columnId ? boardColumns.find(c => c.id === t.columnId) ?? null : null
   const sla = t.slaId ? slas.find(s => s.id === t.slaId) ?? null : null
+  const project = t.projectId ? projects.find(p => p.id === t.projectId) ?? null : null
   return {
     ...t,
     department: dept ? { id: dept.id, name: dept.departmentName, isActive: dept.isActive } : null,
     column: column ? { id: column.id, name: column.name, columnSort: column.columnSort } : null,
     sla: sla ? { id: sla.id, name: sla.name } : null,
     assignment: assignmentRef(t.id),
+    project: project ? { id: project.id, name: project.name } : null,
   }
 }
+
+/** The task's steps in sort order, each with its assignee's name resolved. */
+const checklistModel = (item: ChecklistItem): ChecklistItem => ({ ...item, assignedStaffName: item.assignedStaffId ? account(item.assignedStaffId)?.name ?? null : null })
+const checklistFor = (taskId: Id): ChecklistItem[] =>
+  checklistItems.filter(c => c.taskId === taskId).sort((a, b) => a.sort - b.sort || a.createdAt.localeCompare(b.createdAt)).map(checklistModel)
 
 /** nil-vs-[] parity: these detail arrays serialize as null when empty. */
 const nullIfEmpty = <T>(rows: T[]): T[] | null => (rows.length ? rows : null)
@@ -1358,6 +1713,7 @@ function taskDetail(t: Task): TaskDetail {
       .filter(c => c.taskId === t.id && c.isActive)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
       .map(c => ({ ...c, staffName: account(c.staffId)?.name ?? null }))),
+    checklist: checklistFor(t.id),
     proofRequirements: {
       minProofPhotos: item?.minProofPhotos ?? 0,
       requiresCompletionNote: item?.requiresCompletionNote ?? false,
@@ -1368,24 +1724,43 @@ function taskDetail(t: Task): TaskDetail {
   }
 }
 
-/** [DR-15]: scoped staff := human, non-partner, role "staff". */
+/** [DR-15]: scoped staff := human, non-partner, role "staff" at this hotel. */
 const isScopedStaffActor = (actor: Actor) => !actor.isService && actor.partnerId === null && actor.role === 'staff'
+
+const isProjectMember = (projectId: Id | null, staffId: Id | null) =>
+  !!projectId && !!staffId && projectMembers.some(m => m.projectId === projectId && m.staffId === staffId)
+
+const isStepAssignee = (taskId: Id, staffId: Id | null) =>
+  !!staffId && checklistItems.some(c => c.taskId === taskId && c.assignedStaffId === staffId)
 
 /**
  * One visibility predicate for List AND Detail — never two implementations.
- * An ACTIVE helper row admits the helper too: Task 6 gives helpers working
- * permissions (attachments, submit), which presumes they can open the task.
+ * What a plain staff member sees (feat/projects [DR-15]):
+ *   (a) tasks they have claimed, and tasks they help on;
+ *   (b) unclaimed tasks in their department — including those returned to the
+ *       department's pool ("unclaimed" = no active STAFF assignment);
+ *   (c) unclaimed tasks with NO department, across the whole property
+ *       (dropped when the list is filtered by departmentId — `includeDeptless`);
+ *   (d) tasks assigned or returned to a team they belong to;
+ *   (e) tasks where a checklist step is assigned to them (read-only);
+ *   (f) every task of a project they belong to.
+ * A floater (member with no department) sees all unclaimed work plus their
+ * team pools. A colleague's claimed task is never visible.
  */
-function visibleTo(actor: Actor, hotelRef: Id, t: Task): boolean {
+function visibleTo(actor: Actor, hotelRef: Id, t: Task, includeDeptless = true): boolean {
   if (!isScopedStaffActor(actor)) return true
   const assignment = activeAssignment(t.id)
   if (assignment?.staffId === actor.staffId) return true
   if (taskCollaborators.some(c => c.taskId === t.id && c.staffId === actor.staffId && c.isActive)) return true
+  if (isStepAssignee(t.id, actor.staffId)) return true
+  if (isProjectMember(t.projectId, actor.staffId)) return true
+  const unclaimed = assignment === null || assignment.kind !== 'STAFF'
+  if (!unclaimed) return false
+  if (assignment?.kind === 'TEAM' && isTeamMember(assignment.teamId, actor.staffId)) return true
   const dept = dbDept(actor.staffId, hotelRef)
-  // "Unclaimed" means no active STAFF assignment — a TEAM/DEPARTMENT pool row
-  // still counts as unclaimed, or members could never see the pool they claim from.
-  if (dept) return (assignment === null || assignment.kind !== 'STAFF') && t.hotelDepartmentId === dept
-  return false
+  if (!dept) return true
+  if (t.hotelDepartmentId === dept) return true
+  return includeDeptless && t.hotelDepartmentId === null
 }
 
 // ════════════════════════ Routing resolution ════════════════════════
@@ -1492,8 +1867,9 @@ interface SeedTaskConfig {
   sourceChannel: string
   idempotencyKey?: Id | null
   itemRef?: Id | null
-  guestRef?: Id | null
-  guestName?: string | null
+  requesterRef?: Id | null
+  requesterName?: string | null
+  projectId?: Id | null
   visitRef?: string | null
   priority?: TaskPriority
   locationId?: Id | null
@@ -1538,8 +1914,8 @@ function seedTaskRow(config: SeedTaskConfig): Task {
     itemRef: config.itemRef ?? null,
     itemName: item?.name ?? config.title,
     categoryName: category?.name ?? null,
-    guestRef: config.guestRef ?? null,
-    guestName: config.guestName ?? null,
+    requesterRef: config.requesterRef ?? null,
+    requesterName: config.requesterName ?? null,
     visitRef: config.visitRef ?? null,
     priority: config.priority ?? item?.defaultPriority ?? 'NORMAL',
     locationId: config.locationId ?? null,
@@ -1560,6 +1936,9 @@ function seedTaskRow(config: SeedTaskConfig): Task {
     completionNote: config.completionNote ?? null,
     submittedBy: config.submittedBy ?? null,
     submittedAt: config.submittedAt ?? null,
+    templateId: null,
+    occurrenceKey: null,
+    projectId: config.projectId ?? null,
     createdAt,
     updatedAt: createdAt,
   }
@@ -1589,7 +1968,7 @@ function seedDemoData() {
   seedTaskRow({
     id: IDS.task.towels1204, hotelRef: H, status: 'NEW', title: 'Extra towels', description: 'Two bath towels please',
     sourceProduct: 'sentec-butler', sourceChannel: 'guest', idempotencyKey: uid('c4', 1), itemRef: IDS.item.towels,
-    guestRef: IDS.guest.amelia, guestName: 'Amelia Chen', visitRef: 'V-88121', quantity: 2,
+    requesterRef: IDS.guest.amelia, requesterName: 'Amelia Chen', visitRef: 'V-88121', quantity: 2,
     locationId: IDS.location.room1204, slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
     activationDate: '2026-08-25T02:52:00.000Z',
   })
@@ -1599,7 +1978,7 @@ function seedDemoData() {
   seedTaskRow({
     id: IDS.task.acFault0908, hotelRef: H, status: 'NEW', title: 'Air conditioner not cooling', description: 'Guest reports the room is very warm',
     sourceProduct: 'sentec-butler', sourceChannel: 'guest', itemRef: IDS.item.acFault,
-    guestRef: IDS.guest.marcus, guestName: 'Marcus Reid', visitRef: 'V-88104',
+    requesterRef: IDS.guest.marcus, requesterName: 'Marcus Reid', visitRef: 'V-88104',
     locationId: IDS.location.room0908, slaId: IDS.sla.smtpUrgent, hotelDepartmentId: IDS.dept.smtpMaintenance,
     activationDate: '2026-08-25T02:15:00.000Z',
   })
@@ -1616,7 +1995,7 @@ function seedDemoData() {
   seedHistoryRow(IDS.task.cleaning1102, IDS.staff.budi, 'IN_PROGRESS', null, '2026-08-25T02:36:00.000Z')
   taskComments.push({ id: newId(), hotelRef: H, taskId: IDS.task.cleaning1102, staffId: IDS.staff.sari, comment: 'Guest asked for extra pillows too.', createdAt: '2026-08-25T02:38:00.000Z', staffName: null })
   catalogItems.find(i => i.id === IDS.item.roomCleaning)!.defaultChecklist.forEach((label, index) => {
-    checklistItems.push({ id: newId(), hotelRef: H, taskId: IDS.task.cleaning1102, sort: index, label, isDone: false, doneBy: null, doneAt: null, createdAt: '2026-08-25T02:30:00.000Z', updatedAt: '2026-08-25T02:30:00.000Z' })
+    checklistItems.push({ id: newId(), hotelRef: H, taskId: IDS.task.cleaning1102, sort: index, label, isDone: false, doneBy: null, doneAt: null, assignedStaffId: null, assignedStaffName: null, assignedBy: null, assignedAt: null, note: null, createdAt: '2026-08-25T02:30:00.000Z', updatedAt: '2026-08-25T02:30:00.000Z' })
   })
 
   // Waiting in a TEAM pool — claimable by HK Morning Shift members only.
@@ -1712,7 +2091,7 @@ function seedDemoData() {
   seedTaskRow({
     id: IDS.task.cleaningSubmitted, hotelRef: H, status: 'SUBMITTED', title: 'Room cleaning', description: 'Post-checkout deep clean',
     sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.roomCleaning,
-    guestRef: IDS.guest.marcus, guestName: 'Marcus Reid', visitRef: 'V-88104',
+    requesterRef: IDS.guest.marcus, requesterName: 'Marcus Reid', visitRef: 'V-88104',
     locationId: IDS.location.room0908, slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
     activationDate: '2026-08-25T01:15:00.000Z', responseDuration: 8, resolutionDuration: 65,
     responseSlaStatus: 'ON_TIME', resolutionSlaStatus: 'BREACHED',
@@ -1733,7 +2112,7 @@ function seedDemoData() {
   seedTaskRow({
     id: IDS.task.acFilterOffer, hotelRef: H, status: 'IN_PROGRESS', title: 'AC filter rattling in 1204',
     sourceProduct: 'sentec-tasks', sourceChannel: 'staff',
-    guestRef: IDS.guest.amelia, guestName: 'Amelia Chen', visitRef: 'V-88121',
+    requesterRef: IDS.guest.amelia, requesterName: 'Amelia Chen', visitRef: 'V-88121',
     locationId: IDS.location.room1204, slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
     activationDate: '2026-08-25T02:40:00.000Z', responseDuration: 4, responseSlaStatus: 'ON_TIME',
   })
@@ -1762,6 +2141,83 @@ function seedDemoData() {
     activationDate: '2026-08-25T01:30:00.000Z',
   })
   seedHistoryRow(IDS.task.kngnAircon, IDS.staff.rina, 'NEW', null, '2026-08-25T01:30:00.000Z')
+
+  // ── Projects. Sari manages the lobby refurbishment; Budi works in it, Made
+  // may only look. Its tasks leave the hotel board and default list.
+  projects.push({
+    id: IDS.project.lobby, hotelRef: H, name: 'Lobby refurbishment', description: 'Repaint, relight and re-sign the lobby before the group inspection.',
+    startDate: '2026-08-18', endDate: '2026-09-30', status: 'ACTIVE', completedAt: null, createdBy: IDS.staff.agus, createdAt: '2026-08-18T01:00:00.000Z', updatedAt: '2026-08-18T01:00:00.000Z',
+  })
+  projectMembers.push(
+    { projectId: IDS.project.lobby, staffId: IDS.staff.sari, level: 'MANAGER', source: 'MANUAL', addedBy: IDS.staff.agus, addedAt: '2026-08-18T01:00:00.000Z' },
+    { projectId: IDS.project.lobby, staffId: IDS.staff.budi, level: 'MEMBER', source: 'MANUAL', addedBy: IDS.staff.sari, addedAt: '2026-08-18T01:05:00.000Z' },
+    { projectId: IDS.project.lobby, staffId: IDS.staff.made, level: 'VIEWER', source: 'MANUAL', addedBy: IDS.staff.sari, addedAt: '2026-08-18T01:05:00.000Z' },
+  )
+  seedTaskRow({
+    id: IDS.projectTask.lobbyPaint, hotelRef: H, status: 'IN_PROGRESS', title: 'Repaint the lobby feature wall', description: 'Two coats, colour LB-04',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', locationId: IDS.location.lobby,
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpMaintenance, projectId: IDS.project.lobby,
+    activationDate: '2026-08-24T02:00:00.000Z', responseDuration: 30, responseSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(IDS.projectTask.lobbyPaint, 'STAFF', { staffId: IDS.staff.joko }, IDS.staff.sari, null, true, '2026-08-24T02:20:00.000Z')
+  seedHistoryRow(IDS.projectTask.lobbyPaint, IDS.staff.sari, 'NEW', null, '2026-08-24T02:00:00.000Z')
+  seedHistoryRow(IDS.projectTask.lobbyPaint, IDS.staff.joko, 'IN_PROGRESS', null, '2026-08-24T02:30:00.000Z')
+  // Joko was handed a project task by name: an AUTO member.
+  projectMembers.push({ projectId: IDS.project.lobby, staffId: IDS.staff.joko, level: 'MEMBER', source: 'AUTO', addedBy: IDS.staff.sari, addedAt: '2026-08-24T02:20:00.000Z' })
+  seedTaskRow({
+    id: IDS.projectTask.lobbyLights, hotelRef: H, status: 'NEW', title: 'Replace lobby downlights with LED', quantity: 24,
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.lightBulb, locationId: IDS.location.lobby,
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpMaintenance, projectId: IDS.project.lobby,
+    activationDate: '2026-08-25T01:00:00.000Z',
+  })
+  seedHistoryRow(IDS.projectTask.lobbyLights, IDS.staff.sari, 'NEW', null, '2026-08-25T01:00:00.000Z')
+  ;['Remove old fittings', 'Fit LED downlights', 'Test dimmer scenes'].forEach((label, index) => {
+    checklistItems.push({ id: newId(), hotelRef: H, taskId: IDS.projectTask.lobbyLights, sort: index, label, isDone: index === 0, doneBy: index === 0 ? IDS.staff.joko : null, doneAt: index === 0 ? '2026-08-25T02:10:00.000Z' : null, assignedStaffId: index === 1 ? IDS.staff.budi : null, assignedStaffName: null, assignedBy: index === 1 ? IDS.staff.sari : null, assignedAt: index === 1 ? '2026-08-25T01:05:00.000Z' : null, note: index === 0 ? 'Fittings bagged for recycling.' : null, createdAt: '2026-08-25T01:00:00.000Z', updatedAt: '2026-08-25T01:00:00.000Z' })
+  })
+  seedTaskRow({
+    id: IDS.projectTask.lobbySignage, hotelRef: H, status: 'FINISHED', title: 'Install new wayfinding signage',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', locationId: IDS.location.lobby,
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpHousekeeping, projectId: IDS.project.lobby,
+    activationDate: '2026-08-20T02:00:00.000Z', responseDuration: 15, resolutionDuration: 200,
+    responseSlaStatus: 'ON_TIME', resolutionSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(IDS.projectTask.lobbySignage, 'STAFF', { staffId: IDS.staff.budi }, IDS.staff.sari, null, true, '2026-08-20T02:10:00.000Z')
+  seedHistoryRow(IDS.projectTask.lobbySignage, IDS.staff.sari, 'NEW', null, '2026-08-20T02:00:00.000Z')
+  seedHistoryRow(IDS.projectTask.lobbySignage, IDS.staff.budi, 'IN_PROGRESS', null, '2026-08-20T02:15:00.000Z')
+  seedHistoryRow(IDS.projectTask.lobbySignage, IDS.staff.budi, 'FINISHED', null, '2026-08-20T05:20:00.000Z')
+  // A completed project, for the status filter.
+  projects.push({
+    id: IDS.project.poolDeck, hotelRef: H, name: 'Pool deck resurfacing', description: null,
+    startDate: '2026-07-01', endDate: '2026-07-31', status: 'COMPLETED', completedAt: '2026-07-29T08:00:00.000Z', createdBy: IDS.staff.agus, createdAt: '2026-06-28T01:00:00.000Z', updatedAt: '2026-07-29T08:00:00.000Z',
+  })
+  projectMembers.push({ projectId: IDS.project.poolDeck, staffId: IDS.staff.agus, level: 'MANAGER', source: 'MANUAL', addedBy: IDS.staff.agus, addedAt: '2026-06-28T01:00:00.000Z' })
+
+  // ── Templates. Two shared (admin-made) schedules and Budi's own weekday
+  // rounds; the mock worker fills nextRunAt at boot and creates tasks lazily.
+  taskTemplates.push(
+    {
+      id: IDS.template.nightlyMinibar, hotelRef: H, name: 'Nightly minibar count', isActive: true, scope: 'shared',
+      content: { title: 'Minibar count — floor 12', itemRef: IDS.item.minibar, roomNumber: 'Floor 12', checklistLabels: ['Count stock', 'Log variances'], assignee: { assigneeKind: 'TEAM', assigneeTeamId: IDS.team.hkMorning } },
+      recurrence: { kind: 'DAILY', timeMinutes: 21 * 60, weekdays: null, dayOfMonth: null, startsOn: '2026-08-20', endsOn: null },
+      nextRunAt: null, lastRunAt: null, lastOccurrenceAt: null, lastTaskId: null, lastError: null, createdBy: IDS.staff.agus, ownerStaffId: null, isArchived: false, createdAt: '2026-08-19T03:00:00.000Z', updatedAt: '2026-08-19T03:00:00.000Z',
+    },
+    {
+      id: IDS.template.mondayFilters, hotelRef: H, name: 'Weekly AC filter check', isActive: false, scope: 'shared',
+      content: { title: 'AC filter check — floors 7-9', itemRef: IDS.item.acFault, locationRef: IDS.location.floor7, checklistLabels: [], assignee: { assigneeKind: 'UNASSIGNED' } },
+      recurrence: { kind: 'WEEKLY', timeMinutes: 8 * 60 + 30, weekdays: [1], dayOfMonth: null, startsOn: null, endsOn: null },
+      nextRunAt: null, lastRunAt: '2026-08-24T01:30:00.000Z', lastOccurrenceAt: '2026-08-24T01:30:00.000Z', lastTaskId: null, lastError: 'occurrence 2026-08-24T01:30:00Z skipped: catalog item not available', createdBy: IDS.staff.agus, ownerStaffId: null, isArchived: false, createdAt: '2026-08-19T03:10:00.000Z', updatedAt: '2026-08-24T01:30:00.000Z',
+    },
+    {
+      id: IDS.template.budiRounds, hotelRef: H, name: 'Corridor rounds', isActive: true, scope: 'personal',
+      content: { title: 'Corridor rounds — floor 11', roomNumber: 'Floor 11', checklistLabels: ['Ice machine', 'Linen cupboard', 'Fire doors'], assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } },
+      recurrence: { kind: 'WEEKLY', timeMinutes: 7 * 60, weekdays: [1, 2, 3, 4, 5], dayOfMonth: null, startsOn: null, endsOn: null },
+      nextRunAt: null, lastRunAt: null, lastOccurrenceAt: null, lastTaskId: null, lastError: null, createdBy: IDS.staff.budi, ownerStaffId: IDS.staff.budi, isArchived: false, createdAt: '2026-08-21T00:30:00.000Z', updatedAt: '2026-08-21T00:30:00.000Z',
+    },
+  )
+  for (const template of taskTemplates) {
+    // Seed schedules start from now: the demo must not backfill weeks of runs.
+    template.nextRunAt = template.isActive && template.recurrence ? nextRunAfter(template.recurrence, hotelTimezone(template.hotelRef), Date.now()) : null
+  }
 }
 
 /** StorageKey is json:"-" in the real model — held off to the side here. */
@@ -1857,18 +2313,18 @@ function resolveTask(hotelRef: Id, input: ResolveInput): ResolvedTask {
 
   // 7. Requester lookup (the PMS seam). Explicit values always win; a lookup
   //    failure is a warning, never an error; a vacant room is silent.
-  let guestRef = input.requesterRef
-  let guestName = input.requesterName
+  let requesterRef = input.requesterRef
+  let requesterName = input.requesterName
   let visitRef = input.visitRef
-  if (!guestRef && !guestName && linksRequester && location) {
+  if (!requesterRef && !requesterName && linksRequester && location) {
     if (PMS_ERROR_CODES.has(location.code)) {
       warn('requester lookup failed: pms: lookup timed out')
     }
     else {
       const visit = pmsVisits.get(`${hotelRef}|${location.code}`)
       if (visit) {
-        guestRef = visit.guestRef
-        guestName = visit.guestName
+        requesterRef = visit.requesterRef
+        requesterName = visit.requesterName
         visitRef = visit.visitRef
       }
     }
@@ -1913,8 +2369,8 @@ function resolveTask(hotelRef: Id, input: ResolveInput): ResolvedTask {
     itemRef: input.itemRef,
     itemName: itemName || title,
     categoryName,
-    guestRef: guestRef ?? null,
-    guestName: guestName ?? null,
+    requesterRef: requesterRef ?? null,
+    requesterName: requesterName ?? null,
     visitRef: visitRef ?? null,
     priority,
     locationId: location?.id ?? null,
@@ -1935,6 +2391,9 @@ function resolveTask(hotelRef: Id, input: ResolveInput): ResolvedTask {
     completionNote: null,
     submittedBy: null,
     submittedAt: null,
+    templateId: null,
+    occurrenceKey: null,
+    projectId: null,
     createdAt: now,
     updatedAt: now,
   }
@@ -1962,8 +2421,25 @@ function departmentSync(actor: Actor, t: Task, assigneeStaffId: Id) {
     return
   }
   if (t.hotelDepartmentId === assigneeDept) return
+  // The project manager assigning across departments MOVES the task to the
+  // assignee's department (due times are not recalculated).
+  if (managesProject(actor, t)) {
+    t.hotelDepartmentId = assigneeDept
+    return
+  }
   if (actor.role === 'admin' && !isScopedStaffActor(actor)) return
   throw badRequest(ERR_CROSS_DEPARTMENT)
+}
+
+/**
+ * Anyone given a project task BY NAME — assign, claim, accepted offer,
+ * helper, checklist step — becomes a MEMBER with source AUTO. Team and
+ * department pools add nobody.
+ */
+function ensureAutoMember(t: Pick<Task, 'projectId'>, staffId: Id | null, addedBy: Id | null, at: string) {
+  if (!t.projectId || !staffId) return
+  if (projectMembers.some(m => m.projectId === t.projectId && m.staffId === staffId)) return
+  projectMembers.push({ projectId: t.projectId, staffId, level: 'MEMBER', source: 'AUTO', addedBy, addedAt: at })
 }
 
 function cancelPendingOffer(taskId: Id, at: string) {
@@ -1987,6 +2463,7 @@ function assignStaffToTask(actor: Actor, t: Task, staffId: Id, remark: string | 
     assignedBy, actingUser: actor.isService && actor.actingUser ? actor.actingUser : null,
     remark, isActive: true, createdAt: at,
   })
+  ensureAutoMember(t, staffId, assignedBy, at)
   t.updatedAt = at
 }
 
@@ -2241,15 +2718,9 @@ function applyStaffVisibility(actor: Actor, hotelRef: Id, params: ListParams, ro
   if (params.assignedStaffId) {
     return rows.filter(t => activeAssignment(t.id)?.staffId === actor.staffId)
   }
-  const dept = dbDept(actor.staffId, hotelRef)
-  if (dept) {
-    return rows.filter((t) => {
-      const assignment = activeAssignment(t.id)
-      return assignment?.staffId === actor.staffId
-        || ((assignment === null || assignment.kind !== 'STAFF') && t.hotelDepartmentId === dept)
-    })
-  }
-  return rows.filter(t => activeAssignment(t.id)?.staffId === actor.staffId)
+  // Filtering by departmentId drops arm (c), so a filtered list can be
+  // smaller than the unfiltered one; this is intended.
+  return rows.filter(t => visibleTo(actor, hotelRef, t, !params.departmentId))
 }
 
 // ════════════════════════ Response helpers ════════════════════════
@@ -2261,21 +2732,33 @@ const ok = <T>(data: T, status = 200, meta?: Record<string, unknown> | null): Fa
 
 const noContent = (): FakeResponse<never> => ({ status: 204, body: null })
 
-const staffReadModel = (acct: SeedAccount): Staff => ({
+/** Every property the person can reach, sorted by name (name falls back to the ref). */
+function propertiesOf(staffId: Id): Property[] {
+  return hotelsClaim(staffId)
+    .map(hotelRef => ({ hotelRef, name: tenants.find(t => t.hotelRef === hotelRef)?.name ?? hotelRef }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+const membershipModel = (r: MembershipRow): HotelMembership => ({ hotelRef: r.hotelRef, role: r.role, hotelDepartmentId: r.hotelDepartmentId, createTask: r.createTask })
+
+/**
+ * The Staff read model: identity + reach + per-property standing. `onlyHotel`
+ * is GET /v1/staff's narrowing — each person's memberships hold only the
+ * listed hotel there.
+ */
+const staffReadModel = (acct: SeedAccount, onlyHotel?: Id): Staff => ({
   id: acct.id,
   email: acct.email,
   name: acct.name,
-  role: acct.role,
   isActive: acct.isActive,
-  hotelDepartmentId: acct.hotelDepartmentId,
-  createTask: acct.createTask,
   isOperator: acct.isOperator,
-  hotels: staffHotels.filter(r => r.staffId === acct.id).map(r => r.hotelRef),
+  properties: propertiesOf(acct.id),
+  memberships: staffHotels.filter(r => r.staffId === acct.id && (!onlyHotel || r.hotelRef === onlyHotel)).map(membershipModel),
   groupGrants: groupGrants.filter(g => g.staffId === acct.id).map(g => g.groupId),
 })
 
-/** Session-shaped Staff: hotels is the CLAIM (direct ∪ group grants), like a JWT. */
-const sessionStaffModel = (acct: SeedAccount): Staff => ({ ...staffReadModel(acct), hotels: hotelsClaim(acct.id) })
+/** Session-shaped Staff (login, /v1/auth/session, /v1/staff/me): the full model, every membership. */
+const sessionStaffModel = (acct: SeedAccount): Staff => staffReadModel(acct)
 
 // ════════════════════════ Auth + staff routes ════════════════════════
 
@@ -2291,7 +2774,9 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
       throw new ApiError('RATE_LIMITED', 'too many login attempts')
     }
     const acct = staffAccounts.find(s => s.email === email && s.isActive)
-    if (!acct || acct.password !== password) {
+    // An imported account has NO password (it signs in by magic link or
+    // Google): the empty string must never match.
+    if (!acct || !acct.password || acct.password !== password) {
       // Only a FAILED attempt consumes budget.
       const window = bucket && now - bucket.windowStart < LOGIN_RATE_WINDOW_MS ? bucket : { count: 0, windowStart: now }
       window.count += 1
@@ -2429,33 +2914,78 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
   }
 
   if (method === 'GET' && path === '/v1/staff/assignable') {
-    if (actor.role !== 'leader' && actor.role !== 'admin') throw forbidden('leader or admin access required')
     const hotelRef = resolveHotelForActor(ctx)
+    // taskId / projectId do not filter: they widen who may call — the task's
+    // current assignee, and the manager of the task's project or of projectId.
+    let widened = false
+    if (ctx.query.taskId) {
+      if (!isUuid(ctx.query.taskId)) throw badRequest('taskId must be a UUID')
+      const t = tasks.find(row => row.id === ctx.query.taskId!.toLowerCase() && row.hotelRef === hotelRef)
+      if (t && (activeAssignment(t.id)?.staffId === actor.staffId || managesProject(actor, t))) widened = true
+    }
+    if (ctx.query.projectId) {
+      if (!isUuid(ctx.query.projectId)) throw badRequest('projectId must be a UUID')
+      if (managesProject(actor, { projectId: ctx.query.projectId.toLowerCase() })) widened = true
+    }
+    const role = roleAt(actor.staffId, hotelRef)
+    if (!actor.isService && !actor.isOperator && role !== 'leader' && role !== 'admin' && !widened) throw forbidden('leader or admin access required')
     let deptFilter: Id | null = null
     if (ctx.query.departmentId) {
       if (!isUuid(ctx.query.departmentId)) throw badRequest('departmentId must be a UUID')
       deptFilter = ctx.query.departmentId.toLowerCase()
     }
-    const rows: AssignableStaff[] = staffAccounts
-      .filter(s => s.isActive && staffHotels.some(r => r.staffId === s.id && r.hotelRef === hotelRef))
-      .filter(s => !deptFilter || s.hotelDepartmentId === deptFilter)
-      .map(s => ({ id: s.id, name: s.name, role: s.role, hotelDepartmentId: s.hotelDepartmentId }))
+    const rows: AssignableStaff[] = staffHotels
+      .filter(r => r.hotelRef === hotelRef && account(r.staffId)?.isActive)
+      .filter(r => !deptFilter || r.hotelDepartmentId === deptFilter)
+      .map(r => ({ id: r.staffId, name: account(r.staffId)!.name, role: r.role, hotelDepartmentId: r.hotelDepartmentId }))
       .sort((a, b) => a.name.localeCompare(b.name))
     return ok(rows)
   }
 
   if (method === 'GET' && path === '/v1/staff') {
-    requireAdmin(ctx)
     const hotelRef = resolveHotelForActor(ctx)
+    requireAdminAt(ctx, hotelRef)
+    // Each person's memberships hold only the listed hotel.
     const rows = staffAccounts
       .filter(s => s.isActive && staffHotels.some(r => r.staffId === s.id && r.hotelRef === hotelRef))
-      .map(staffReadModel)
+      .map(s => staffReadModel(s, hotelRef))
       .sort((a, b) => a.name.localeCompare(b.name))
     return ok(rows)
   }
 
+  // ── Roster import (744f907). Admin at the header hotel; the hotel never
+  // comes from the file. Always 200 once the file parses, even if every row
+  // fails. The mock takes the multipart `file` part as body.file {name,
+  // content} (no multipart in a function call) and reads .csv only.
+  if (method === 'POST' && path === '/v1/staff/import') {
+    const hotelRef = hotelFor(ctx)
+    requireAdminAt(ctx, hotelRef)
+    return importRoster(ctx, hotelRef)
+  }
+
+  if (method === 'GET' && path === '/v1/staff/import/template') {
+    const hotelRef = hotelFor(ctx)
+    requireAdminAt(ctx, hotelRef)
+    const format = ctx.query.format ?? 'csv'
+    if (format !== 'csv' && format !== 'xlsx') throw badRequest('format must be csv or xlsx')
+    // MOCK LIMIT: the real .xlsx carries a department drop-down; a browser
+    // mock has no workbook writer, so it says so instead of handing back a
+    // wrong file.
+    if (format === 'xlsx') throw unprocessable('the xlsx template is not produced by the in-browser mock; download the csv')
+    const departments = hotelDepartments.filter(d => d.hotelRef === hotelRef && d.isActive).map(d => d.departmentName)
+    const content = ['email,name,role,department,createTask', `# role: staff|leader (optional) · department: one of ${departments.join(' | ')} (optional) · createTask: true|false (optional)`, 'ayu@example.com,Ayu Lestari,staff,Housekeeping,true'].join('\n')
+    return { status: 200, body: null, raw: { filename: 'staff-import-template.csv', contentType: 'text/csv; charset=utf-8', content } }
+  }
+
   if (method === 'POST' && path === '/v1/staff') {
-    requireAdmin(ctx)
+    // The body is unchanged. 201 for a new account; 200 when the email already
+    // exists, in which case the account is attached to the listed hotels and
+    // name/password are ignored. The caller must be admin at EVERY listed
+    // hotel (the role check needs a hotel, so it runs per hotel below).
+    if (!actor.isService && !actor.isOperator && !actor.memberships.some(m => m.role === 'admin')) throw forbidden('admin access required')
+    // An empty hotels list would pass the per-hotel loop vacuously: refused as
+    // "not an admin" rather than as a body problem.
+    if (!actor.isService && !actor.isOperator && (!Array.isArray(body.hotels) || body.hotels.length === 0)) throw forbidden('admin access required')
     const email = asTrimmed(body.email).toLowerCase()
     if (!email.includes('@')) throw badRequest('valid email is required')
     const name = asTrimmed(body.name)
@@ -2476,7 +3006,7 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
     }
     if (!actor.isService && !actor.isOperator) {
       for (const id of hotelIds) {
-        if (!actor.hotels.includes(id)) throw forbidden('cannot grant access to hotels you do not manage')
+        if (roleAt(actor.staffId, id) !== 'admin') throw forbidden('cannot grant access to hotels you do not manage')
       }
     }
     const hotelDepartmentId = isUuid(body.hotelDepartmentId) ? body.hotelDepartmentId : null
@@ -2484,35 +3014,80 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
       const dept = hotelDepartments.find(d => d.id === hotelDepartmentId)
       if (!dept || !hotelIds.includes(dept.hotelRef)) throw badRequest('hotelDepartmentId does not belong to any of the staff member\'s hotels')
     }
-    if (staffAccounts.some(s => s.email === email)) throw conflict('email already registered')
     for (const id of hotelIds) {
       if (!tenants.some(t => t.hotelRef === id)) throw unprocessable('hotel or hotel department does not exist')
     }
-    const acct: SeedAccount = { id: newId(), email, name, role, isActive: true, hotelDepartmentId, createTask: Boolean(body.createTask), isOperator: false, password }
+    const createTask = Boolean(body.createTask)
+    const existing = staffAccounts.find(s => s.email === email)
+    if (existing) {
+      if (!existing.isActive) throw conflict('that email belongs to a deactivated account')
+      if (existing.isOperator) throw conflict('that email belongs to a platform operator')
+      if (hotelIds.some(id => membershipAt(existing.id, id))) throw conflict('that staff member already has access to this hotel')
+      hotelIds.forEach(hotelRef => staffHotels.push({
+        staffId: existing.id, hotelRef, role: role as StaffRole,
+        hotelDepartmentId: hotelDepartments.find(d => d.id === hotelDepartmentId)?.hotelRef === hotelRef ? hotelDepartmentId : null,
+        createTask,
+      }))
+      // Memberships only at the properties this request granted: on an
+      // attach the person may work elsewhere too, and what they are there is
+      // not this admin's to see.
+      return ok({ ...staffReadModel(existing), memberships: staffReadModel(existing).memberships.filter(m => hotelIds.includes(m.hotelRef)) }, 200)
+    }
+    const acct: SeedAccount = { id: newId(), email, name, isActive: true, isOperator: false, password }
     staffAccounts.push(acct)
-    hotelIds.forEach(hotelRef => staffHotels.push({ staffId: acct.id, hotelRef }))
+    hotelIds.forEach(hotelRef => staffHotels.push({
+      staffId: acct.id, hotelRef, role: role as StaffRole,
+      hotelDepartmentId: hotelDepartments.find(d => d.id === hotelDepartmentId)?.hotelRef === hotelRef ? hotelDepartmentId : null,
+      createTask,
+    }))
     return ok(staffReadModel(acct), 201)
   }
 
   const staffPatch = /^\/v1\/staff\/([^/]+)$/.exec(path)
   if (method === 'PATCH' && staffPatch) {
-    requireAdmin(ctx)
     const id = staffPatch[1]!
     if (!isUuid(id)) throw badRequest('id must be a valid UUID')
     if (body.role !== undefined && !['staff', 'leader', 'admin'].includes(String(body.role))) {
       throw unprocessable('role must be staff, leader, or admin')
+    }
+    // name and isActive stay account-wide: admin at ANY property the caller
+    // belongs to. role / hotelDepartmentId / createTask need a hotel (400
+    // without one), an admin THERE (403), and change only that membership.
+    requireAdminAnywhere(ctx)
+    const touchesMembership = body.role !== undefined || body.hotelDepartmentId !== undefined || body.createTask !== undefined
+    // A hotel named on a name/isActive-only patch is still resolved, but only
+    // to decide which membership the response shows.
+    const namesAHotel = Boolean(ctx.query.hotelId || ctx.query.hotelRef || ctx.headers['x-hotel-id'])
+    let hotelRef: Id | null = null
+    if (touchesMembership || namesAHotel) {
+      if (!namesAHotel) throw badRequest('hotel context required to change role, hotelDepartmentId or createTask')
+      hotelRef = resolveHotelForActor(ctx)
+    }
+    if (touchesMembership && !actor.isService && !actor.isOperator && roleAt(actor.staffId, hotelRef) !== 'admin') {
+      throw forbidden('admin access required at this hotel')
     }
     const target = staffAccounts.find(s => s.id === id.toLowerCase())
     const bypassHotelCheck = actor.isService || actor.isOperator
     const shares = target && staffHotels.some(r => r.staffId === target.id && actor.hotels.includes(r.hotelRef))
     // A non-sharing target and a nonexistent one collapse to the same 404.
     if (!target || (!bypassHotelCheck && !shares)) throw notFound('staff')
+    if (hotelRef && touchesMembership) {
+      const membership = membershipAt(target.id, hotelRef)
+      if (!membership) throw unprocessable('staff member has no membership at this hotel')
+      if (body.hotelDepartmentId !== undefined && body.hotelDepartmentId !== null && body.hotelDepartmentId !== '') {
+        if (!isUuid(body.hotelDepartmentId)) throw badRequest('hotelDepartmentId must be a UUID')
+        const dept = hotelDepartments.find(d => d.id === body.hotelDepartmentId)
+        if (!dept || dept.hotelRef !== hotelRef) throw unprocessable('hotelDepartmentId does not belong to this hotel')
+      }
+      if (body.role !== undefined) membership.role = body.role as StaffRole
+      if (body.hotelDepartmentId !== undefined) membership.hotelDepartmentId = isUuid(body.hotelDepartmentId) ? body.hotelDepartmentId : null
+      if (body.createTask !== undefined) membership.createTask = Boolean(body.createTask)
+    }
     if (typeof body.name === 'string' && body.name.trim()) target.name = body.name.trim()
-    if (body.role !== undefined) target.role = body.role as StaffRole
-    if (body.hotelDepartmentId !== undefined) target.hotelDepartmentId = isUuid(body.hotelDepartmentId) ? body.hotelDepartmentId : null
-    if (body.createTask !== undefined) target.createTask = Boolean(body.createTask)
     if (body.isActive !== undefined) target.isActive = Boolean(body.isActive)
-    return ok(staffReadModel(target))
+    // The membership at the property this request named, and no other; no
+    // property named means no memberships in the response, not all of them.
+    return ok(staffReadModel(target, hotelRef ?? undefined) && { ...staffReadModel(target), memberships: hotelRef ? staffReadModel(target, hotelRef).memberships : [] })
   }
 
   const grantMatch = /^\/v1\/staff\/([^/]+)\/group-grants\/([^/]+)$/.exec(path)
@@ -2581,13 +3156,13 @@ function handlePlatform(ctx: Ctx): FakeResponse | null {
     if (!name) throw badRequest('name is required')
     const id = hotelRef.toLowerCase()
     if (!tenants.some(t => t.hotelRef === id)) throw notFound('tenant not found')
-    const hasAdmin = staffAccounts.some(s => s.role === 'admin' && !s.isOperator && staffHotels.some(r => r.staffId === s.id && r.hotelRef === id))
+    const hasAdmin = staffHotels.some(r => r.hotelRef === id && r.role === 'admin' && account(r.staffId)?.isOperator === false)
     if (hasAdmin) throw conflict('tenant already has an admin')
     if (staffAccounts.some(s => s.email === email)) throw conflict('email already registered')
     const temporaryPassword = randomToken().slice(0, 32)
-    const acct: SeedAccount = { id: newId(), email, name, role: 'admin', isActive: true, hotelDepartmentId: null, createTask: true, isOperator: false, password: temporaryPassword }
+    const acct: SeedAccount = { id: newId(), email, name, isActive: true, isOperator: false, password: temporaryPassword }
     staffAccounts.push(acct)
-    staffHotels.push({ staffId: acct.id, hotelRef: id })
+    staffHotels.push({ staffId: acct.id, hotelRef: id, role: 'admin', hotelDepartmentId: null, createTask: true })
     // The ONLY response that ever carries the plaintext temporary password.
     return ok({ ...staffReadModel(acct), temporaryPassword }, 201)
   }
@@ -3151,7 +3726,8 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
   }
 
   if (method === 'GET' && path === '/v1/departments') {
-    requireAdmin(ctx)
+    // Names no single hotel: admin at any property the caller belongs to.
+    requireAdminAnywhere(ctx)
     return ok([...masterDepartments].sort((a, b) => a.name.localeCompare(b.name)))
   }
 
@@ -3199,7 +3775,8 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
     if (!isUuid(rawId)) throw badRequest('id must be a valid UUID')
     // Authorization BEFORE the group lookup — no existence oracle.
     if (actor.isService) throw forbidden('forbidden')
-    if (actor.role !== 'admin') throw forbidden('forbidden')
+    // Names no single hotel: admin at ANY property (per-hotel roles), or the operator.
+    if (!actor.isOperator && !actor.memberships.some(m => m.role === 'admin')) throw forbidden('forbidden')
     if (!actor.isOperator && !groupGrants.some(g => g.staffId === actor.staffId && g.groupId === rawId.toLowerCase())) throw forbidden('forbidden')
     const groupId = rawId.toLowerCase()
     const memberHotels = tenants.filter(t => t.groupId === groupId)
@@ -3328,7 +3905,7 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     const t = resolved.task
     tasks.push(t)
     resolved.checklistLabels.forEach((label, index) => {
-      checklistItems.push({ id: newId(), hotelRef, taskId: t.id, sort: index, label, isDone: false, doneBy: null, doneAt: null, createdAt: t.createdAt, updatedAt: t.createdAt })
+      checklistItems.push({ id: newId(), hotelRef, taskId: t.id, sort: index, label, isDone: false, doneBy: null, doneAt: null, assignedStaffId: null, assignedStaffName: null, assignedBy: null, assignedAt: null, note: null, createdAt: t.createdAt, updatedAt: t.createdAt })
     })
     pushHistory(t, actor.staffId, 'NEW', null, t.createdAt)
     if (assignee?.kind === 'STAFF') {
@@ -3344,6 +3921,21 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     const hotelRef = hotelFor(ctx)
     const params = parseListParams(ctx.query)
     let rows = tasks.filter(t => t.hotelRef === hotelRef)
+    // projectId: admin or project member only — anyone else gets the same
+    // 404 a missing project gets. Project tasks stay OUT of the default list
+    // and the hotel board unless the request sends projectId, assignedStaffId
+    // (Mine) or helping=1; they still appear in offers and detail.
+    let projectId: Id | null = null
+    if (ctx.query.projectId) {
+      if (!isUuid(ctx.query.projectId)) throw badRequest('invalid projectId')
+      projectId = ctx.query.projectId.toLowerCase()
+      const project = projects.find(p => p.id === projectId && p.hotelRef === hotelRef)
+      if (!project || (!actor.isService && roleAt(actor.staffId, hotelRef) !== 'admin' && !isProjectMember(projectId, actor.staffId))) throw notFound('project not found')
+      rows = rows.filter(t => t.projectId === projectId)
+    }
+    else if (!params.assignedStaffId && ctx.query.helping !== '1') {
+      rows = rows.filter(t => t.projectId === null)
+    }
     if (ctx.query.helping === '1' && !actor.isService) {
       // helping=1 IS the scope: always the caller's own helper rows, which is
       // strictly narrower than anything the staff auto-scope could allow.
@@ -3359,9 +3951,10 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
   }
 
   if (method === 'POST' && path === '/v1/tasks/assign') {
-    if (actor.role !== 'leader' && actor.role !== 'admin') throw forbidden('forbidden')
     const hotelRef = hotelFor(ctx)
     const t = findHotelTask(hotelRef, body.taskId)
+    // Leader or admin — or the manager of the task's project (ADR 0001).
+    if (actor.role !== 'leader' && actor.role !== 'admin' && !managesProject(actor, t)) throw forbidden('forbidden')
     if (!isUuid(body.staffId)) throw notFound('staff')
     // Reassignment is deliberate: the existing holder is replaced, no refusal.
     assignStaffToTask(actor, t, body.staffId.toLowerCase(), asNullableTrimmed(body.remark), actor.isService ? null : actor.staffId, nowIso())
@@ -3403,16 +3996,19 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
       : undefined
     if (!column || !column.status) throw badRequest('column not found or has no linked status')
     const target = column.status
-    if (target === 'VERIFIED' && !actor.isService && actor.role === 'staff') throw forbidden('only leaders or admins can set status to VERIFIED')
+    // A plain staff member here is one WITHOUT leader rights on this task —
+    // the project manager passes every leader/admin check on project tasks.
+    const plainStaff = !actor.isService && actor.role === 'staff' && !managesProject(actor, t)
+    if (target === 'VERIFIED' && plainStaff) throw forbidden('only leaders or admins can set status to VERIFIED')
     if (target === 'NEW') throw badRequest('cannot change status back to NEW')
     if (target === 'SUBMITTED') throw badRequest('use the submit action to move a task to SUBMITTED')
     if (t.status === 'SUBMITTED') {
       // Frozen while awaiting review — except a leader/admin park or cancel.
-      if (!actor.isService && actor.role === 'staff') throw forbidden('task is awaiting review')
+      if (plainStaff) throw forbidden('task is awaiting review')
       if (target === 'FINISHED' || target === 'IN_PROGRESS') throw badRequest('use the review action to decide a submitted task')
       if (target === 'VERIFIED') throw badRequest('a submitted task is reviewed to FINISHED before it can be VERIFIED')
     }
-    if (!actor.isService && actor.role === 'staff' && activeAssignment(t.id)?.staffId !== actor.staffId) {
+    if (plainStaff && activeAssignment(t.id)?.staffId !== actor.staffId) {
       throw forbidden('not assigned to this task')
     }
     changeStatusCore(t, actor.staffId, target, column.id, asNullableTrimmed(body.description), nowIso())
@@ -3455,18 +4051,20 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
   }
 
   if (method === 'POST' && path === '/v1/tasks/review') {
-    if (actor.isService || (actor.role !== 'leader' && actor.role !== 'admin')) {
-      throw forbidden('only leaders or admins may review a submitted task')
-    }
+    if (actor.isService) throw forbidden('only leaders or admins may review a submitted task')
     const hotelRef = hotelFor(ctx)
     const t = findHotelTask(hotelRef, body.taskId)
+    const manager = managesProject(actor, t)
+    if (actor.role !== 'leader' && actor.role !== 'admin' && !manager) {
+      throw forbidden('only leaders or admins may review a submitted task')
+    }
     const decision = String(body.decision ?? '')
     if (decision !== 'APPROVE' && decision !== 'REQUEST_CHANGES') throw badRequest('decision must be one of APPROVE, REQUEST_CHANGES')
     const note = asNullableTrimmed(body.note)
     if (note && note.length > 1000) throw badRequest('note must be at most 1000 characters')
     if (decision === 'REQUEST_CHANGES' && note === null) throw badRequest('a note is required when requesting changes')
     if (t.status !== 'SUBMITTED') throw conflict('task is not awaiting review')
-    if (actor.role === 'leader') {
+    if (actor.role === 'leader' && !manager) {
       const leaderDept = dbDept(actor.staffId, hotelRef)
       if (!t.hotelDepartmentId || leaderDept !== t.hotelDepartmentId) throw forbidden('not authorized to review this task')
     }
@@ -3527,8 +4125,9 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
       title = asTrimmed(body.title)
       if (!title || title.length > 255) throw badRequest('title is required (1-255 chars)')
     }
-    // Leader-of-the-task's-department only, among humans — admins included out.
-    if (!actor.isService) {
+    // Leader-of-the-task's-department only, among humans — admins included
+    // out. The project manager passes on the project's tasks.
+    if (!actor.isService && !managesProject(actor, t)) {
       const leaderDept = actor.role === 'leader' ? dbDept(actor.staffId, hotelRef) : null
       if (actor.role !== 'leader' || !t.hotelDepartmentId || leaderDept !== t.hotelDepartmentId) throw forbidden('forbidden')
     }
@@ -3577,9 +4176,13 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     if (actor.isService) throw forbidden('comments require a staff identity')
     const hotelRef = hotelFor(ctx)
     const t = findHotelTask(hotelRef, body.taskId)
-    // A deptless task denies everyone, leaders and admins included.
+    // A deptless task denies everyone, leaders and admins included — except
+    // on a project task, where managers and members may comment and viewers
+    // may not.
+    const level = t.projectId ? projectMembers.find(m => m.projectId === t.projectId && m.staffId === actor.staffId)?.level ?? null : null
     const callerDept = dbDept(actor.staffId, hotelRef)
-    if (!t.hotelDepartmentId || callerDept !== t.hotelDepartmentId) throw forbidden('not authorized to comment on this task')
+    const sameDept = !!t.hotelDepartmentId && callerDept === t.hotelDepartmentId
+    if (level === 'VIEWER' || (!sameDept && level === null)) throw forbidden('not authorized to comment on this task')
     const created: TaskComment = { id: newId(), hotelRef, taskId: t.id, staffId: actor.staffId!, comment, createdAt: nowIso(), staffName: null }
     taskComments.push(created)
     return ok(created, 201)
@@ -3594,11 +4197,10 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     if (filetype !== 'PHOTO' && filetype !== 'PDF') throw badRequest('filetype must be PHOTO or PDF')
     const t = findHotelTask(hotelRef, body.taskId)
     if (isGuestRoute) {
-      if (!t.guestRef || !isUuid(body.guestRef) || body.guestRef.toLowerCase() !== t.guestRef) throw forbidden('not authorized for this task')
+      if (!t.requesterRef || !isUuid(body.guestRef) || body.guestRef.toLowerCase() !== t.requesterRef) throw forbidden('not authorized for this task')
     }
     else {
-      const isPermitted = actor.isService || actor.role === 'admin'
-        || (actor.role === 'leader' && !!t.hotelDepartmentId && dbDept(actor.staffId, hotelRef) === t.hotelDepartmentId)
+      const isPermitted = hasLeaderRights(actor, hotelRef, t)
         || activeAssignment(t.id)?.staffId === actor.staffId
         || taskCollaborators.some(c => c.taskId === t.id && c.staffId === actor.staffId && c.isActive)
       if (!isPermitted) throw forbidden('not authorized to manage attachments on this task')
@@ -3646,8 +4248,7 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     const t = findHotelTask(hotelRef, body.taskId)
     if (['FINISHED', 'VERIFIED', 'CANCELLED'].includes(t.status)) throw conflict('task is closed')
     if (actor.isService) throw forbidden('helpers are human-only')
-    const permitted = actor.role === 'admin'
-      || (actor.role === 'leader' && !!t.hotelDepartmentId && dbDept(actor.staffId, hotelRef) === t.hotelDepartmentId)
+    const permitted = hasLeaderRights(actor, hotelRef, t)
       || activeAssignment(t.id)?.staffId === actor.staffId
     if (!permitted) throw forbidden('not authorized to manage collaborators on this task')
     if (!isUuid(body.staffId) || !staffInHotel(body.staffId.toLowerCase(), hotelRef)) throw notFound('staff')
@@ -3657,6 +4258,7 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     if (existing) return ok({ ...existing, staffName: account(existing.staffId)?.name ?? null })
     const created: Collaborator = { id: newId(), hotelRef, taskId: t.id, staffId, staffName: null, addedBy: actor.staffId, isActive: true, createdAt: nowIso() }
     taskCollaborators.push(created)
+    ensureAutoMember(t, staffId, actor.staffId, created.createdAt)
     return ok({ ...created, staffName: account(staffId)?.name ?? null })
   }
 
@@ -3666,8 +4268,7 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     if (['FINISHED', 'VERIFIED', 'CANCELLED'].includes(t.status)) throw conflict('task is closed')
     if (actor.isService) throw forbidden('helpers are human-only')
     const staffId = isUuid(body.staffId) ? body.staffId.toLowerCase() : ''
-    const permitted = actor.role === 'admin'
-      || (actor.role === 'leader' && !!t.hotelDepartmentId && dbDept(actor.staffId, hotelRef) === t.hotelDepartmentId)
+    const permitted = hasLeaderRights(actor, hotelRef, t)
       || activeAssignment(t.id)?.staffId === actor.staffId
       || staffId === actor.staffId // leaving is always allowed
     if (!permitted) throw forbidden('not authorized to manage collaborators on this task')
@@ -3730,6 +4331,7 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
       taskAssignments.filter(a => a.taskId === t.id && a.isActive).forEach((a) => { a.isActive = false })
       taskCollaborators.filter(c => c.taskId === t.id && c.staffId === actor.staffId && c.isActive).forEach((c) => { c.isActive = false })
       taskAssignments.push({ id: newId(), taskId: t.id, kind: 'STAFF', staffId: actor.staffId, teamId: null, hotelDepartmentId: null, assignedBy: offer.fromStaff, actingUser: null, remark: null, isActive: true, createdAt: at })
+      ensureAutoMember(t, actor.staffId, offer.fromStaff, at)
       offer.state = 'ACCEPTED'
       offer.decidedAt = at
       t.updatedAt = at
@@ -3779,6 +4381,959 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     // Out-of-scope and nonexistent are deliberately the same 404.
     if (!t || !visibleTo(actor, hotelRef, t)) throw notFound('task')
     return ok(taskDetail(t))
+  }
+
+  return null
+}
+
+// ════════════════════════ feat/projects: tenant, projects, checklist, templates, import ════════════════════════
+//
+// Routes, bodies, status codes, permissions AND error literals follow the
+// branch's Go (internal/project, internal/task/{checklist,project,attribution,
+// generate}.go, internal/tasktemplate, internal/tenant, internal/staff/import*)
+// at fe5e99d. "MOCK LIMIT" marks the few things a browser mock cannot do.
+
+const PROJECT_STATUSES: ProjectStatus[] = ['ACTIVE', 'COMPLETED', 'CANCELLED']
+const LEVEL_ORDER: Record<ProjectLevel, number> = { MANAGER: 0, MEMBER: 1, VIEWER: 2 }
+
+/** Names are unique among ACTIVE projects only (a completed one may be reused). */
+const activeProjectNameTaken = (hotelRef: Id, name: string, exceptId?: Id) =>
+  projects.some(p => p.hotelRef === hotelRef && p.id !== exceptId && p.status === 'ACTIVE' && p.name.toLowerCase() === name.toLowerCase())
+const CLOSED_TASK_STATUSES = new Set<TaskStatus>(['FINISHED', 'VERIFIED', 'CANCELLED'])
+
+/** Hotel-local calendar date (YYYY-MM-DD) of an instant. */
+function localDateAt(hotelRef: Id, atMs: number): string {
+  return new Date(atMs + hotelOffsetMinutes(hotelRef) * 60_000).toISOString().slice(0, 10)
+}
+
+function projectProgress(projectId: Id): ProjectProgress {
+  const rows = tasks.filter(t => t.projectId === projectId)
+  const byStatus = Object.fromEntries(TASK_STATUSES.map(status => [status, 0])) as Record<TaskStatus, number>
+  for (const t of rows) byStatus[t.status] += 1
+  const done = byStatus.FINISHED + byStatus.VERIFIED
+  const total = rows.length - byStatus.CANCELLED
+  const now = Date.now()
+  const overdue = rows.filter(t => !CLOSED_TASK_STATUSES.has(t.status) && ((t.dueAt && Date.parse(t.dueAt) < now) || (t.resolutionDueAt && Date.parse(t.resolutionDueAt) < now))).length
+  const unassigned = rows.filter(t => !CLOSED_TASK_STATUSES.has(t.status) && activeAssignment(t.id)?.kind !== 'STAFF').length
+  return { byStatus, done, total, percent: total ? Math.floor((done / total) * 100) : 0, overdue, unassigned }
+}
+
+function projectModel(p: ProjectRow, actor: Actor, hotelRef: Id, extra: Partial<Pick<Project, 'openTasks'>> = {}): Project {
+  const manager = projectMembers.find(m => m.projectId === p.id && m.level === 'MANAGER') ?? null
+  const mine = actor.staffId ? projectMembers.find(m => m.projectId === p.id && m.staffId === actor.staffId) ?? null : null
+  const isAdmin = actor.isService || roleAt(actor.staffId, hotelRef) === 'admin'
+  const model: Project = {
+    id: p.id,
+    hotelRef: p.hotelRef,
+    name: p.name,
+    description: p.description,
+    startDate: p.startDate,
+    endDate: p.endDate,
+    status: p.status,
+    completedAt: p.completedAt,
+    createdBy: p.createdBy,
+    managerStaffId: manager?.staffId ?? null,
+    myLevel: mine?.level ?? null,
+    late: p.status === 'ACTIVE' && !!p.endDate && p.endDate < localDateAt(hotelRef, Date.now()),
+    progress: projectProgress(p.id),
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+    ...extra,
+  }
+  // Admins only: the manager no longer holds an active membership here.
+  if (isAdmin) model.needsManager = manager === null || !account(manager.staffId)?.isActive || !membershipAt(manager.staffId, hotelRef)
+  return model
+}
+
+const projectMemberModel = (m: ProjectMemberRow): ProjectMember =>
+  ({ staffId: m.staffId, name: account(m.staffId)?.name ?? m.staffId, level: m.level, source: m.source, addedBy: m.addedBy, addedAt: m.addedAt })
+
+/** People who cannot see a project get 404, not 403. Admins see every project at the hotel. */
+function findVisibleProject(actor: Actor, hotelRef: Id, rawId: string | undefined): ProjectRow {
+  const id = isUuid(rawId) ? rawId.toLowerCase() : null
+  const project = id ? projects.find(p => p.id === id && p.hotelRef === hotelRef) : undefined
+  if (!project) throw notFound('project not found')
+  if (actor.isService || roleAt(actor.staffId, hotelRef) === 'admin') return project
+  if (!isProjectMember(project.id, actor.staffId)) throw notFound('project not found')
+  return project
+}
+
+function requireProjectManagerOrAdmin(actor: Actor, hotelRef: Id, project: ProjectRow) {
+  if (actor.isService || roleAt(actor.staffId, hotelRef) === 'admin') return
+  if (projectMembers.some(m => m.projectId === project.id && m.staffId === actor.staffId && m.level === 'MANAGER')) return
+  throw forbidden('only the project manager or an admin can do this')
+}
+
+const asLocalDate = (value: unknown, field: string): string | null => {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) throw badRequest(`${field} must be a date (YYYY-MM-DD)`)
+  return value
+}
+
+// ── Recurrence arithmetic ──────────────────────────────────────────────────
+
+/**
+ * The first run STRICTLY after `afterMs`, as a UTC instant, walking hotel-
+ * local calendar days: DAILY every day, WEEKLY on the listed weekdays
+ * (0 = Sunday), MONTHLY on dayOfMonth (1–28, so every month has it), each at
+ * timeMinutes after local midnight, inside [startsOn, endsOn]. Null when the
+ * schedule has run out.
+ */
+function nextRunAfter(recurrence: TaskTemplateRecurrence, timezone: string, afterMs: number): string | null {
+  // Local, not module-level: the seed calls this while the module is still
+  // initialising, before any later `const` exists.
+  const DAY_MS = 1440 * 60_000
+  const offsetMs = zoneOffsetMinutes(timezone, afterMs) * 60_000
+  let dayStart = Math.floor((afterMs + offsetMs) / DAY_MS) * DAY_MS
+  if (recurrence.startsOn) dayStart = Math.max(dayStart, Date.parse(`${recurrence.startsOn}T00:00:00.000Z`))
+  const endMs = recurrence.endsOn ? Date.parse(`${recurrence.endsOn}T00:00:00.000Z`) : Number.POSITIVE_INFINITY
+  for (let step = 0; step < 800 && dayStart <= endMs; step++, dayStart += DAY_MS) {
+    const local = new Date(dayStart)
+    const matches = recurrence.kind === 'DAILY'
+      || (recurrence.kind === 'WEEKLY' && (recurrence.weekdays ?? []).includes(local.getUTCDay()))
+      || (recurrence.kind === 'MONTHLY' && local.getUTCDate() === recurrence.dayOfMonth)
+    if (!matches) continue
+    const utcMs = dayStart + recurrence.timeMinutes * 60_000 - offsetMs
+    if (utcMs > afterMs) return new Date(utcMs).toISOString()
+  }
+  return null
+}
+
+function upcomingRuns(recurrence: TaskTemplateRecurrence | null, timezone: string, fromIso: string | null): string[] {
+  if (!recurrence || !fromIso) return []
+  const runs: string[] = []
+  let cursor: string | null = fromIso
+  while (cursor && runs.length < 5) {
+    runs.push(cursor)
+    cursor = nextRunAfter(recurrence, timezone, Date.parse(cursor))
+  }
+  return runs
+}
+
+function templateModel(row: TemplateRow): TaskTemplate {
+  const timezone = hotelTimezone(row.hotelRef)
+  return {
+    id: row.id,
+    hotelRef: row.hotelRef,
+    name: row.name,
+    isActive: row.isActive,
+    content: row.content,
+    recurrence: row.recurrence,
+    nextRunAt: row.nextRunAt,
+    lastRunAt: row.lastRunAt,
+    lastOccurrenceAt: row.lastOccurrenceAt,
+    lastTaskId: row.lastTaskId,
+    lastError: row.lastError,
+    createdBy: row.createdBy,
+    ownerStaffId: row.ownerStaffId,
+    ownerName: row.ownerStaffId ? account(row.ownerStaffId)?.name ?? null : null,
+    timezone,
+    upcoming: row.isActive ? upcomingRuns(row.recurrence, timezone, row.nextRunAt) : [],
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function decodeTemplateContent(raw: unknown): TaskTemplateContent {
+  const body = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  // The title may be blank when itemRef is set: the item name is used.
+  const title = asTrimmed(body.title)
+  const itemRef = body.itemRef == null || body.itemRef === '' ? null : String(body.itemRef)
+  if (itemRef !== null && !isUuid(itemRef)) throw badRequest('content.itemRef must be a UUID')
+  const locationRef = body.locationRef == null || body.locationRef === '' ? null : String(body.locationRef)
+  if (locationRef !== null && !isUuid(locationRef)) throw badRequest('content.locationRef must be a UUID')
+  const priority = asString(body.priority)?.toUpperCase() ?? null
+  if (priority && !TASK_PRIORITY_VALUES.includes(priority as TaskPriority)) throw badRequest('content.priority must be one of LOW, NORMAL, HIGH, URGENT')
+  // UNASSIGNED (or no kind) normalises to no assignee at all.
+  let assignee: TaskTemplateAssignee | null = null
+  if (body.assignee && typeof body.assignee === 'object') {
+    const a = body.assignee as Record<string, unknown>
+    const kind = String(a.assigneeKind ?? '')
+    if (kind && kind !== 'UNASSIGNED') {
+      if (kind !== 'STAFF' && kind !== 'TEAM') throw badRequest('a template\'s assigneeKind must be STAFF, TEAM or UNASSIGNED')
+      assignee = {
+        assigneeKind: kind,
+        assigneeStaffId: isUuid(a.assigneeStaffId) ? a.assigneeStaffId.toLowerCase() : null,
+        assigneeTeamId: isUuid(a.assigneeTeamId) ? a.assigneeTeamId.toLowerCase() : null,
+      }
+    }
+  }
+  return {
+    title,
+    description: asNullableTrimmed(body.description),
+    itemRef,
+    locationRef,
+    roomNumber: asNullableTrimmed(body.roomNumber),
+    priority: priority as TaskPriority | null,
+    quantity: typeof body.quantity === 'number' ? body.quantity : null,
+    checklistLabels: Array.isArray(body.checklistLabels) ? body.checklistLabels.map(label => String(label ?? '').trim()).filter(Boolean) : [],
+    assignee,
+  }
+}
+
+function decodeRecurrence(raw: unknown): TaskTemplateRecurrence {
+  const body = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  // Rule.Validate, in its order and with its words.
+  const kind = String(body.kind ?? '')
+  const timeMinutes = Number(body.timeMinutes)
+  if (!Number.isInteger(timeMinutes) || timeMinutes < 0 || timeMinutes > 1439) throw badRequest('recurrence.timeMinutes must be between 0 and 1439')
+  const weekdays = Array.isArray(body.weekdays) ? [...new Set(body.weekdays.map(Number))].sort((a, b) => a - b) : []
+  const dayOfMonth = body.dayOfMonth == null ? null : Number(body.dayOfMonth)
+  switch (kind) {
+    case 'DAILY':
+      if (weekdays.length > 0 || dayOfMonth !== null) throw badRequest('a DAILY recurrence takes neither weekdays nor dayOfMonth')
+      break
+    case 'WEEKLY':
+      if (weekdays.length === 0) throw badRequest('a WEEKLY recurrence needs at least one weekday')
+      if (weekdays.some(d => !Number.isInteger(d) || d < 0 || d > 6)) throw badRequest('recurrence.weekdays must be 0 (Sunday) to 6 (Saturday)')
+      if (dayOfMonth !== null) throw badRequest('a WEEKLY recurrence takes no dayOfMonth')
+      break
+    case 'MONTHLY':
+      if (dayOfMonth === null || !Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 28) throw badRequest('a MONTHLY recurrence needs dayOfMonth between 1 and 28')
+      if (weekdays.length > 0) throw badRequest('a MONTHLY recurrence takes no weekdays')
+      break
+    default:
+      throw badRequest('recurrence.kind must be one of DAILY, WEEKLY, MONTHLY')
+  }
+  const startsOn = asLocalDate(body.startsOn, 'recurrence.startsOn')
+  const endsOn = asLocalDate(body.endsOn, 'recurrence.endsOn')
+  if (startsOn && endsOn && endsOn < startsOn) throw badRequest('recurrence.endsOn cannot be before startsOn')
+  return { kind: kind as RecurrenceKind, timeMinutes, weekdays: kind === 'WEEKLY' ? weekdays : null, dayOfMonth: kind === 'MONTHLY' ? dayOfMonth : null, startsOn, endsOn }
+}
+
+/** Template content → the creation pipeline's input (no due/activation/requester). */
+function templateResolveInput(content: TaskTemplateContent): ResolveInput {
+  return {
+    title: content.title,
+    description: content.description ?? null,
+    notes: null,
+    roomNumber: content.roomNumber ?? null,
+    quantity: content.quantity ?? null,
+    activationDate: null,
+    dueAt: null,
+    priority: content.priority ?? null,
+    itemRef: content.itemRef ?? null,
+    itemName: '',
+    categoryName: null,
+    locationRef: content.locationRef ?? null,
+    requesterRef: null,
+    requesterName: null,
+    visitRef: null,
+    itemQuantity: false,
+    checklistLabels: content.checklistLabels,
+    sourceProduct: 'sentec-tasks',
+    sourceChannel: 'staff',
+    idempotencyKey: null,
+  }
+}
+
+/**
+ * Previewer: the template's content through the same pipeline
+ * POST /v1/tasks/preview uses, as `actor` (the owner for a personal template).
+ * The pipeline's own error — a 400 for a missing title, a 422 for a bad
+ * location — is what comes back; the resolved title names a personal template.
+ */
+function previewTemplateContent(actor: Actor, hotelRef: Id, content: TaskTemplateContent): string {
+  validateAssignAtCreation(actor, hotelRef, content.assignee ?? null)
+  return resolveTask(hotelRef, templateResolveInput(content)).task.title
+}
+
+/** The actor a template runs as: its owner for a personal one, a service actor for a shared one. */
+function templateActor(row: TemplateRow): Actor | null {
+  if (row.scope === 'personal') {
+    const owner = account(row.ownerStaffId)
+    if (!owner || !owner.isActive) return null
+    if (!hotelsClaim(owner.id).includes(row.hotelRef)) return null
+    const actor = staffActor(owner, null, row.hotelRef)
+    if (actor.role === 'staff' && !actor.createTask) return null
+    return actor
+  }
+  return { isService: true, actingUser: 'recurring-worker', staffId: null, role: 'admin', deptId: null, createTask: true, hotels: [], memberships: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
+}
+
+/** Create one task from a template through the same pipeline staff-create uses. */
+function createTaskFromTemplate(row: TemplateRow, actor: Actor, occurrenceKey: string | null, at: string): Task {
+  const assignee = validateAssignAtCreation(actor, row.hotelRef, row.content.assignee ?? null)
+  const resolved = resolveTask(row.hotelRef, templateResolveInput(row.content))
+  const t = resolved.task
+  t.templateId = row.id
+  t.occurrenceKey = occurrenceKey
+  t.createdAt = at
+  t.updatedAt = at
+  tasks.push(t)
+  resolved.checklistLabels.forEach((label, index) => {
+    checklistItems.push({ id: newId(), hotelRef: row.hotelRef, taskId: t.id, sort: index, label, isDone: false, doneBy: null, doneAt: null, assignedStaffId: null, assignedStaffName: null, assignedBy: null, assignedAt: null, note: null, createdAt: at, updatedAt: at })
+  })
+  // Like Dispatch, a generated task by the worker has no acting staff and so
+  // no NEW history row; the owner's own recurring task records them.
+  if (actor.staffId) pushHistory(t, actor.staffId, 'NEW', null, at)
+  if (assignee?.kind === 'STAFF') assignStaffToTask(actor, t, assignee.staffId, null, actor.staffId, at)
+  else if (assignee?.kind === 'TEAM') taskAssignments.push({ id: newId(), taskId: t.id, kind: 'TEAM', staffId: null, teamId: assignee.teamId, hotelDepartmentId: null, assignedBy: actor.staffId, actingUser: null, remark: null, isActive: true, createdAt: at })
+  return t
+}
+
+/** The occurrence key: the scheduled instant, RFC 3339 in UTC, unique per template. */
+const occurrenceKeyOf = (runAtIso: string) => new Date(runAtIso).toISOString().replace('.000Z', 'Z')
+
+/**
+ * The worker (go run ./cmd/worker): every active template whose nextRunAt has
+ * passed makes its task, idempotently per occurrence, then advances. A
+ * template whose owner lost access or the create-task permission is paused
+ * with lastError filled in — the screens show it.
+ */
+function runDueTemplates() {
+  const now = Date.now()
+  for (const row of taskTemplates) {
+    if (row.isArchived || !row.isActive || !row.recurrence) continue
+    for (let guard = 0; guard < 50 && row.nextRunAt && Date.parse(row.nextRunAt) <= now; guard++) {
+      const key = occurrenceKeyOf(row.nextRunAt)
+      const actor = templateActor(row)
+      if (!actor) {
+        // The sweeper's words: a personal template whose owner lost access is paused.
+        row.isActive = false
+        row.lastError = 'paused: the owner can no longer create tasks at this hotel (forbidden)'
+        row.lastRunAt = nowIso()
+        row.updatedAt = nowIso()
+        break
+      }
+      try {
+        if (!tasks.some(t => t.templateId === row.id && t.occurrenceKey === key)) {
+          const t = createTaskFromTemplate(row, actor, key, row.nextRunAt)
+          row.lastTaskId = t.id
+        }
+        row.lastRunAt = nowIso()
+        row.lastOccurrenceAt = row.nextRunAt
+        row.lastError = null
+        row.nextRunAt = nextRunAfter(row.recurrence, hotelTimezone(row.hotelRef), Date.parse(row.nextRunAt))
+      }
+      catch (e) {
+        // Content that cannot become a task right now: the occurrence is
+        // skipped, the template goes on to the next one.
+        row.lastRunAt = nowIso()
+        row.lastError = `occurrence ${key} skipped: ${(e as Error).message}`
+        row.nextRunAt = nextRunAfter(row.recurrence!, hotelTimezone(row.hotelRef), Date.parse(row.nextRunAt!))
+        row.updatedAt = nowIso()
+      }
+    }
+  }
+}
+
+/** PATCH /v1/tenant moved the zone: every active template's next run follows it. */
+function rescheduleTemplates(hotelRef: Id) {
+  const timezone = hotelTimezone(hotelRef)
+  for (const row of taskTemplates) {
+    if (row.hotelRef !== hotelRef || row.isArchived || !row.isActive || !row.recurrence) continue
+    row.nextRunAt = nextRunAfter(row.recurrence, timezone, Date.now())
+  }
+}
+
+// ── Roster import ─────────────────────────────────────────────────────────────
+
+/** A small RFC 4180 reader: quotes, doubled quotes, CRLF. */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++ }
+      else if (ch === '"') quoted = false
+      else cell += ch
+      continue
+    }
+    if (ch === '"') quoted = true
+    else if (ch === ',') { row.push(cell); cell = '' }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++
+      row.push(cell); cell = ''
+      rows.push(row); row = []
+    }
+    else cell += ch
+  }
+  if (cell.length || row.length) { row.push(cell); rows.push(row) }
+  return rows.filter(r => r.some(c => c.trim() !== ''))
+}
+
+function importRoster(ctx: Ctx, hotelRef: Id): FakeResponse {
+  const file = (ctx.body.file && typeof ctx.body.file === 'object' ? ctx.body.file : null) as { name?: string, content?: string } | null
+  if (!file) throw badRequest('attach the roster as a multipart form field named file')
+  const content = typeof file.content === 'string' ? file.content : ''
+  const name = String(file.name ?? '')
+  if (content.length > 1_048_576) throw badRequest('the file is too large (1 MB limit)')
+  if (!content.length) throw badRequest('the uploaded file is empty')
+  if (/\.xls$/i.test(name)) throw badRequest('the legacy .xls format is not supported; re-save the file as .xlsx or .csv')
+  if (!/\.(csv|xlsx)$/i.test(name)) throw badRequest('unsupported file type: upload a .csv or .xlsx file')
+  // MOCK LIMIT: no workbook reader in the browser; the real API parses .xlsx.
+  if (/\.xlsx$/i.test(name)) throw badRequest('could not read the Excel file: the in-browser mock reads .csv only')
+  const table = parseCsv(content).filter(r => !r[0]?.trimStart().startsWith('#'))
+  if (table.length === 0) throw badRequest('the file is empty')
+  const header = table[0]!.map(h => h.trim().toLowerCase())
+  if (header.every(h => h === '')) throw badRequest('the first row must be a header row naming each column')
+  if (header.length > 32) throw unprocessable('the file has too many columns')
+  for (const h of header) {
+    if (h && header.indexOf(h) !== header.lastIndexOf(h)) throw badRequest(`the header row names the same column twice: ${h}`)
+  }
+  const colIndex = (...names: string[]) => names.map(n => header.indexOf(n)).find(i => i >= 0) ?? -1
+  const idx = { email: colIndex('email'), name: colIndex('name'), role: colIndex('role'), department: colIndex('department'), createTask: colIndex('createtask', 'cancreatetask') }
+  if (idx.email < 0) throw badRequest('the file needs an email column')
+  if (idx.name < 0) throw badRequest('the file needs a name column')
+  const dataRows = table.slice(1)
+  if (dataRows.length > 1000) throw unprocessable('the file has too many rows; split it into batches of at most 1000')
+  if (dataRows.length === 0) throw badRequest('the file has a header row but no staff rows')
+  const cell = (row: string[], i: number) => (i >= 0 ? (row[i] ?? '').trim() : '')
+  const departments = hotelDepartments.filter(d => d.hotelRef === hotelRef)
+  const results: StaffImportRowResult[] = []
+  const meta = { total: dataRows.length, created: 0, updated: 0, granted: 0, failed: 0 }
+  const seen = new Map<string, number>()
+  dataRows.forEach((row, index) => {
+    const line = index + 2
+    const email = cell(row, idx.email).toLowerCase()
+    const fail = (err: ApiError) => { meta.failed++; results.push({ line, email, outcome: 'failed', error: { code: err.code, message: err.message } }) }
+    const first = seen.get(email)
+    if (first !== undefined && email !== '') return fail(badRequest(`duplicate email in file (first seen on row ${first})`))
+    if (!looksLikeEmail(email)) return fail(badRequest('valid email is required'))
+    const fullName = cell(row, idx.name)
+    if (!fullName) return fail(badRequest('name is required'))
+    const role = (cell(row, idx.role).toLowerCase() || 'staff') as StaffRole
+    if (role !== 'staff' && role !== 'leader') return fail(badRequest('role must be staff or leader'))
+    const departmentName = cell(row, idx.department)
+    let departmentId: Id | null = null
+    if (departmentName) {
+      const department = departments.find(d => d.departmentName.toLowerCase() === departmentName.toLowerCase())
+      if (!department) return fail(unprocessable(`no department named ${departmentName} is enabled for this hotel`))
+      if (!department.isActive) return fail(unprocessable(`the department ${departmentName} is disabled for this hotel`))
+      departmentId = department.id
+    }
+    seen.set(email, line)
+    // Blank and anything unrecognised read as false: createTask is a minor
+    // permission, not worth failing a row over.
+    const createTask = ['true', 'yes', 'y', '1'].includes(cell(row, idx.createTask).toLowerCase())
+    const existing = staffAccounts.find(s => s.email === email)
+    if (!existing) {
+      // No password: they sign in by magic link or Google; nothing is emailed.
+      const acct: SeedAccount = { id: newId(), email, name: fullName, isActive: true, isOperator: false, password: '' }
+      staffAccounts.push(acct)
+      staffHotels.push({ staffId: acct.id, hotelRef, role, hotelDepartmentId: departmentId, createTask })
+      meta.created++
+      results.push({ line, email, outcome: 'created', staffId: acct.id })
+      return
+    }
+    if (!existing.isActive) return fail(conflict('that email belongs to a deactivated account'))
+    if (existing.isOperator) return fail(conflict('that email belongs to a platform operator'))
+    const membership = membershipAt(existing.id, hotelRef)
+    if (membership) {
+      // The file's role, department (only when named) and createTask are
+      // applied; an admin is never demoted by a spreadsheet.
+      if (membership.role !== 'admin') membership.role = role
+      if (departmentId) membership.hotelDepartmentId = departmentId
+      membership.createTask = createTask
+      meta.updated++
+      results.push({ line, email, outcome: 'updated', staffId: existing.id })
+      return
+    }
+    staffHotels.push({ staffId: existing.id, hotelRef, role, hotelDepartmentId: departmentId, createTask })
+    meta.granted++
+    results.push({ line, email, outcome: 'granted', staffId: existing.id })
+  })
+  return ok(results, 200, meta)
+}
+
+// ── Time attribution ─────────────────────────────────────────────────────────
+
+function attributionFor(hotelRef: Id, t: Task): TaskTimeAttribution {
+  const schedule = scheduleFor(hotelRef, t.hotelDepartmentId)
+  const minutesBetween = (from: string, to: string) => Math.max(0, elapsedScheduleMinutes(hotelRef, schedule, from, to))
+  const submittedRow = [...taskHistory].reverse().find(h => h.taskId === t.id && h.status === 'SUBMITTED')
+  const cutoffAt = t.submittedAt ?? submittedRow?.createdAt ?? nowIso()
+  const cutoffReason: TaskTimeAttribution['cutoffReason'] = t.submittedAt || submittedRow ? 'submitted' : 'open'
+  const rows = taskAssignments.filter(a => a.taskId === t.id && a.createdAt <= cutoffAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+  const holders = new Map<Id, { staffId: Id, staffName: string | null, minutes: number, holds: number }>()
+  let pooledMinutes = 0
+  let accounted = 0
+  rows.forEach((row, index) => {
+    const from = row.createdAt < t.activationDate ? t.activationDate : row.createdAt
+    const to = rows[index + 1]?.createdAt ?? (row.isActive ? cutoffAt : (rows[index + 1]?.createdAt ?? cutoffAt))
+    const minutes = minutesBetween(from, to)
+    accounted += minutes
+    if (row.kind === 'STAFF' && row.staffId) {
+      const entry = holders.get(row.staffId) ?? { staffId: row.staffId, staffName: account(row.staffId)?.name ?? null, minutes: 0, holds: 0 }
+      entry.minutes += minutes
+      entry.holds += 1
+      holders.set(row.staffId, entry)
+    }
+    else {
+      pooledMinutes += minutes
+    }
+  })
+  const totalMinutes = minutesBetween(t.activationDate, cutoffAt)
+  const unclaimedMinutes = Math.max(0, totalMinutes - accounted)
+  const split = unclaimedMinutes + pooledMinutes + [...holders.values()].reduce((sum, h) => sum + h.minutes, 0)
+  return {
+    taskId: t.id,
+    activationDate: t.activationDate,
+    cutoffAt,
+    cutoffReason,
+    totalMinutes,
+    unclaimedMinutes,
+    pooledMinutes,
+    holders: [...holders.values()].sort((a, b) => b.minutes - a.minutes || a.staffId.localeCompare(b.staffId)),
+    reconciles: split === totalMinutes,
+  }
+}
+
+// ── The handler ──────────────────────────────────────────────────────────────
+
+function handleProjects(ctx: Ctx): FakeResponse | null {
+  const { method, path, body, actor } = ctx
+
+  // ── Hotel timezone (9f066f8)
+  if (path === '/v1/tenant') {
+    const hotelRef = hotelFor(ctx)
+    const tenant = tenants.find(t => t.hotelRef === hotelRef)
+    if (!tenant) throw notFound('tenant not found')
+    const model = () => ({ hotelRef: tenant.hotelRef, name: tenant.name, timezone: tenant.timezone, isActive: tenant.isActive, createdAt: tenant.createdAt })
+    if (method === 'GET') return ok(model())
+    if (method === 'PATCH') {
+      requireAdminAt(ctx, hotelRef)
+      if (body.timezone === undefined || body.timezone === null) throw badRequest('timezone is required')
+      const timezone = asTrimmed(body.timezone)
+      if (!timezone || timezone === 'Local') throw badRequest('timezone must be an IANA zone name, e.g. Asia/Jakarta')
+      if (!isValidTimezone(timezone)) throw badRequest(`unknown timezone ${timezone}; use an IANA zone name, e.g. Asia/Jakarta`)
+      tenant.timezone = timezone
+      // Operating schedules and every active template's next run move to the
+      // new zone; existing tasks keep their due dates.
+      rescheduleTemplates(hotelRef)
+      return ok(model())
+    }
+  }
+
+  // ── Time attribution
+  const attribution = /^\/v1\/tasks\/([^/]+)\/attribution$/.exec(path)
+  if (method === 'GET' && attribution) {
+    const hotelRef = hotelFor(ctx)
+    if (!isUuid(attribution[1])) throw badRequest('id must be a valid UUID')
+    const t = tasks.find(row => row.id === attribution[1]!.toLowerCase() && row.hotelRef === hotelRef)
+    if (!t || !visibleTo(actor, hotelRef, t)) throw notFound('task')
+    return ok(attributionFor(hotelRef, t))
+  }
+
+  // ── Checklist (2967e6d–b517e63). Staff only; 409 once the task is closed.
+  if (method === 'POST' && path.startsWith('/v1/tasks/checklist')) {
+    if (actor.isService) {
+      throw forbidden(path === '/v1/tasks/checklist/done' ? 'ticking a step requires a staff identity' : path === '/v1/tasks/checklist/assign' ? 'assigning a step is human-only' : 'editing a checklist is human-only')
+    }
+    const hotelRef = hotelFor(ctx)
+    const t = findHotelTask(hotelRef, body.taskId)
+    if (!visibleTo(actor, hotelRef, t)) throw notFound('task')
+    if (CLOSED_TASK_STATUSES.has(t.status)) throw conflict('task is closed')
+    const isAssignee = activeAssignment(t.id)?.staffId === actor.staffId
+    const isHelper = taskCollaborators.some(c => c.taskId === t.id && c.staffId === actor.staffId && c.isActive)
+    const canEdit = roleAt(actor.staffId, hotelRef) === 'admin' || isDeptLeaderFor(actor, hotelRef, t) || isAssignee || managesProject(actor, t)
+    const at = nowIso()
+    const findItem = () => {
+      const itemId = isUuid(body.itemId) ? body.itemId.toLowerCase() : null
+      const item = itemId ? checklistItems.find(c => c.id === itemId && c.taskId === t.id) : undefined
+      if (!item) throw notFound('checklist item')
+      return item
+    }
+    if (path === '/v1/tasks/checklist/done') {
+      const item = findItem()
+      // Step assignee, task assignee, helpers, dept leader, admin, project manager.
+      if (!(canEdit || isHelper || item.assignedStaffId === actor.staffId)) throw forbidden('not authorized to tick this checklist item')
+      if (typeof body.isDone !== 'boolean') throw badRequest('invalid JSON body')
+      if (body.note !== undefined && body.note !== null) {
+        if (typeof body.note !== 'string' || body.note.length > 2000) throw badRequest('note must be at most 2000 characters')
+      }
+      item.isDone = body.isDone
+      item.doneBy = body.isDone ? actor.staffId : null
+      item.doneAt = body.isDone ? at : null
+      // Absent keeps the note, null clears it; unticking keeps it.
+      if (body.note !== undefined) item.note = body.note === null ? null : String(body.note).trim() || null
+      item.updatedAt = at
+      t.updatedAt = at
+      return ok(checklistModel(item))
+    }
+    if (path === '/v1/tasks/checklist') {
+      // Blank rows are dropped, not refused; the limits are counted after that.
+      const labels = (Array.isArray(body.labels) ? body.labels.map(label => String(label ?? '').trim()) : [])
+      if (labels.some(label => label.length > 200)) throw badRequest('checklist label must be at most 200 characters')
+      const cleaned = labels.filter(Boolean)
+      if (cleaned.length === 0) throw badRequest('at least one checklist label is required')
+      if (cleaned.length > 50) throw badRequest('at most 50 checklist items can be added at once')
+      if (!canEdit) throw forbidden('not authorized to edit this task\'s checklist')
+      labels.length = 0
+      labels.push(...cleaned)
+      const last = checklistItems.filter(c => c.taskId === t.id).reduce((max, c) => Math.max(max, c.sort), -1)
+      const created = labels.map((label, index) => {
+        const item: ChecklistItem = { id: newId(), hotelRef, taskId: t.id, sort: last + 1 + index, label, isDone: false, doneBy: null, doneAt: null, assignedStaffId: null, assignedStaffName: null, assignedBy: null, assignedAt: null, note: null, createdAt: at, updatedAt: at }
+        checklistItems.push(item)
+        return checklistModel(item)
+      })
+      t.updatedAt = at
+      return ok(created, 201)
+    }
+    if (path === '/v1/tasks/checklist/remove') {
+      if (!canEdit) throw forbidden('not authorized to edit this task\'s checklist')
+      const item = findItem()
+      checklistItems.splice(checklistItems.indexOf(item), 1)
+      t.updatedAt = at
+      return ok({ removed: true })
+    }
+    if (path === '/v1/tasks/checklist/assign') {
+      // Order: closed (above) → claimed → allowed → item → target.
+      if (activeAssignment(t.id)?.kind !== 'STAFF') throw conflict('task is not claimed')
+      if (!canEdit) throw forbidden('not authorized to assign steps on this task')
+      const item = findItem()
+      if (body.staffId === undefined || body.staffId === null || body.staffId === '') {
+        item.assignedStaffId = null
+        item.assignedBy = null
+        item.assignedAt = null
+      }
+      else {
+        if (!isUuid(body.staffId) || !staffInHotel(body.staffId.toLowerCase(), hotelRef)) throw notFound('staff')
+        const staffId = body.staffId.toLowerCase()
+        // Target must be in the task's department (any member if it has none).
+        if (t.hotelDepartmentId && dbDept(staffId, hotelRef) !== t.hotelDepartmentId) throw badRequest('assignee must be in the task\'s department')
+        item.assignedStaffId = staffId
+        item.assignedBy = actor.staffId
+        item.assignedAt = at
+        ensureAutoMember(t, staffId, actor.staffId, at)
+      }
+      item.updatedAt = at
+      t.updatedAt = at
+      return ok(checklistModel(item))
+    }
+    throw new ApiError('NOT_FOUND', '404 page not found', true)
+  }
+
+  // ── Task templates (shared, admin-managed) and recurring tasks (personal)
+  if (path === '/v1/task-templates' || path.startsWith('/v1/task-templates/')) {
+    const hotelRef = hotelFor(ctx)
+    const isAdmin = actor.isService || roleAt(actor.staffId, hotelRef) === 'admin'
+    if (method === 'GET' && path === '/v1/task-templates') {
+      const scope = ctx.query.scope ?? 'shared'
+      if (!['shared', 'personal', 'all'].includes(scope)) throw badRequest('scope must be one of shared, personal, all')
+      if (scope !== 'shared' && !isAdmin) throw forbidden('admin access required')
+      const activeOnly = ctx.query.active === 'true'
+      const rows = taskTemplates
+        .filter(r => r.hotelRef === hotelRef && !r.isArchived)
+        .filter(r => scope === 'all' || r.scope === scope)
+        .filter(r => !activeOnly || r.isActive)
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(templateModel)
+      return ok(rows)
+    }
+    if (method === 'POST' && path === '/v1/task-templates') {
+      if (!isAdmin) throw forbidden('admin access required')
+      const name = asTrimmed(body.name)
+      if (!name) throw badRequest('name is required')
+      if (name.length > 120) throw badRequest('name must be at most 120 characters')
+      const content = decodeTemplateContent(body.content)
+      const recurrence = body.recurrence == null ? null : decodeRecurrence(body.recurrence)
+      const isActive = body.isActive === undefined ? true : Boolean(body.isActive)
+      if (isActive) previewTemplateContent(actor, hotelRef, content)
+      if (taskTemplates.some(r => r.hotelRef === hotelRef && !r.isArchived && r.name.toLowerCase() === name.toLowerCase())) throw conflict('a task template with this name already exists')
+      const at = nowIso()
+      const row: TemplateRow = { id: newId(), hotelRef, name, isActive, scope: 'shared', content, recurrence, nextRunAt: isActive && recurrence ? nextRunAfter(recurrence, hotelTimezone(hotelRef), Date.now()) : null, lastRunAt: null, lastOccurrenceAt: null, lastTaskId: null, lastError: null, createdBy: actor.staffId, ownerStaffId: null, isArchived: false, createdAt: at, updatedAt: at }
+      taskTemplates.push(row)
+      return ok(templateModel(row), 201)
+    }
+    const match = /^\/v1\/task-templates\/([^/]+)$/.exec(path)
+    if (!match) throw new ApiError('NOT_FOUND', '404 page not found', true)
+    const row = isUuid(match[1]) ? taskTemplates.find(r => r.id === match[1]!.toLowerCase() && r.hotelRef === hotelRef && !r.isArchived) : undefined
+    if (!row) throw notFound('task template')
+    if (method === 'GET') return ok(templateModel(row))
+    if (!isAdmin) throw forbidden('admin access required')
+    if (method === 'PUT') {
+      // Full replace; an admin may edit personal ones too. A personal
+      // template is validated AS its owner and keeps its owner and its
+      // task-derived name.
+      const content = decodeTemplateContent(body.content)
+      const recurrence = body.recurrence == null ? null : decodeRecurrence(body.recurrence)
+      const isActive = body.isActive === undefined ? row.isActive : Boolean(body.isActive)
+      let name = row.name
+      if (row.ownerStaffId) {
+        const owner = account(row.ownerStaffId)
+        const ownerActor = owner ? staffActor(owner, null, hotelRef) : actor
+        if (isActive) name = previewTemplateContent(ownerActor, hotelRef, content) || name
+      }
+      else {
+        name = asTrimmed(body.name)
+        if (!name) throw badRequest('name is required')
+        if (name.length > 120) throw badRequest('name must be at most 120 characters')
+        if (isActive) previewTemplateContent(actor, hotelRef, content)
+        if (taskTemplates.some(r => r.id !== row.id && r.hotelRef === hotelRef && !r.isArchived && r.name.toLowerCase() === name.toLowerCase())) throw conflict('a task template with this name already exists')
+      }
+      Object.assign(row, { name, content, recurrence, isActive, updatedAt: nowIso() })
+      if (isActive) row.lastError = null
+      row.nextRunAt = isActive && recurrence ? nextRunAfter(recurrence, hotelTimezone(hotelRef), Date.now()) : null
+      return ok(templateModel(row))
+    }
+    if (method === 'DELETE') {
+      row.isArchived = true
+      row.isActive = false
+      row.updatedAt = nowIso()
+      return noContent()
+    }
+  }
+
+  if (path === '/v1/recurring-tasks' || path.startsWith('/v1/recurring-tasks/')) {
+    const hotelRef = hotelFor(ctx)
+    if (actor.isService || !actor.staffId) throw forbidden('recurring tasks belong to a staff member')
+    const mine = (r: TemplateRow) => r.hotelRef === hotelRef && !r.isArchived && r.scope === 'personal' && r.ownerStaffId === actor.staffId
+    if (method === 'GET' && path === '/v1/recurring-tasks') {
+      return ok(taskTemplates.filter(mine).sort((a, b) => a.name.localeCompare(b.name)).map(templateModel))
+    }
+    if (method === 'POST' && path === '/v1/recurring-tasks') {
+      if (actor.role === 'staff' && !actor.createTask) throw forbidden('forbidden')
+      if (body.recurrence == null) throw badRequest('recurrence is required for a recurring task')
+      const content = decodeTemplateContent(body.content)
+      const recurrence = decodeRecurrence(body.recurrence)
+      const isActive = body.isActive === undefined ? true : Boolean(body.isActive)
+      // Validated AS the owner (plain staff may assign only themselves or
+      // their own team); a personal template is named after its task.
+      const name = (isActive ? previewTemplateContent(actor, hotelRef, content) : content.title) || 'Recurring task'
+      const at = nowIso()
+      const row: TemplateRow = { id: newId(), hotelRef, name: name.slice(0, 120), isActive, scope: 'personal', content, recurrence, nextRunAt: null, lastRunAt: null, lastOccurrenceAt: null, lastTaskId: null, lastError: null, createdBy: actor.staffId, ownerStaffId: actor.staffId, isArchived: false, createdAt: at, updatedAt: at }
+      // The first task is made NOW; the schedule continues from here.
+      const first = createTaskFromTemplate(row, actor, null, at)
+      row.lastTaskId = first.id
+      row.nextRunAt = isActive ? nextRunAfter(recurrence, hotelTimezone(hotelRef), Date.now()) : null
+      taskTemplates.push(row)
+      return ok({ template: templateModel(row), taskId: first.id }, 201)
+    }
+    const match = /^\/v1\/recurring-tasks\/([^/]+)$/.exec(path)
+    if (!match) throw new ApiError('NOT_FOUND', '404 page not found', true)
+    // Someone else's id gives 404.
+    const row = isUuid(match[1]) ? taskTemplates.find(r => r.id === match[1]!.toLowerCase() && mine(r)) : undefined
+    if (!row) throw notFound('recurring task')
+    if (method === 'GET') return ok(templateModel(row))
+    if (method === 'PUT') {
+      if (body.recurrence == null) throw badRequest('recurrence is required for a recurring task')
+      const content = decodeTemplateContent(body.content)
+      const recurrence = decodeRecurrence(body.recurrence)
+      const isActive = body.isActive === undefined ? row.isActive : Boolean(body.isActive)
+      const name = isActive ? previewTemplateContent(actor, hotelRef, content) || row.name : row.name
+      Object.assign(row, { name: name.slice(0, 120), content, recurrence, isActive, updatedAt: nowIso() })
+      if (isActive) row.lastError = null
+      row.nextRunAt = isActive ? nextRunAfter(recurrence, hotelTimezone(hotelRef), Date.now()) : null
+      return ok(templateModel(row))
+    }
+    if (method === 'DELETE') {
+      row.isArchived = true
+      row.isActive = false
+      row.updatedAt = nowIso()
+      return noContent()
+    }
+  }
+
+  // ── Projects (30e5aa1–fe5e99d). Staff only.
+  if (path === '/v1/projects' || path.startsWith('/v1/projects/')) {
+    const hotelRef = hotelFor(ctx)
+    if (actor.isService || !actor.staffId) throw forbidden('projects require a staff identity')
+    const role = roleAt(actor.staffId, hotelRef)
+    const isAdmin = role === 'admin'
+    const at = nowIso()
+
+    if (method === 'GET' && path === '/v1/projects') {
+      const status = (ctx.query.status || 'ACTIVE').toUpperCase()
+      if (!PROJECT_STATUSES.includes(status as ProjectStatus)) throw badRequest('status must be ACTIVE, COMPLETED or CANCELLED')
+      const rows = projects
+        .filter(p => p.hotelRef === hotelRef && p.status === status)
+        .filter(p => isAdmin || isProjectMember(p.id, actor.staffId))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(p => projectModel(p, actor, hotelRef))
+      return ok(rows)
+    }
+    if (method === 'POST' && path === '/v1/projects') {
+      if (!isAdmin && role !== 'leader') throw forbidden('only admins and leaders can create projects')
+      const name = asTrimmed(body.name)
+      if (!name || name.length > 120) throw badRequest('name is required (1-120 characters)')
+      const startDate = asLocalDate(body.startDate, 'startDate')
+      const endDate = asLocalDate(body.endDate, 'endDate')
+      if (startDate && endDate && endDate < startDate) throw badRequest('endDate must not be before startDate')
+      const members = Array.isArray(body.members) ? body.members as Array<Record<string, unknown>> : []
+      const seen = new Set<Id>([actor.staffId!])
+      for (const m of members) {
+        if (m.level !== 'MEMBER' && m.level !== 'VIEWER') throw badRequest('member level must be MEMBER or VIEWER')
+        const staffId = isUuid(m.staffId) ? m.staffId.toLowerCase() : ''
+        if (!staffId || seen.has(staffId)) throw badRequest('members must be distinct and must not include the creator')
+        seen.add(staffId)
+        if (!staffInHotel(staffId, hotelRef)) throw unprocessable('staff member is not an active member of this property')
+      }
+      // Only ACTIVE projects hold a name; a completed one may be reused.
+      if (activeProjectNameTaken(hotelRef, name)) throw conflict('an active project with this name already exists')
+      const project: ProjectRow = { id: newId(), hotelRef, name, description: asNullableTrimmed(body.description), startDate, endDate, status: 'ACTIVE', completedAt: null, createdBy: actor.staffId, createdAt: at, updatedAt: at }
+      projects.push(project)
+      // The creator becomes the manager.
+      projectMembers.push({ projectId: project.id, staffId: actor.staffId!, level: 'MANAGER', source: 'MANUAL', addedBy: actor.staffId, addedAt: at })
+      for (const m of members) {
+        projectMembers.push({ projectId: project.id, staffId: String(m.staffId).toLowerCase(), level: m.level as ProjectLevel, source: 'MANUAL', addedBy: actor.staffId, addedAt: at })
+      }
+      return ok(projectModel(project, actor, hotelRef), 201)
+    }
+
+    const match = /^\/v1\/projects\/([^/]+)(?:\/(board|members|manager|tasks|complete|cancel|reopen)(?:\/([^/]+))?)?$/.exec(path)
+    if (!match) throw new ApiError('NOT_FOUND', '404 page not found', true)
+    if (!isUuid(match[1])) throw badRequest('invalid id')
+    const project = findVisibleProject(actor, hotelRef, match[1])
+    const sub = match[2]
+    const subId = match[3]
+    const touch = () => { project.updatedAt = at }
+
+    if (!sub) {
+      if (method === 'GET') return ok(projectModel(project, actor, hotelRef))
+      if (method === 'PATCH') {
+        // Absent keeps, null clears (not name). Works on closed projects.
+        requireProjectManagerOrAdmin(actor, hotelRef, project)
+        if (body.name !== undefined) {
+          if (body.name === null) throw badRequest('name cannot be cleared')
+          const name = asTrimmed(body.name)
+          if (!name || name.length > 120) throw badRequest('name is required (1-120 characters)')
+          if (project.status === 'ACTIVE' && activeProjectNameTaken(hotelRef, name, project.id)) throw conflict('an active project with this name already exists')
+          project.name = name
+        }
+        if (body.description !== undefined) project.description = body.description === null ? null : asNullableTrimmed(body.description)
+        if (body.startDate !== undefined) project.startDate = body.startDate === null ? null : asLocalDate(body.startDate, 'startDate')
+        if (body.endDate !== undefined) project.endDate = body.endDate === null ? null : asLocalDate(body.endDate, 'endDate')
+        if (project.startDate && project.endDate && project.endDate < project.startDate) throw badRequest('endDate must not be before startDate')
+        touch()
+        return ok(projectModel(project, actor, hotelRef))
+      }
+    }
+
+    if (method === 'POST' && (sub === 'complete' || sub === 'cancel' || sub === 'reopen') && !subId) {
+      requireProjectManagerOrAdmin(actor, hotelRef, project)
+      if (sub === 'complete') {
+        if (project.status !== 'ACTIVE') throw conflict('only an active project can be completed or cancelled')
+        // Allowed with open tasks; the response says how many so the screen can warn.
+        const openTasks = tasks.filter(t => t.projectId === project.id && !CLOSED_TASK_STATUSES.has(t.status)).length
+        project.status = 'COMPLETED'
+        project.completedAt = at
+        touch()
+        return ok(projectModel(project, actor, hotelRef, { openTasks }))
+      }
+      if (sub === 'cancel') {
+        if (project.status !== 'ACTIVE') throw conflict('only an active project can be completed or cancelled')
+        project.status = 'CANCELLED'
+        touch()
+        return ok(projectModel(project, actor, hotelRef))
+      }
+      if (project.status === 'ACTIVE') throw conflict('project is already active')
+      if (activeProjectNameTaken(hotelRef, project.name, project.id)) throw conflict('an active project with this name already exists')
+      project.status = 'ACTIVE'
+      project.completedAt = null
+      touch()
+      return ok(projectModel(project, actor, hotelRef))
+    }
+
+    if (method === 'GET' && sub === 'board' && !subId) {
+      // Same Board shape as /v1/kanban-board; cards come from GET /v1/tasks?projectId=.
+      const board = boards.find(b => b.hotelRef === hotelRef)
+      if (!board) throw notFound('kanban board')
+      const columns = boardColumns.filter(c => c.boardId === board.id && !c.isRemoved).sort((a, b) => a.columnSort - b.columnSort || a.id.localeCompare(b.id))
+      return ok({ ...board, columns: nullIfEmpty(columns) })
+    }
+
+    if (sub === 'members') {
+      const rows = () => projectMembers
+        .filter(m => m.projectId === project.id)
+        .map(projectMemberModel)
+        .sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || a.name.localeCompare(b.name) || a.staffId.localeCompare(b.staffId))
+      if (method === 'GET' && !subId) return ok(rows())
+      if ((method === 'PUT' || method === 'DELETE') && subId) {
+        requireProjectManagerOrAdmin(actor, hotelRef, project)
+        if (!isUuid(subId)) throw badRequest('invalid staffId')
+        const staffId = subId.toLowerCase()
+        if (project.status !== 'ACTIVE') throw unprocessable('project is closed; reopen it first')
+        const existing = projectMembers.find(m => m.projectId === project.id && m.staffId === staffId)
+        if (existing?.level === 'MANAGER') throw conflict(method === 'PUT' ? 'the project manager is changed by handing the project over' : 'the project manager cannot be removed; hand the project over first')
+        if (method === 'PUT') {
+          if (body.level !== 'MEMBER' && body.level !== 'VIEWER') throw badRequest('level must be MEMBER or VIEWER')
+          if (!staffInHotel(staffId, hotelRef)) throw unprocessable('staff member is not an active member of this property')
+          if (existing) {
+            existing.level = body.level
+            existing.source = 'MANUAL'
+          }
+          else {
+            projectMembers.push({ projectId: project.id, staffId, level: body.level, source: 'MANUAL', addedBy: actor.staffId, addedAt: at })
+          }
+          touch()
+          return ok(rows())
+        }
+        if (!existing) throw notFound('project member')
+        projectMembers.splice(projectMembers.indexOf(existing), 1)
+        touch()
+        return ok(rows())
+      }
+    }
+
+    if (method === 'POST' && sub === 'manager' && !subId) {
+      requireProjectManagerOrAdmin(actor, hotelRef, project)
+      if (!isUuid(body.staffId)) throw badRequest('staffId is required')
+      const targetId = body.staffId.toLowerCase()
+      const target = projectMembers.find(m => m.projectId === project.id && m.staffId === targetId)
+      if (!target) throw unprocessable('the new project manager must already be a project member')
+      // The old manager becomes a MEMBER.
+      for (const m of projectMembers) if (m.projectId === project.id && m.level === 'MANAGER') m.level = 'MEMBER'
+      target.level = 'MANAGER'
+      touch()
+      return ok(projectModel(project, actor, hotelRef))
+    }
+
+    if (sub === 'tasks') {
+      const isManager = projectMembers.some(m => m.projectId === project.id && m.staffId === actor.staffId && m.level === 'MANAGER')
+      if (method === 'POST' && !subId) {
+        // Manager, admin, or a member with create-task; the ordinary pipeline.
+        const level = projectMembers.find(m => m.projectId === project.id && m.staffId === actor.staffId)?.level ?? null
+        if (level === 'VIEWER' && !isAdmin) throw forbidden('viewers cannot add tasks to a project')
+        const mayCreate = isAdmin || isManager || (level === 'MEMBER' && (actor.role !== 'staff' || actor.createTask))
+        if (!mayCreate) throw forbidden('forbidden')
+        if (project.status !== 'ACTIVE') throw unprocessable('project is closed; reopen it first')
+        const assignee = validateAssignAtCreation(actor, hotelRef, body.assignee as AssigneeInput | null | undefined)
+        const resolved = resolveTask(hotelRef, decodeStaffCreateRequest(ctx, 'staff'))
+        const t = resolved.task
+        t.projectId = project.id
+        tasks.push(t)
+        resolved.checklistLabels.forEach((label, index) => {
+          checklistItems.push({ id: newId(), hotelRef, taskId: t.id, sort: index, label, isDone: false, doneBy: null, doneAt: null, assignedStaffId: null, assignedStaffName: null, assignedBy: null, assignedAt: null, note: null, createdAt: t.createdAt, updatedAt: t.createdAt })
+        })
+        pushHistory(t, actor.staffId, 'NEW', null, t.createdAt)
+        if (assignee?.kind === 'STAFF') assignStaffToTask(actor, t, assignee.staffId, null, actor.staffId, t.createdAt)
+        else if (assignee?.kind === 'TEAM') taskAssignments.push({ id: newId(), taskId: t.id, kind: 'TEAM', staffId: null, teamId: assignee.teamId, hotelDepartmentId: null, assignedBy: actor.staffId, actingUser: null, remark: null, isActive: true, createdAt: t.createdAt })
+        touch()
+        return ok(taskListItem(t), 201, { warnings: resolved.warnings })
+      }
+      if ((method === 'PUT' || method === 'DELETE') && subId) {
+        if (!isUuid(subId)) throw badRequest('invalid taskId')
+        const canManage = isAdmin || isManager
+        if (method === 'PUT') {
+          if (!canManage) throw forbidden('only the project manager or an admin can add existing tasks')
+          if (project.status !== 'ACTIVE') throw unprocessable('project is closed; reopen it first')
+          const t = findHotelTask(hotelRef, subId)
+          if (t.sourceChannel !== 'staff') throw unprocessable('only staff-created tasks can join a project; guest requests stay on the hotel board')
+          if (t.projectId === project.id) return ok(taskListItem(t))
+          if (t.projectId) throw conflict(`task is already in project "${projects.find(p => p.id === t.projectId)?.name ?? ''}"; remove it there first`)
+          t.projectId = project.id
+          t.updatedAt = at
+          const holder = activeAssignment(t.id)
+          if (holder?.kind === 'STAFF' && holder.staffId) ensureAutoMember(t, holder.staffId, actor.staffId, at)
+          touch()
+          return ok(taskListItem(t))
+        }
+        if (!canManage) throw forbidden('only the project manager or an admin can remove tasks')
+        const t = tasks.find(row => row.id === subId.toLowerCase() && row.hotelRef === hotelRef)
+        if (!t || t.projectId !== project.id) throw notFound('task is not in this project')
+        // Back to the hotel board.
+        t.projectId = null
+        t.updatedAt = at
+        touch()
+        return ok(taskListItem(t))
+      }
+    }
+    throw new ApiError('NOT_FOUND', '404 page not found', true)
   }
 
   return null
@@ -3835,14 +5390,19 @@ export function handleFakeApiRequest(path: string, opts: RequestOpts = {}): Fake
   const needsActor = !RAW_ROUTES.has(`${method} ${path}`)
   const actor: Actor = needsActor
     ? resolveActor(headers)
-    : { isService: false, actingUser: '', staffId: null, role: 'staff', deptId: null, createTask: false, hotels: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
+    : { isService: false, actingUser: '', staffId: null, role: 'staff', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
 
   const ctx: Ctx = { method, path, body, headers, query, actor }
   if (needsActor) checkCsrf(ctx)
 
+  // The recurring-task worker, run lazily: due templates create their tasks
+  // before any read that could show them (go run ./cmd/worker, in effect).
+  if (needsActor) runDueTemplates()
+
   const response = handleAuthAndStaff(ctx)
     ?? handlePlatform(ctx)
     ?? handleConfig(ctx)
+    ?? handleProjects(ctx)
     ?? handleTasks(ctx)
   if (response) return response
 
@@ -3864,7 +5424,7 @@ export interface DemoLogin {
 export function demoLogins(): DemoLogin[] {
   return staffAccounts
     .filter(s => s.isActive && ['staff@aston.example', 'leader@aston.example', 'admin@aston.example', 'operator@sentineltech.example', 'regional@aston.example'].includes(s.email))
-    .map(s => ({ email: s.email, password: s.password, name: s.name, role: s.role, isOperator: s.isOperator }))
+    .map(s => ({ email: s.email, password: s.password, name: s.name, role: staffHotels.find(r => r.staffId === s.id)?.role ?? (s.isOperator ? 'admin' : 'staff'), isOperator: s.isOperator }))
 }
 
 /** Hotel names for pickers — resolved locally, since /v1/platform/tenants is operator-only. */

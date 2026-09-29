@@ -19,6 +19,7 @@ const SHARED = [
   'app/composables/useTasksApi.ts',
   'app/composables/useCaps.ts',
   'app/composables/useTheme.ts',
+  'app/composables/useTenant.ts',
   'app/plugins/session.client.ts',
   'app/utils/clientFakeApi.ts',
   'app/utils/task-ui.ts',

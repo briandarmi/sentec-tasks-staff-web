@@ -6,11 +6,14 @@ import { useSession } from '~/composables/useSession'
 interface Option { id: string, label: string, detail: string | null }
 
 /**
- * A person picker over GET /v1/staff/assignable — which is leader/admin-only.
- * A plain staff member (delegating, or adding a helper) gets the real 403, so
- * this control degrades honestly: it falls back to the caller's own teams'
- * member lists (/v1/teams + /v1/teams/{id}/members are open to any actor),
- * which carry ids but no names — the API exposes no staff directory to staff.
+ * A person picker over GET /v1/staff/assignable — leader/admin-only, unless
+ * the call names a task the caller holds (`taskId`) or a project they manage
+ * (`projectId`): feat/projects widens the route for exactly those two. A
+ * plain staff member with neither (delegating, or adding a helper as a
+ * helper) gets the real 403, so this control degrades honestly: it falls back
+ * to the caller's own teams' member lists (/v1/teams + /v1/teams/{id}/members
+ * are open to any actor), which carry ids but no names — the API exposes no
+ * staff directory to staff.
  */
 const props = defineProps<{
   modelValue: string
@@ -18,6 +21,12 @@ const props = defineProps<{
   exclude?: string[]
   placeholder?: string
   ariaLabel?: string
+  /** Narrow the directory to one department (the API's own filter). */
+  departmentId?: string | null
+  /** Lets the task's current assignee call the directory. Does not filter. */
+  taskId?: string | null
+  /** Lets the project's manager call the directory. Does not filter. */
+  projectId?: string | null
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [string] }>()
@@ -40,7 +49,7 @@ async function load() {
   errorMessage.value = ''
   teamFallback.value = false
   try {
-    const rows = await api.listAssignableStaff()
+    const rows = await api.listAssignableStaff(props.departmentId ?? null, { taskId: props.taskId, projectId: props.projectId })
     options.value = rows.map(row => ({ id: row.id, label: row.name, detail: row.role }))
   }
   catch {

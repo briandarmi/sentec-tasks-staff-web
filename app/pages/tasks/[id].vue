@@ -3,9 +3,11 @@ import { computed, onMounted, ref } from 'vue'
 import {
   ArrowLeftIcon,
   ArrowRightLeftIcon,
+  FolderKanbanIcon,
   HandIcon,
   InfoIcon,
   MapPinIcon,
+  RepeatIcon,
   RotateCcwIcon,
   SendIcon,
   UserRoundIcon,
@@ -15,8 +17,8 @@ import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
 import { useSourceApps } from '~/composables/useSourceApps'
-import type { BoardColumn, TaskDetail } from '~/utils/clientFakeApi'
-import { displayName, initials, isClaimable, priorityMeta, relativeTime, taskRef } from '~/utils/task-ui'
+import type { BoardColumn, ProjectLevel, TaskDetail } from '~/utils/clientFakeApi'
+import { displayName, formatDateTime, initials, isClaimable, priorityMeta, relativeTime, taskRef } from '~/utils/task-ui'
 
 definePageMeta({ title: 'Task' })
 
@@ -49,6 +51,21 @@ const assignment = computed(() => task.value?.assignment ?? null)
 const isMine = computed(() => assignment.value?.kind === 'STAFF' && assignment.value.staffId === session.userId.value)
 const isHelper = computed(() => Boolean(task.value?.collaborators?.some(c => c.staffId === session.userId.value)))
 const heldBySomeoneElse = computed(() => assignment.value?.kind === 'STAFF' && !isMine.value)
+
+/**
+ * The viewer's standing in the task's project (feat/projects). Fetched only
+ * when the task carries a project: the manager passes every leader check on
+ * its tasks (assign, move, helpers, checklist), members may comment, viewers
+ * may not. `null` for a non-member admin and when the read is refused.
+ */
+const projectLevel = ref<ProjectLevel | null>(null)
+const isProjectManager = computed(() => projectLevel.value === 'MANAGER')
+/** Comments are for members and managers; a viewer follows the work and does not write on it. */
+const canComment = computed(() => !(task.value?.project && projectLevel.value === 'VIEWER'))
+/** Leader rights on THIS task: the property's leaders and admins, plus the project's manager. */
+const leadsThisTask = computed(() => caps.isLeader.value || isProjectManager.value)
+/** Just created with Repeat on: say where the schedule lives, once. */
+const repeatsNotice = computed(() => route.query.repeats === '1')
 /** The pool this task sits in, when it does — what the Claim button names. */
 const poolName = computed(() => {
   const a = assignment.value
@@ -94,20 +111,22 @@ const returnError = ref('')
  */
 const moveColumns = computed(() => columns.value.filter((column) => {
   if (!column.status || column.status === 'NEW' || column.status === 'SUBMITTED') return false
-  if (column.status === 'VERIFIED' && !caps.isLeader.value) return false
+  if (column.status === 'VERIFIED' && !leadsThisTask.value) return false
   if (task.value?.status === 'SUBMITTED' && !['PENDING', 'CANCELLED'].includes(column.status)) return false
   return true
 }))
 const canMove = computed(() => Boolean(
   task.value
   && moveColumns.value.length
-  && (caps.isLeader.value || (isMine.value && task.value.status !== 'SUBMITTED')),
+  && (leadsThisTask.value || (isMine.value && task.value.status !== 'SUBMITTED')),
 ))
+/** Assign is a leader action — and the project manager's, on the project's tasks. */
+const canAssign = computed(() => caps.canAssign.value || (isProjectManager.value && caps.canWork.value))
 
 /** Helper changes close with the task — but SUBMITTED still takes them. */
 const HELPER_CLOSED = new Set(['FINISHED', 'VERIFIED', 'CANCELLED'])
 const canManageHelpers = computed(() => Boolean(
-  task.value && !HELPER_CLOSED.has(task.value.status) && (isMine.value || caps.isLeader.value),
+  task.value && !HELPER_CLOSED.has(task.value.status) && (isMine.value || leadsThisTask.value),
 ))
 
 async function load() {
@@ -116,6 +135,7 @@ async function load() {
   try {
     task.value = await api.getTask(id.value)
     void sourceApps.ensureLoaded()
+    void loadProjectLevel()
     try {
       columns.value = (await api.getKanbanBoard()).columns
     }
@@ -131,6 +151,21 @@ async function load() {
   }
   finally {
     isLoading.value = false
+  }
+}
+
+/** The project's own read carries `myLevel`; a refusal just means no project rights here. */
+async function loadProjectLevel() {
+  const projectId = task.value?.project?.id
+  if (!projectId) {
+    projectLevel.value = null
+    return
+  }
+  try {
+    projectLevel.value = (await api.getProject(projectId)).myLevel ?? null
+  }
+  catch {
+    projectLevel.value = null
   }
 }
 
@@ -214,11 +249,7 @@ function applyDetail(detail: TaskDetail) {
 }
 
 /** Absolute due times: staff plan the corridor route around clock time, not a countdown. */
-function formatAbsolute(iso: string | null | undefined) {
-  if (!iso) return '—'
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-}
+const formatAbsolute = formatDateTime
 
 onMounted(load)
 </script>
@@ -288,6 +319,16 @@ onMounted(load)
           <p class="text-xs font-medium text-muted-foreground">
             {{ taskRef(task.id) }} · opened {{ relativeTime(task.createdAt) }}
           </p>
+          <!-- A project task has left the hotel board; the chip is the way back
+               to where its siblings are. -->
+          <NuxtLink
+            v-if="task.project"
+            :to="`/projects/${task.project.id}`"
+            class="inline-flex min-h-9 max-w-full items-center gap-1.5 self-start rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary transition-colors active:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <FolderKanbanIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span class="truncate">Project · {{ task.project.name }}</span>
+          </NuxtLink>
         </CardHeader>
         <CardContent class="flex flex-wrap gap-1.5">
           <Badge v-if="task.department" variant="outline">{{ task.department.name }}</Badge>
@@ -308,6 +349,17 @@ onMounted(load)
         </AlertDescription>
       </Alert>
 
+      <!-- Straight from "New task" with Repeat on: the first run is this task;
+           the schedule itself lives under Repeats. -->
+      <Alert v-if="repeatsNotice">
+        <RepeatIcon />
+        <AlertTitle>This task repeats</AlertTitle>
+        <AlertDescription class="space-y-2">
+          <p>This is the first run. The next ones are made on the schedule you set.</p>
+          <Button size="sm" variant="outline" @click="navigateTo('/recurring')">Manage repeats</Button>
+        </AlertDescription>
+      </Alert>
+
       <!-- Actions. Claim shows when no PERSON holds the task; a pool claim
            names the pool it is taking from. -->
       <div class="flex flex-wrap gap-2">
@@ -315,7 +367,7 @@ onMounted(load)
           <HandIcon class="h-4 w-4" /> {{ claimLabel }}
         </Button>
         <Button
-          v-if="caps.canAssign.value"
+          v-if="canAssign"
           class="min-h-11 flex-1"
           :variant="canClaim ? 'outline' : 'default'"
           :disabled="acting"
@@ -327,7 +379,7 @@ onMounted(load)
         <Button
           v-if="canMove"
           class="min-h-11 flex-1"
-          :variant="canClaim || caps.canAssign.value ? 'outline' : 'default'"
+          :variant="canClaim || canAssign ? 'outline' : 'default'"
           :disabled="acting"
           @click="moveOpen = true"
         >
@@ -350,7 +402,7 @@ onMounted(load)
         already handling need to know the route exists (ask a leader) rather
         than assume the screen is broken.
       -->
-      <Alert v-if="heldBySomeoneElse && !caps.canAssign.value && !isHelper">
+      <Alert v-if="heldBySomeoneElse && !canAssign && !isHelper">
         <InfoIcon />
         <AlertTitle>{{ displayName(assignment?.staffName) }} is handling this</AlertTitle>
         <AlertDescription>
@@ -382,10 +434,10 @@ onMounted(load)
           <div v-if="assignment?.remark" class="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
             “{{ assignment.remark }}”
           </div>
-          <div v-if="task.guestName" class="flex items-center gap-2">
+          <div v-if="task.requesterName" class="flex items-center gap-2">
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">Requested for</span>
-            <span class="ml-auto truncate font-medium">{{ task.guestName }}</span>
+            <span class="ml-auto truncate font-medium">{{ task.requesterName }}</span>
           </div>
           <!-- Which system raised it, by full name — the badge above only
                marks tasks from elsewhere; this row answers the question for
@@ -428,6 +480,14 @@ onMounted(load)
         </CardContent>
       </Card>
 
+      <ChecklistCard
+        :task="task"
+        :is-assignee="isMine"
+        :is-helper="isHelper"
+        :project-level="projectLevel"
+        @updated="refresh"
+      />
+
       <TaskContextCard :task-id="task.id" />
 
       <DelegateCard :task="task" @updated="refresh" />
@@ -435,6 +495,9 @@ onMounted(load)
       <HelpersCard :task="task" :can-manage="canManageHelpers" @updated="refresh" />
 
       <AttachmentsCard :task="task" @updated="refresh" />
+
+      <!-- Keyed on updatedAt so a claim, return or submit refreshes the split. -->
+      <TimeAttributionCard :key="task.updatedAt" :task-id="task.id" />
 
       <Card>
         <CardHeader class="pb-2"><CardTitle class="text-sm">Activity</CardTitle></CardHeader>
@@ -445,7 +508,7 @@ onMounted(load)
           <TaskTimelineChart :task="task" />
           <Separator />
           <TaskTimeline :task="task" />
-          <div class="flex items-end gap-2">
+          <div v-if="canComment" class="flex items-end gap-2">
             <Textarea
               v-model="comment"
               placeholder="Add a comment…"
@@ -463,6 +526,7 @@ onMounted(load)
               <SendIcon class="h-4 w-4" />
             </Button>
           </div>
+          <p v-else class="text-xs text-muted-foreground">Project viewers can follow this task but not comment on it.</p>
         </CardContent>
       </Card>
 
@@ -479,6 +543,7 @@ onMounted(load)
         :department-id="task.hotelDepartmentId"
         :department-name="task.department?.name ?? null"
         :current-assignee-id="assignment?.staffId ?? null"
+        :task-id="task.id"
         :busy="acting"
         @assign="assign"
       />

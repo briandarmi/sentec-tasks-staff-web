@@ -104,6 +104,7 @@ async function cancel() {
         <StaffSelect
           v-model="toUserId"
           :exclude="session.userId.value ? [session.userId.value] : []"
+          :task-id="task.id"
           placeholder="Offer to…"
           :aria-label="`Staff member to offer ${task.title} to`"
         />

@@ -29,6 +29,28 @@ export default defineNuxtConfig({
       routes: ['/'],
       failOnError: true,
     },
+    /**
+     * `nuxt dev` only; a build ignores it. Forwards /v1/* to the dev API so
+     * the browser sees ONE origin and the API's SameSite=Lax `st_session`
+     * cookie is stored on localhost — calling a Lambda Function URL directly
+     * signs in and then 401s on every following call. The target keeps /v1
+     * because h3 strips the mount prefix; changeOrigin is required because a
+     * Function URL routes on the Host header. See README, "Against the dev API".
+     */
+    devProxy: process.env.NUXT_DEV_API_PROXY
+      ? { '/v1': { target: `${process.env.NUXT_DEV_API_PROXY.replace(/\/+$/, '')}/v1`, changeOrigin: true } }
+      : {},
+  },
+  runtimeConfig: {
+    public: {
+      /**
+       * Where the API is. Empty (the default) keeps the app on the in-browser
+       * mock. For local work against the dev Lambda set it to this app's OWN
+       * dev server (http://localhost:3000 / :3001) and let the devProxy above
+       * carry /v1 across; never point it at the Function URL itself.
+       */
+      apiBase: process.env.NUXT_PUBLIC_API_BASE || '',
+    },
   },
   /**
    * Moves Nuxt's inline bootstrap scripts into external files at prerender time,

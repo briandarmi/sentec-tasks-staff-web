@@ -129,6 +129,7 @@ async function remove(userId: string) {
           <StaffSelect
             v-model="addUserId"
             :exclude="excluded"
+            :task-id="task.id"
             placeholder="Add a helper"
             :aria-label="`Staff member to add as a helper on ${task.title}`"
           />

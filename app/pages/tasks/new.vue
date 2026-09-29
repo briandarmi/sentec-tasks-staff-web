@@ -1,18 +1,121 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowLeftIcon, LockIcon, PlusIcon, Trash2Icon } from '@lucide/vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ArrowLeftIcon, FolderKanbanIcon, LockIcon, PlusIcon, RepeatIcon, Trash2Icon, WandSparklesIcon } from '@lucide/vue'
 import { useTasksApi, type StaffCreateTaskPayload, type TaskPreview } from '~/composables/useTasksApi'
 import { useCaps } from '~/composables/useCaps'
 import { useSession } from '~/composables/useSession'
-import type { Category, CatalogItem, HotelDepartment, Location, LocationType, TaskPriority, Team } from '~/utils/clientFakeApi'
-import { TASK_PRIORITIES, priorityMeta } from '~/utils/task-ui'
+import { useTenant } from '~/composables/useTenant'
+import type { Category, CatalogItem, HotelDepartment, Location, LocationType, Project, TaskPriority, TaskTemplate, TaskTemplateContent, Team } from '~/utils/clientFakeApi'
+import { draftToRecurrence, emptyRecurrenceDraft } from '~/utils/recurrence'
+import type { RecurrenceDraft } from '~/utils/recurrence'
+import { TASK_PRIORITIES, formatDateTime, priorityMeta } from '~/utils/task-ui'
 
 definePageMeta({ title: 'New task' })
 
+const route = useRoute()
 const router = useRouter()
 const api = useTasksApi()
 const caps = useCaps()
 const session = useSession()
+const { tenant } = useTenant()
+
+// ── in a project ─────────────────────────────────────────────────────────────
+
+/**
+ * `?projectId=` from a project's Tasks tab: the task is created through
+ * POST /v1/projects/{id}/tasks (manager, admin, or a member with create-task)
+ * and belongs to the project from the start. The preview is the same
+ * resolver either way.
+ */
+const projectId = computed(() => (typeof route.query.projectId === 'string' ? route.query.projectId : ''))
+const project = ref<Project | null>(null)
+const projectError = ref('')
+
+async function loadProject() {
+  if (!projectId.value) return
+  try {
+    project.value = await api.getProject(projectId.value)
+  }
+  catch (e) {
+    projectError.value = (e as Error).message
+  }
+}
+
+// ── start from a template ────────────────────────────────────────────────────
+
+/** Shared, active templates — the property's standing jobs. Empty or refused: the picker hides. */
+const templates = ref<TaskTemplate[]>([])
+const templateId = ref('')
+
+async function loadTemplates() {
+  try {
+    templates.value = await api.listTaskTemplates({ scope: 'shared', active: true })
+  }
+  catch {
+    templates.value = []
+  }
+}
+
+/**
+ * Prefill from the template's content. The item is set first and the title
+ * after the watcher has had its turn, or the item's name would overwrite the
+ * template's own title. A template's priority counts as a deliberate pick.
+ */
+async function applyTemplate(id: string) {
+  templateId.value = id
+  const template = templates.value.find(t => t.id === id)
+  if (!template) return
+  const content = template.content
+  itemRef.value = content.itemRef ?? ''
+  await nextTick()
+  title.value = content.title
+  description.value = content.description ?? ''
+  if (content.roomNumber) {
+    freeTextLocation.value = true
+    roomNumber.value = content.roomNumber
+    locationRef.value = ''
+  }
+  else {
+    freeTextLocation.value = false
+    roomNumber.value = ''
+    locationRef.value = content.locationRef ?? ''
+  }
+  if (content.priority) {
+    priority.value = content.priority
+    priorityTouched.value = true
+  }
+  quantity.value = content.quantity && content.quantity > 0 ? content.quantity : 1
+  checklist.value = [...content.checklistLabels]
+  const assignee = content.assignee
+  if (assignee?.assigneeKind === 'STAFF' && assignee.assigneeStaffId) {
+    assigneeKind.value = 'STAFF'
+    assigneeStaffId.value = caps.role.value === 'staff' ? session.userId.value ?? '' : assignee.assigneeStaffId
+    assigneeTeamId.value = ''
+  }
+  else if (assignee?.assigneeKind === 'TEAM' && assignee.assigneeTeamId) {
+    assigneeKind.value = 'TEAM'
+    assigneeTeamId.value = assignee.assigneeTeamId
+    assigneeStaffId.value = ''
+    void loadTeams()
+  }
+  else {
+    assigneeKind.value = 'UNASSIGNED'
+    assigneeStaffId.value = ''
+    assigneeTeamId.value = ''
+  }
+}
+
+// ── repeat ───────────────────────────────────────────────────────────────────
+
+/**
+ * With Repeat on, submit goes to POST /v1/recurring-tasks: the API creates a
+ * personal template AND the first task now, then the worker makes the rest
+ * on the schedule. Template content carries no due date, activation date or
+ * requester, so those controls fold away while Repeat is on.
+ */
+const repeat = ref(false)
+const recurrence = ref<RecurrenceDraft>(emptyRecurrenceDraft())
+const recurrenceResult = computed(() => draftToRecurrence(recurrence.value))
 
 const categories = ref<Category[]>([])
 const items = ref<CatalogItem[]>([])
@@ -78,7 +181,7 @@ const locationGroups = computed(() => {
   return [...groupsByType.entries()].map(([name, rows]) => ({ name, rows }))
 })
 
-const canSubmit = computed(() => Boolean(title.value.trim() || selectedItem.value) && !isSubmitting.value)
+const canSubmit = computed(() => Boolean(title.value.trim() || selectedItem.value) && !isSubmitting.value && (!repeat.value || recurrenceResult.value.ok))
 
 // Selecting an item overwrites the title with the item name (never appends);
 // it stays editable, because when it is wrong the person typing knows better.
@@ -155,11 +258,27 @@ function buildPayload(): StaffCreateTaskPayload {
     priority: priorityTouched.value ? priority.value : null,
     quantity: selectedItem.value?.itemQuantity ? quantity.value : null,
     checklistLabels: checklist.value.map(step => step.trim()).filter(Boolean),
-    activationDate: showSchedule.value ? toIso(activationDate.value) : null,
-    dueAt: showSchedule.value ? toIso(dueAt.value) : null,
+    activationDate: showSchedule.value && !repeat.value ? toIso(activationDate.value) : null,
+    dueAt: showSchedule.value && !repeat.value ? toIso(dueAt.value) : null,
     // Sent only when complete: half an assignee previews a 400 the real
     // create would never see.
     ...(assignee ? { assignee } : {}),
+  }
+}
+
+/** The same form as template content: no due date, activation date or requester. */
+function buildTemplateContent(): TaskTemplateContent {
+  const payload = buildPayload()
+  return {
+    title: payload.title,
+    description: payload.description ?? null,
+    itemRef: payload.itemRef ?? null,
+    locationRef: payload.locationRef ?? null,
+    roomNumber: payload.roomNumber ?? null,
+    priority: payload.priority ?? null,
+    quantity: payload.quantity ?? null,
+    checklistLabels: payload.checklistLabels ?? [],
+    assignee: payload.assignee ?? null,
   }
 }
 
@@ -212,7 +331,7 @@ async function runPreview() {
 
 watch(
   // The details note never affects resolution, so it is deliberately not watched.
-  [title, itemRef, locationRef, roomNumber, freeTextLocation, quantity, priority, priorityTouched, requesterName, showSchedule, activationDate, dueAt, checklist, assigneeKind, assigneeStaffId, assigneeTeamId],
+  [title, itemRef, locationRef, roomNumber, freeTextLocation, quantity, priority, priorityTouched, requesterName, showSchedule, activationDate, dueAt, checklist, assigneeKind, assigneeStaffId, assigneeTeamId, repeat],
   () => {
     clearTimeout(previewTimer)
     previewTimer = setTimeout(() => void runPreview(), PREVIEW_DEBOUNCE_MS)
@@ -228,7 +347,7 @@ watch(
  */
 watch(preview, (resolved) => {
   if (requesterTouched.value || !resolved) return
-  requesterName.value = resolved.task.guestName ?? ''
+  requesterName.value = resolved.task.requesterName ?? ''
 })
 
 const requesterAutofilled = computed(() => !requesterTouched.value && requesterName.value !== '')
@@ -238,11 +357,7 @@ onBeforeUnmount(() => {
   previewRequestId += 1
 })
 
-function formatAbsolute(iso: string | null | undefined) {
-  if (!iso) return '—'
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-}
+const formatAbsolute = formatDateTime
 
 /** The preview task carries only hotelDepartmentId — names are an admin read. */
 const departmentName = computed(() => {
@@ -272,6 +387,7 @@ async function load() {
     catch {
       departments.value = []
     }
+    await Promise.all([loadTemplates(), loadProject()])
   }
   catch (e) {
     errorMessage.value = (e as Error).message
@@ -286,7 +402,16 @@ async function submit() {
   isSubmitting.value = true
   errorMessage.value = ''
   try {
-    const created = await api.createTask(buildPayload())
+    if (repeat.value) {
+      if (!recurrenceResult.value.ok) throw new Error(recurrenceResult.value.error)
+      const created = await api.createRecurringTask({ content: buildTemplateContent(), recurrence: recurrenceResult.value.recurrence })
+      // The first task exists now; land on it with the "this repeats" notice.
+      await navigateTo(created.taskId ? { path: `/tasks/${created.taskId}`, query: { repeats: '1' } } : '/recurring')
+      return
+    }
+    const created = projectId.value
+      ? (await api.createProjectTask(projectId.value, buildPayload())).data
+      : await api.createTask(buildPayload())
     await navigateTo(`/tasks/${created.id}`)
   }
   catch (e) {
@@ -321,6 +446,16 @@ onMounted(load)
         <p class="text-xs text-muted-foreground">Routing, SLA, priority and requester resolve automatically — the preview below shows the outcome before you commit.</p>
       </div>
 
+      <!-- Raised from a project: the task belongs to it from the start and
+           will not appear on the hotel board. -->
+      <Alert v-if="projectId" :variant="projectError ? 'destructive' : 'default'">
+        <FolderKanbanIcon />
+        <AlertTitle>{{ projectError ? 'Can\'t open that project' : `In project: ${project?.name ?? '…'}` }}</AlertTitle>
+        <AlertDescription>
+          {{ projectError || 'The task joins the project when it is created and shows on the project\'s board rather than the hotel board.' }}
+        </AlertDescription>
+      </Alert>
+
       <Alert v-if="errorMessage" variant="destructive">
         <AlertTitle>Couldn't create the task</AlertTitle>
         <AlertDescription class="space-y-2">
@@ -336,6 +471,21 @@ onMounted(load)
       </div>
 
       <form v-else class="space-y-4" @submit.prevent="submit">
+        <!-- The property's standing jobs, as a starting point: everything below
+             stays editable once filled in. -->
+        <div v-if="templates.length" class="space-y-2 rounded-lg border border-dashed px-3 py-3">
+          <Label for="template" class="flex items-center gap-1.5"><WandSparklesIcon class="h-3.5 w-3.5" /> Start from a template</Label>
+          <Select :model-value="templateId" @update:model-value="value => applyTemplate(String(value ?? ''))">
+            <SelectTrigger id="template" class="w-full">
+              <SelectValue placeholder="Pick a template (optional)" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="template in templates" :key="template.id" :value="template.id">{{ template.name }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <p class="text-xs text-muted-foreground">Fills in the form below. Change anything before you create the task.</p>
+        </div>
+
         <div class="space-y-2">
           <Label for="item">Catalog item</Label>
           <Select v-model="itemRef">
@@ -395,8 +545,8 @@ onMounted(load)
           <p v-if="selectedItem?.requiresLocation" class="text-xs text-muted-foreground">This item needs a location from the list.</p>
         </div>
 
-        <div class="grid gap-3" :class="selectedItem?.itemQuantity ? 'grid-cols-2' : 'grid-cols-1'">
-          <div class="space-y-2">
+        <div class="grid gap-3" :class="selectedItem?.itemQuantity && !repeat ? 'grid-cols-2' : 'grid-cols-1'">
+          <div v-if="!repeat" class="space-y-2">
             <Label for="requester-name">Requester</Label>
             <Input
               id="requester-name"
@@ -484,7 +634,24 @@ onMounted(load)
           </template>
         </div>
 
-        <div class="space-y-2">
+        <!-- Repeat: a schedule instead of a one-off start. Template content has
+             no due date, activation date or requester, so those fold away. -->
+        <div v-if="!projectId" class="space-y-3 rounded-lg border px-3 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <Label for="repeat" class="flex items-center gap-1.5 text-sm font-semibold"><RepeatIcon class="h-3.5 w-3.5" /> Repeat</Label>
+              <p class="text-xs text-muted-foreground">Make this task again on a schedule. The first one is created now.</p>
+            </div>
+            <Switch id="repeat" v-model="repeat" />
+          </div>
+          <template v-if="repeat">
+            <Separator />
+            <RecurrenceEditor v-model="recurrence" :timezone="tenant?.timezone" id-prefix="new-repeat" />
+            <p class="text-xs text-muted-foreground">Manage or pause it later under Repeats on your profile.</p>
+          </template>
+        </div>
+
+        <div v-if="!repeat" class="space-y-2">
           <button
             v-if="!showSchedule"
             type="button"
@@ -566,7 +733,7 @@ onMounted(load)
                 </div>
                 <div class="flex justify-between gap-2">
                   <dt class="text-muted-foreground">Requester</dt>
-                  <dd class="font-medium">{{ preview.task.guestName ?? 'No guest matched' }}</dd>
+                  <dd class="font-medium">{{ preview.task.requesterName ?? 'No guest matched' }}</dd>
                 </div>
                 <div class="flex justify-between gap-2">
                   <dt class="text-muted-foreground">Respond by</dt>
@@ -593,7 +760,7 @@ onMounted(load)
         </Card>
 
         <Button type="submit" class="min-h-11 w-full" :disabled="!canSubmit">
-          {{ isSubmitting ? 'Creating…' : 'Create task' }}
+          {{ isSubmitting ? 'Creating…' : repeat ? 'Create and repeat' : projectId ? 'Create in project' : 'Create task' }}
         </Button>
       </form>
     </template>

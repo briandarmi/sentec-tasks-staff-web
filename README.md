@@ -19,7 +19,10 @@ There is no server in this workspace; the app runs against an in-browser mock:
 [`app/utils/clientFakeApi.ts`](app/utils/clientFakeApi.ts). Since 2026-09-02
 that mock is **wire-faithful to `sentec-tasks-api`** (Go + PostgreSQL, pinned
 at `master` commit `c3f52ad` plus the passwordless sign-in branch
-`feat/google-and-magic-link-auth` @ `48756a3`, re-aligned 2026-09-16): the
+`feat/google-and-magic-link-auth` @ `48756a3`, re-aligned 2026-09-16, and the
+`feat/projects` branch @ `fe5e99d` — per-hotel roles, projects, checklist
+steps, recurring tasks, hotel time zone, time attribution — reconciled
+2026-09-29 against its Go handlers and openapi.yaml): the
 exact paths, methods, response envelope, UUID ids,
 `X-Hotel-Id` scoping, error codes and message literals, and the serialization
 quirks (`data: null` for an empty task list but `[]` for config lists;
@@ -74,7 +77,7 @@ The seed also carries `made@aston.example` (staff **without** the createTask
 claim) and `joko@aston.example` (Maintenance staff) for exercising the gates.
 
 ```bash
-pnpm test          # 144 tests over this repo's own copy of everything
+pnpm test          # this repo's own copy of everything, plus the staff-only helper specs
 pnpm typecheck     # vue-tsc across app + templates
 pnpm build         # static SPA into .output/public
 pnpm check:shared  # byte-compares the duplicated files with the admin console
@@ -82,7 +85,7 @@ pnpm check:shared  # byte-compares the duplicated files with the admin console
 
 ## Kept in step by hand
 
-Ten files are **duplicated** between this app and the admin console:
+Eleven files are **duplicated** between this app and the admin console:
 
 | File                             | Why both apps need it              |
 | -------------------------------- | ---------------------------------- |
@@ -90,6 +93,7 @@ Ten files are **duplicated** between this app and the admin console:
 | `app/composables/useTasksApi.ts` | Same API contract                  |
 | `app/composables/useCaps.ts`     | Same role model                    |
 | `app/composables/useTheme.ts`    | Same theme storage key             |
+| `app/composables/useTenant.ts`   | Same hotel record and display zone |
 | `app/plugins/session.client.ts`  | Restore before the first route     |
 | `app/utils/clientFakeApi.ts`     | Same mock, same seed data          |
 | `app/utils/task-ui.ts`           | Same status and SLA presentation   |
@@ -111,23 +115,74 @@ repo is not checked out, so a standalone clone still builds).
 | ------------- | --------------------------------------------------------------- |
 | `/`           | My work — assigned to me, plus my department's unclaimed queue   |
 | `/tasks`      | Full list; server-side filters live in the URL, paging is keyset; queue chips carry server totals; optional group-by-source lanes, most urgent lane first |
-| `/tasks/[id]` | Detail: room-first header, claim (pool-aware), assign, return, delegate, helpers, submit / review (with the other pending reviews), move, comment, attach & upload |
-| `/tasks/new`  | Raise a task, with a live preview off the API's own resolver     |
-| `/board`      | Board view of the property's columns                            |
+| `/tasks/[id]` | Detail: room-first header, project chip, claim (pool-aware), assign, return, delegate, helpers, checklist steps (tick / note / hand over / add / remove), submit / review (with the other pending reviews), move, "who held it" time split, comment, attach & upload |
+| `/tasks/new`  | Raise a task, with a live preview off the API's own resolver; start from a shared template; "Repeat" turns it into a recurring task; `?projectId=` raises it inside a project |
+| `/board`      | Board view of the property's columns (project tasks are not on it) |
+| `/projects`   | Projects I belong to (every project, for admins), one status at a time, with progress, late and needs-manager flags; leaders and admins open new ones |
+| `/projects/[id]` | One project: header and progress, edit / complete / cancel / reopen / hand over for the manager or an admin; Board (the property's columns, the project's cards), Tasks (new, add existing, remove) and Members (levels, auto-joined, add / remove) |
+| `/recurring`  | "Repeats": my recurring tasks — schedule, next and last run, pause / resume, edit, archive; the scheduler's `lastError` when it paused one |
 | `/offers`     | Delegation offers waiting on my accept or decline               |
-| `/profile`    | Identity, property switch, theme, sign out                       |
+| `/profile`    | Identity, property switch, the hotel's timezone, Repeats, theme, sign out |
 | `/login`      | The only public route                                            |
 
 Every role uses this app. Individual actions appear or not via `useCaps()` —
-notably `createTask`, a per-account claim plain staff need before they may
-raise work at all.
+notably `createTask`, which since feat/projects is **per property** (read from
+the membership at the selected hotel, like the role itself) and which plain
+staff need before they may raise work at all.
 
 ## What the contract dictates (and this app honors)
 
-- **[DR-15] visibility.** Plain staff see their own claimed work plus their
-  department's unclaimed queue (pool rows included) — never a colleague's
-  claimed tasks. An explicit `assignedStaffId` filter is *clamped* to their own
-  id, and an out-of-scope task detail is the same 404 a missing one gets.
+- **[DR-15] visibility (feat/projects).** Leaders and admins see everything
+  at the hotel. A plain staff member sees: tasks they claimed; unclaimed tasks
+  in their department (returned-to-pool included); unclaimed tasks with **no
+  department, across the whole property**; pools of teams they belong to;
+  tasks with a checklist step handed to them (read-only); and every task of a
+  project they belong to. A colleague's claimed task is never visible.
+  Filtering by department drops the no-department arm, so a filtered list can
+  be smaller than the unfiltered one — intended. An explicit `assignedStaffId`
+  filter is *clamped* to their own id, and an out-of-scope task detail is the
+  same 404 a missing one gets. **Project tasks are left out of the default
+  list and the hotel board**; they show under Mine / Helping, in offers, in
+  detail, and in the project itself. The list's "What shows here" says all of
+  this in the viewer's terms.
+- **Checklist steps.** `TaskDetail.checklist` is the only read. Tick / untick
+  with an optional note (≤ 2000 chars; absent keeps it, null clears it,
+  unticking keeps it); add up to 50 steps of ≤ 200 chars; remove; hand a step
+  to a person in the task's department (any member when it has none) — the
+  task must be claimed first, and the person gets read-only access to the
+  task (they may tick and annotate their own step only) and joins the project
+  automatically if there is one. All four routes 409 once the task is
+  FINISHED / VERIFIED / CANCELLED; SUBMITTED still takes edits. Who may do
+  what is the API's call; `app/utils/checklist-access.ts` mirrors it for what
+  to show.
+- **Projects.** Admins and leaders open them; the creator is the manager.
+  The manager passes every leader / admin check on the project's tasks
+  (assign, move, review, helpers, checklist), so the detail widens those
+  controls for them. Anyone handed a project task by name (assign, claim,
+  accepted offer, helper, checklist step) becomes a MEMBER with
+  `source: AUTO`; team and department pools add nobody. Members and managers
+  comment on project tasks; viewers do not (the comment box hides). Project
+  tasks leave the hotel board and default list. Complete is allowed with open
+  tasks (the response's `openTasks` is shown); reopen 409s on a name clash;
+  membership changes 422 on a closed project; the manager row is changed only
+  through Hand over. People who cannot see a project get 404, not 403. A
+  project task assigned to someone in another department moves to that
+  department, due times unchanged.
+- **Recurring tasks.** "Repeat" on the new-task form posts to
+  `/v1/recurring-tasks`: the API makes a personal template **and the first
+  task now**; the worker makes the rest on the schedule (`timeMinutes` after
+  hotel-local midnight, weekdays with 0 = Sunday, day of month 1–28, optional
+  hotel-local window). Template content has no due date, activation date or
+  requester, and no DEPARTMENT assignee (STAFF / TEAM / UNASSIGNED only; plain
+  staff may assign only themselves or their own team). PUT is a full replace,
+  so pause / resume sends the current content and schedule back. If the owner
+  loses access or the create-task permission, the worker pauses the template
+  and fills `lastError` — /recurring shows it prominently. Shared templates
+  (`scope=shared`, active) are the quick-pick at the top of the form.
+- **Hotel timezone.** Every clock time on screen is the hotel's
+  (`GET /v1/tenant` → `timezone`, via `useTenant()` and the formatters in
+  `task-ui.ts`), not the device's; the profile says which zone. Changing it
+  is an admin action in the admin console.
 - **Claim never steals; assign is the hand-over.** A pool task (TEAM or
   DEPARTMENT) is claimable by its members only; department sync refuses
   cross-department claims/assigns except by an admin.
@@ -146,16 +201,49 @@ raise work at all.
   review is the deciding action, leader-of-the-department or admin.
 - **No free-text search and no department filter on the list.** The search box
   filters the *loaded* rows and says so; the chips map 1:1 to real parameters.
-- **Checklists are write-only.** The API persists checklist rows at creation
-  and returns the labels only in the preview — there is no read endpoint, so
-  the task detail deliberately shows none.
+- **Time attribution.** `GET /v1/tasks/{id}/attribution` — who held the task
+  for how long, in open-hours minutes, from activation to submission (or "so
+  far" while open). The split (unclaimed / pooled / per holder with hold
+  counts) is shown only when `reconciles` is true; otherwise just the total,
+  with a line saying why.
 - **Attachments**: the detail carries non-removed rows only (a removed one is
   gone, not restorable from here); `filepath` may be `""` — preview
   unavailable; uploads are presigned with per-type size caps and the storage
   key's extension comes from the content type, never the filename.
-- **A helper's directory is leaders-only.** `GET /v1/staff/assignable` refuses
-  plain staff, so the delegate/helper pickers degrade to the caller's own
-  teams' member ids, labeled as such.
+- **A helper's directory is leaders-only — with two exceptions.**
+  `GET /v1/staff/assignable` refuses plain staff unless the call names a task
+  they currently hold (`taskId`) or a project they manage (`projectId`);
+  neither filters the list. The detail screen passes `taskId` into every
+  picker, and the project page passes `projectId`. With neither, the
+  delegate / helper pickers degrade to the caller's own teams' member ids,
+  labeled as such.
+
+## Against the dev API
+
+A dev copy of `sentec-tasks-api` (feat/projects) runs on AWS Lambda behind a
+Function URL. The API signs you in with the `SameSite=Lax` `st_session`
+cookie, so the app and the API must look like **one site** to the browser:
+`nuxt dev` proxies `/v1/*` to the Function URL and the app talks to its own
+dev server.
+
+```bash
+cp .env.example .env      # NUXT_DEV_API_PROXY + NUXT_PUBLIC_API_BASE=http://localhost:3000
+pnpm dev                  # then open http://localhost:3000
+```
+
+- Open the app at **http://localhost:3000, never 127.0.0.1** — a different
+  site, so the cookie will not match and the origin is not on the API's
+  allow-list. This app must be on port 3000 (the admin console on 3001).
+- Google and magic-link sign-in come back **through port 3000**
+  (`GOOGLE_REDIRECT_URL` and `API_BASE_URL` on the Lambda point at it), so keep
+  this dev server running for either flow, from the admin console too.
+- The Lambda runs with `MAIL_DEV_CONSOLE=true`: magic links are **not emailed**,
+  they land in the Lambda's CloudWatch log. Use password login if you cannot
+  read that log.
+- With `NUXT_PUBLIC_API_BASE` set the login screen hides its demo accounts,
+  demo inbox and stand-in Google chooser (`useSession().isLive`); the sign-in
+  flows themselves are unchanged. Restart `nuxt dev` after changing `.env`.
+  With both lines unset the app runs on the in-browser mock as before.
 
 ## Auth
 

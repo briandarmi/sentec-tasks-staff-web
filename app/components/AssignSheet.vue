@@ -11,6 +11,12 @@ const props = defineProps<{
   departmentId: string | null
   departmentName: string | null
   currentAssigneeId: string | null
+  /**
+   * The task being assigned. Sent as `taskId` so the directory answers the
+   * task's own assignee and a project manager too, not only leaders — it
+   * never filters the list.
+   */
+  taskId?: string | null
   busy?: boolean
 }>()
 
@@ -47,7 +53,7 @@ async function load() {
   isLoading.value = true
   errorMessage.value = ''
   try {
-    members.value = await api.listAssignableStaff(showAll.value || !props.departmentId ? null : props.departmentId)
+    members.value = await api.listAssignableStaff(showAll.value || !props.departmentId ? null : props.departmentId, { taskId: props.taskId })
   }
   catch (e) {
     errorMessage.value = (e as Error).message

@@ -5,6 +5,7 @@ import type {
   BoardColumn,
   Category,
   CatalogItem,
+  ChecklistItem,
   Collaborator,
   HotelDepartment,
   InboxOffer,
@@ -15,10 +16,14 @@ import type {
   OperatingSchedule,
   OperatingWindow,
   Partner,
+  Project,
+  ProjectMember,
+  ProjectStatus,
   RoutingRule,
   Sla,
   SourceApp,
   Staff,
+  StaffImportRowResult,
   Task,
   TaskAttachment,
   TaskComment,
@@ -28,6 +33,10 @@ import type {
   TaskOffer,
   TaskPriority,
   TaskStatus,
+  TaskTemplate,
+  TaskTemplateContent,
+  TaskTemplateRecurrence,
+  TaskTimeAttribution,
   Team,
   Tenant,
   TenantGroup,
@@ -35,7 +44,8 @@ import type {
 
 /**
  * Typed client for the Sentec Tasks API — paths, methods and shapes are the
- * real contract (openapi @ c3f52ad). Every call goes through
+ * real contract (master @ c3f52ad plus the feat/projects and sign-in
+ * branches, per the 2026-09-28 frontend-impact notes). Every call goes through
  * `useSession().request`, which injects the session cookie, the CSRF echo and
  * the X-Hotel-Id scope. Nothing here takes a role as an argument: the server
  * decides what the caller may do, and the UI only decides what to ask for.
@@ -48,6 +58,8 @@ export interface ListMeta {
 
 export interface TaskQuery {
   status?: TaskStatus | ''
+  /** Admin or project member only; project tasks appear in the default list ONLY with this, assignedStaffId or helping. */
+  projectId?: string
   responseSlaStatus?: string
   resolutionSlaStatus?: string
   columnId?: string
@@ -204,15 +216,27 @@ export function useTasksApi() {
     },
 
     // ── staff ─────────────────────────────────────────────────────────────────
-    async listAssignableStaff(departmentId?: string | null) {
-      return (await req<AssignableStaff[]>('/v1/staff/assignable', { query: clean({ departmentId }) })).data
+    /** `taskId` / `projectId` do not filter; they let the task's assignee or a project manager call this too. */
+    async listAssignableStaff(departmentId?: string | null, context: { taskId?: string | null, projectId?: string | null } = {}) {
+      return (await req<AssignableStaff[]>('/v1/staff/assignable', { query: clean({ departmentId, taskId: context.taskId, projectId: context.projectId }) })).data
     },
     async listStaff() {
       return (await req<Staff[]>('/v1/staff')).data
     },
+    /**
+     * 201 for a new account; 200 when the email already exists — then the
+     * account is attached to the listed hotels and name/password are ignored.
+     * 409 when already at one of those hotels or the account is deactivated.
+     */
     async createStaff(payload: { email: string, name: string, password: string, role: 'staff' | 'leader', hotels: string[], hotelDepartmentId?: string | null, createTask?: boolean }) {
-      return (await req<Staff>('/v1/staff', { method: 'POST', body: payload })).data
+      const res = await session.requestRaw<Staff>('/v1/staff', { method: 'POST', body: payload })
+      return { data: res.body!.data, attached: res.status === 200 }
     },
+    /**
+     * name and isActive are account-wide; role, hotelDepartmentId and
+     * createTask need a hotel (the active one rides in X-Hotel-Id) and change
+     * only that hotel's membership.
+     */
     async updateStaff(id: string, payload: { name?: string, role?: 'staff' | 'leader' | 'admin', hotelDepartmentId?: string | null, createTask?: boolean, isActive?: boolean }) {
       return (await req<Staff>(`/v1/staff/${id}`, { method: 'PATCH', body: payload })).data
     },
@@ -364,5 +388,147 @@ export function useTasksApi() {
       const env = await req<TaskListItem[] | null>(`/v1/groups/${groupId}/tasks`, { query: clean(query as Record<string, unknown>) })
       return { data: env.data ?? [], meta: (env.meta ?? { total: 0 }) as unknown as ListMeta }
     },
+
+    // ── feat/projects: tenant, attribution, checklist, projects, templates ────
+    /** The hotel's own record — `timezone` is the zone every time on screen should be shown in. */
+    async getTenant() {
+      return (await req<TenantSettings>('/v1/tenant')).data
+    },
+    /** Admin at the hotel. Schedules and templates move to the new zone; existing tasks keep their due dates. */
+    async setTenantTimezone(timezone: string) {
+      return (await req<TenantSettings>('/v1/tenant', { method: 'PATCH', body: { timezone } })).data
+    },
+    /** Who held the task for how long. Show the split only when `reconciles` is true. */
+    async getTaskAttribution(id: string) {
+      return (await req<TaskTimeAttribution>(`/v1/tasks/${id}/attribution`)).data
+    },
+
+    async setChecklistDone(payload: { taskId: string, itemId: string, isDone: boolean, note?: string | null }) {
+      return (await req<ChecklistItem>('/v1/tasks/checklist/done', { method: 'POST', body: payload })).data
+    },
+    async addChecklistSteps(taskId: string, labels: string[]) {
+      return (await req<ChecklistItem[]>('/v1/tasks/checklist', { method: 'POST', body: { taskId, labels } })).data
+    },
+    async removeChecklistStep(taskId: string, itemId: string) {
+      await req('/v1/tasks/checklist/remove', { method: 'POST', body: { taskId, itemId } })
+    },
+    /** `staffId: null` unassigns. The task must be claimed first (409). */
+    async assignChecklistStep(taskId: string, itemId: string, staffId: string | null) {
+      return (await req<ChecklistItem>('/v1/tasks/checklist/assign', { method: 'POST', body: { taskId, itemId, staffId } })).data
+    },
+
+    /** One status per call; ACTIVE by default. Admins see every project, others their own. */
+    async listProjects(status: ProjectStatus = 'ACTIVE') {
+      return (await req<Project[] | null>('/v1/projects', { query: { status } })).data ?? []
+    },
+    async getProject(id: string) {
+      return (await req<Project>(`/v1/projects/${id}`)).data
+    },
+    async createProject(payload: { name: string, description?: string | null, startDate?: string | null, endDate?: string | null, members?: Array<{ staffId: string, level: 'MEMBER' | 'VIEWER' }> }) {
+      return (await req<Project>('/v1/projects', { method: 'POST', body: payload })).data
+    },
+    /** Absent keeps, null clears (not name). */
+    async updateProject(id: string, payload: { name?: string, description?: string | null, startDate?: string | null, endDate?: string | null }) {
+      return (await req<Project>(`/v1/projects/${id}`, { method: 'PATCH', body: payload })).data
+    },
+    /** Complete answers with `openTasks`; warn with it. */
+    async completeProject(id: string) {
+      return (await req<Project>(`/v1/projects/${id}/complete`, { method: 'POST' })).data
+    },
+    async cancelProject(id: string) {
+      return (await req<Project>(`/v1/projects/${id}/cancel`, { method: 'POST' })).data
+    },
+    async reopenProject(id: string) {
+      return (await req<Project>(`/v1/projects/${id}/reopen`, { method: 'POST' })).data
+    },
+    async getProjectBoard(id: string) {
+      return (await req<Board & { columns: BoardColumn[] | null }>(`/v1/projects/${id}/board`)).data
+    },
+    async listProjectMembers(id: string) {
+      return (await req<ProjectMember[] | null>(`/v1/projects/${id}/members`)).data ?? []
+    },
+    async setProjectMember(id: string, staffId: string, level: 'MEMBER' | 'VIEWER') {
+      return (await req<ProjectMember[] | null>(`/v1/projects/${id}/members/${staffId}`, { method: 'PUT', body: { level } })).data ?? []
+    },
+    async removeProjectMember(id: string, staffId: string) {
+      return (await req<ProjectMember[] | null>(`/v1/projects/${id}/members/${staffId}`, { method: 'DELETE' })).data ?? []
+    },
+    async handOverProject(id: string, staffId: string) {
+      return (await req<Project>(`/v1/projects/${id}/manager`, { method: 'POST', body: { staffId } })).data
+    },
+    async createProjectTask(id: string, payload: StaffCreateTaskPayload) {
+      const env = await req<TaskListItem>(`/v1/projects/${id}/tasks`, { method: 'POST', body: payload })
+      return { data: env.data, warnings: ((env.meta as { warnings?: string[] | null } | null)?.warnings ?? null) }
+    },
+    /** Adds an existing staff-created task; 409 if in another project, 422 for a guest request. */
+    async addTaskToProject(id: string, taskId: string) {
+      return (await req<TaskListItem>(`/v1/projects/${id}/tasks/${taskId}`, { method: 'PUT' })).data
+    },
+    async removeTaskFromProject(id: string, taskId: string) {
+      return (await req<TaskListItem>(`/v1/projects/${id}/tasks/${taskId}`, { method: 'DELETE' })).data
+    },
+
+    /** `scope` other than shared is admin-only. */
+    async listTaskTemplates(query: { scope?: 'shared' | 'personal' | 'all', active?: boolean } = {}) {
+      return (await req<TaskTemplate[] | null>('/v1/task-templates', { query: clean({ scope: query.scope, active: query.active ? 'true' : undefined }) })).data ?? []
+    },
+    async getTaskTemplate(id: string) {
+      return (await req<TaskTemplate>(`/v1/task-templates/${id}`)).data
+    },
+    async createTaskTemplate(payload: TaskTemplateWrite) {
+      return (await req<TaskTemplate>('/v1/task-templates', { method: 'POST', body: payload })).data
+    },
+    /** Full replace. */
+    async updateTaskTemplate(id: string, payload: TaskTemplateWrite) {
+      return (await req<TaskTemplate>(`/v1/task-templates/${id}`, { method: 'PUT', body: payload })).data
+    },
+    async archiveTaskTemplate(id: string) {
+      await req(`/v1/task-templates/${id}`, { method: 'DELETE' })
+    },
+    /** The caller's own recurring tasks, active and paused. */
+    async listRecurringTasks() {
+      return (await req<TaskTemplate[] | null>('/v1/recurring-tasks')).data ?? []
+    },
+    /** Creates the personal template AND the first task now. */
+    async createRecurringTask(payload: { isActive?: boolean, content: TaskTemplateContent, recurrence: TaskTemplateRecurrence }) {
+      return (await req<{ template: TaskTemplate, taskId?: string | null }>('/v1/recurring-tasks', { method: 'POST', body: payload })).data
+    },
+    async updateRecurringTask(id: string, payload: { isActive?: boolean, content: TaskTemplateContent, recurrence: TaskTemplateRecurrence }) {
+      return (await req<TaskTemplate>(`/v1/recurring-tasks/${id}`, { method: 'PUT', body: payload })).data
+    },
+    async archiveRecurringTask(id: string) {
+      await req(`/v1/recurring-tasks/${id}`, { method: 'DELETE' })
+    },
+
+    /**
+     * Roster import: `.csv` or `.xlsx`, columns email + name required, role /
+     * department / createTask optional. Always 200 once the file parses;
+     * `meta` carries the totals. The hotel comes from the header, never the file.
+     */
+    async importStaff(file: File) {
+      const env = await session.upload<StaffImportRowResult[] | null>('/v1/staff/import', file)
+      return { data: env.data ?? [], meta: (env.meta ?? { total: 0, created: 0, updated: 0, granted: 0, failed: 0 }) as unknown as { total: number, created: number, updated: number, granted: number, failed: number } }
+    },
+    /** A raw file, not the envelope. The .xlsx has a department drop-down. */
+    async downloadStaffImportTemplate(format: 'csv' | 'xlsx') {
+      return session.download('/v1/staff/import/template', { format })
+    },
   }
+}
+
+/** GET /v1/tenant — the hotel's own record. */
+export interface TenantSettings {
+  hotelRef: string
+  name: string
+  timezone: string
+  isActive: boolean
+  createdAt: string
+}
+
+/** POST / PUT /v1/task-templates. */
+export interface TaskTemplateWrite {
+  name: string
+  isActive?: boolean
+  content: TaskTemplateContent
+  recurrence: TaskTemplateRecurrence | null
 }

@@ -92,18 +92,18 @@ describe('creation resolves server-side (staff-create + preview share one pipeli
     const a = admin()
     const created = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204 } }))
     expect(created.roomNumber).toBe('Room 1204')
-    expect(created.guestName).toBe('Amelia Chen')
+    expect(created.requesterName).toBe('Amelia Chen')
     expect(created.locationTypeName).toBe('Guest Room')
   })
 
   it('is silent about a vacant room, and an explicit requester skips the lookup', () => {
     const a = admin()
     const vacant = call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Clean', itemRef: IDS.item.roomCleaning, locationRef: IDS.location.room1102 } })
-    expect(data(vacant).guestName).toBeNull()
+    expect(data(vacant).requesterName).toBeNull()
     // found=false adds NO warning; the meta carries warnings: null.
     expect(vacant.body!.meta).toEqual({ warnings: null })
     const explicit = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204, requesterName: 'Walk-in' } }))
-    expect(explicit.guestName).toBe('Walk-in')
+    expect(explicit.requesterName).toBe('Walk-in')
   })
 
   it('previews the identical resolution without persisting anything', () => {

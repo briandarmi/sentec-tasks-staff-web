@@ -117,7 +117,7 @@ export function relativeTime(iso: string | null | undefined, nowMs = Date.now())
   if (abs < hour) return `${prefix}${Math.round(abs / minute)}m ${suffix}`.trim()
   if (abs < day) return `${prefix}${Math.round(abs / hour)}h ${suffix}`.trim()
   if (abs < 30 * day) return `${prefix}${Math.round(abs / day)}d ${suffix}`.trim()
-  return new Date(then).toLocaleDateString()
+  return formatShortDate(then)
 }
 
 /**
@@ -142,12 +142,73 @@ export function dueIn(iso: string | null, nowMs = Date.now()): { label: string, 
   return diff >= 0 ? { label: `${value} left`, overdue: false } : { label: `${value} over`, overdue: true }
 }
 
-/** Wall-clock "HH:MM" in the viewer's zone; '—' when there is nothing to show. */
+// ── The display zone ────────────────────────────────────────────────────────
+//
+// Every clock time on screen is the HOTEL's (GET /v1/tenant → timezone), not
+// the device's: a due time read on a phone left on Singapore time must still
+// say what the corridor clock says. `useTenant()` points this at the selected
+// hotel's zone; with nothing set (signed out, the tenant read refused), the
+// device zone is the fallback.
+
+let displayTimeZone: string | null = null
+
+/** Point the time helpers at a zone (an IANA name), or null for the device's. */
+export function setDisplayTimeZone(timeZone: string | null) {
+  displayTimeZone = timeZone && isKnownTimeZone(timeZone) ? timeZone : null
+}
+
+export function getDisplayTimeZone(): string | null {
+  return displayTimeZone
+}
+
+function isKnownTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone })
+    return true
+  }
+  catch {
+    return false
+  }
+}
+
+const zonedFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/** Hour/minute/day/month/year of an instant in the display zone. */
+export function zonedParts(ms: number): { year: number, month: number, day: number, hour: number, minute: number, weekday: number } {
+  const key = displayTimeZone ?? 'device'
+  let formatter = zonedFormatters.get(key)
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', { ...(displayTimeZone ? { timeZone: displayTimeZone } : {}), hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', weekday: 'short' })
+    zonedFormatters.set(key, formatter)
+  }
+  const parts = Object.fromEntries(formatter.formatToParts(new Date(ms)).map(part => [part.type, part.value]))
+  const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), hour: Number(parts.hour) % 24, minute: Number(parts.minute), weekday: weekdays.indexOf(parts.weekday ?? '') }
+}
+
+/** Wall-clock "HH:MM" in the hotel's zone; '—' when there is nothing to show. */
 export function formatClockTime(iso: string | null | undefined): string {
   if (!iso) return '—'
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return '—'
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  const ms = Date.parse(iso)
+  if (Number.isNaN(ms)) return '—'
+  const { hour, minute } = zonedParts(ms)
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+/** "25 Aug" in the hotel's zone. */
+export function formatShortDate(iso: string | number | null | undefined): string {
+  if (iso === null || iso === undefined || iso === '') return '—'
+  const ms = typeof iso === 'number' ? iso : Date.parse(iso)
+  if (Number.isNaN(ms)) return '—'
+  return new Intl.DateTimeFormat(undefined, { ...(displayTimeZone ? { timeZone: displayTimeZone } : {}), day: 'numeric', month: 'short' }).format(new Date(ms))
+}
+
+/** "25 Aug, 14:05" in the hotel's zone — absolute times staff plan a route around. */
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const ms = Date.parse(iso)
+  if (Number.isNaN(ms)) return '—'
+  return `${formatShortDate(ms)}, ${formatClockTime(iso)}`
 }
 
 /** A running clock inside this window reads as "soon" — amber, not yet red. */

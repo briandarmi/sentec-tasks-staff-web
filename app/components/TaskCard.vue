@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { ChevronRightIcon, MapPinIcon } from '@lucide/vue'
+import { ChevronRightIcon, FolderKanbanIcon, MapPinIcon } from '@lucide/vue'
 import type { TaskListItem } from '~/utils/clientFakeApi'
 import { useSourceApps } from '~/composables/useSourceApps'
 import { initials, priorityMeta, relativeTime, slaAccent, taskRef } from '~/utils/task-ui'
@@ -53,6 +53,13 @@ const sourceBadge = computed(() => {
 
     <p class="mt-1.5 text-sm font-semibold leading-snug text-foreground">{{ task.title }}</p>
     <p v-if="task.description" class="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{{ task.description }}</p>
+    <!-- Project tasks leave the hotel board and default list, so this only
+         shows under Mine / Helping and inside the project itself — where a
+         reader still wants to know which project a card belongs to. -->
+    <p v-if="task.project" class="mt-1 flex items-center gap-1 truncate text-[11px] font-medium text-muted-foreground">
+      <FolderKanbanIcon class="h-3 w-3 shrink-0" aria-hidden="true" />
+      <span class="truncate">Project · {{ task.project.name }}</span>
+    </p>
 
     <div class="mt-2.5 flex flex-wrap items-center gap-1.5">
       <StatusPill :status="task.status" />

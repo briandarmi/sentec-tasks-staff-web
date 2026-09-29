@@ -10,7 +10,7 @@ import { ApiError, IDS, demoAllowedOrigins, demoFollowApiLink, demoGoogleCallbac
 // Suites share one mock instance and run in order; each notes what it leaves
 // behind.
 
-interface Session { cookie: string, csrf: string, staff: { id: string, role: string, hotels: string[] } }
+interface Session { cookie: string, csrf: string, staff: { id: string, properties: Array<{ hotelRef: string, name: string }>, memberships: Array<{ hotelRef: string, role: string, hotelDepartmentId: string | null, createTask: boolean }> } }
 
 function login(email: string, password: string): Session {
   const res = call('/v1/auth/staff/login', { method: 'POST', query: { delivery: 'cookie' }, body: { email, password } })
@@ -71,12 +71,33 @@ describe('transport and envelope', () => {
 })
 
 describe('auth model', () => {
-  it('logs in by email, returning the CSRF token and the hotels CLAIM', () => {
+  it('logs in by email, returning the CSRF token, the reach and the per-property memberships', () => {
     const regional = login('regional@aston.example', 'regional123')
-    // Direct staff_hotel row at Kuningan plus the Aston group grant.
-    expect(regional.staff.hotels).toContain(IDS.hotel.kuningan)
-    expect(regional.staff.hotels).toContain(IDS.hotel.simatupang)
+    // The reach (properties) is the membership at Kuningan plus every hotel
+    // of the granted Aston group, sorted by name; the membership list holds
+    // only the hotels with a staff_hotel row — Kuningan, as admin.
+    const reach = regional.staff.properties.map(p => p.hotelRef)
+    expect(reach).toContain(IDS.hotel.kuningan)
+    expect(reach).toContain(IDS.hotel.simatupang)
+    expect(regional.staff.properties.map(p => p.name)).toEqual([...regional.staff.properties.map(p => p.name)].sort())
+    expect(regional.staff.memberships).toEqual([{ hotelRef: IDS.hotel.kuningan, role: 'admin', hotelDepartmentId: null, createTask: true }])
+    // The old account-wide fields are gone from the wire.
+    expect('role' in regional.staff).toBe(false)
+    expect('hotels' in regional.staff).toBe(false)
     expect(regional.csrf.length).toBeGreaterThan(20)
+  })
+
+  it('resolves role, department and createTask from the membership at the X-Hotel-Id hotel', () => {
+    const budi = login('staff@aston.example', 'staff123')
+    // Two memberships, one role each; the header picks which one governs.
+    expect(budi.staff.memberships.map(m => m.hotelRef).sort()).toEqual([IDS.hotel.simatupang, IDS.hotel.kuningan].sort())
+    // Rina is admin at Kuningan only: the admin-only staff list works there…
+    const rina = login('regional@aston.example', 'regional123')
+    expect(call('/v1/staff', { headers: h(rina, IDS.hotel.kuningan) }).status).toBe(200)
+    // …and is refused at Simatupang, which she reaches through the grant alone.
+    expect(errOf(() => call('/v1/staff', { headers: h(rina, IDS.hotel.simatupang) })).message).toBe('admin access required')
+    // A hotel-scoped admin route with NO hotel is a 400 now, where it was 403.
+    expect(errOf(() => call('/v1/slas', { method: 'POST', headers: h(budi), body: { name: 'X', responseTime: 5, resolutionTime: 10 } })).message).toBe('hotel context required')
   })
 
   it('refuses bad credentials and rate-limits after five failures', () => {
@@ -150,9 +171,10 @@ describe('hotel scoping', () => {
     expect(errOf(() => call('/v1/tasks', { headers: h(admin), query: { hotelRef: H } })).message).toBe('hotel context required')
   })
 
-  it('an operator has an empty hotels claim: hotel-scoped routes refuse them', () => {
+  it('an operator has an empty reach and no memberships: hotel-scoped routes refuse them', () => {
     const operator = login('operator@sentineltech.example', 'operator123')
-    expect(operator.staff.hotels).toEqual([])
+    expect(operator.staff.properties).toEqual([])
+    expect(operator.staff.memberships).toEqual([])
     expect(errOf(() => call('/v1/tasks', { headers: h(operator, H) })).message).toBe('no access to this hotel')
   })
 

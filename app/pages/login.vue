@@ -230,8 +230,10 @@ async function followApiLink(url: string) {
             </AlertDescription>
           </Alert>
 
-          <!-- Mock-only: the dev-console transport's outbox, in place of a mailbox. -->
-          <div v-if="demoInbox.length" class="space-y-2 rounded-lg border border-dashed p-3">
+          <!-- Mock-only: the dev-console transport's outbox, in place of a mailbox.
+               Against a real API the link is emailed (or, on the dev Lambda,
+               written to its log), so there is nothing to show here. -->
+          <div v-if="!session.isLive && demoInbox.length" class="space-y-2 rounded-lg border border-dashed p-3">
             <p class="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
               <InboxIcon class="size-3.5" />
               Demo inbox
@@ -318,7 +320,8 @@ async function followApiLink(url: string) {
         </form>
       </CardContent>
 
-      <CardFooter>
+      <!-- Mock-only: the seeded accounts. A real API has real people. -->
+      <CardFooter v-if="!session.isLive">
         <div class="w-full space-y-2 rounded-lg border bg-muted/50 p-3">
           <p class="text-xs font-semibold text-muted-foreground">Demo accounts</p>
           <template v-for="(group, groupIndex) in demoGroups" :key="group.key">
@@ -345,7 +348,7 @@ async function followApiLink(url: string) {
     </Card>
 
     <!-- Mock-only: Google's account chooser. A real deployment navigates to Google instead. -->
-    <Dialog :open="googleConsent !== null" @update:open="open => { if (!open) chooseGoogleIdentity('cancel') }">
+    <Dialog v-if="!session.isLive" :open="googleConsent !== null" @update:open="open => { if (!open) chooseGoogleIdentity('cancel') }">
       <DialogContent class="max-w-sm">
         <DialogHeader>
           <DialogTitle>Choose an account</DialogTitle>

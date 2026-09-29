@@ -196,6 +196,15 @@ const STATUS_TABS: Chip[] = [
   { value: 'VERIFIED', label: 'Verified' },
 ]
 
+/**
+ * What the list covers, in the viewer's terms — the [DR-15] rule as of
+ * feat/projects. Behaviour is server-side; this only describes it.
+ */
+const scopeDescription = computed(() => {
+  if (caps.isLeader.value) return 'Every task at this property. Project tasks are not listed here — open them under Mine, Helping or in the project itself.'
+  return 'Tasks you claimed; unclaimed tasks in your department; unclaimed tasks with no department anywhere at the property; your teams\' pools; tasks with a step handed to you (read-only); and every task of your projects. Project tasks are not listed here — open them under Mine, Helping or in the project.'
+})
+
 const SCOPE_TABS: Chip[] = [
   { value: 'unclaimed', label: 'To claim' },
   { value: 'mine', label: 'Mine', countKey: 'mine' },
@@ -213,6 +222,10 @@ const SCOPE_TABS: Chip[] = [
         <p class="text-xs text-muted-foreground">
           {{ totalCount }} {{ totalCount === 1 ? 'task' : 'tasks' }} you can see here.
         </p>
+        <details class="text-xs text-muted-foreground">
+          <summary class="min-h-6 cursor-pointer select-none font-medium text-primary">What shows here</summary>
+          <p class="mt-1 leading-relaxed">{{ scopeDescription }}</p>
+        </details>
       </div>
       <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
         <RefreshCwIcon class="h-4 w-4" :class="isLoading ? 'animate-spin' : ''" />
@@ -282,7 +295,7 @@ const SCOPE_TABS: Chip[] = [
       v-else-if="shownTasks.length === 0"
       :icon="LayoutListIcon"
       title="No tasks match"
-      :description="hasFilters ? 'Try clearing a filter or a different search.' : 'Nothing to show at this property yet.'"
+      :description="hasFilters ? 'Try clearing a filter or a different search.' : caps.isLeader.value ? 'Nothing to show at this property yet. Project tasks live in their projects.' : 'Nothing you can see at this property right now: your claimed work, your department\'s and the property\'s unclaimed tasks, your team pools, steps handed to you, and your projects\' tasks (those show in the project).'"
     >
       <Button v-if="hasFilters" variant="outline" size="sm" @click="clearFilters">Clear filters</Button>
     </EmptyState>

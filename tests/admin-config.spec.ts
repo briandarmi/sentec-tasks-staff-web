@@ -144,11 +144,12 @@ describe('departments: master catalogue + per-hotel enablement', () => {
     const again = call('/v1/hotel-departments', { method: 'POST', headers: h(a, H), body: { departmentId: security.id } })
     expect(again.status).toBe(200)
     expect(data(again).id).toBe(data(first).id)
-    // Rina's CLAIM covers Simatupang via the group grant, but she has no direct
-    // staff_hotel row there — the fresh DB check refuses the write.
+    // Rina's reach covers Simatupang via the group grant, but she has no
+    // membership there — with per-hotel roles she is plain staff at that
+    // hotel, and the admin check (run after the hotel is resolved) refuses.
     const rina = login('regional@aston.example', 'regional123')
     expect(errOf(() => call('/v1/hotel-departments', { method: 'POST', headers: h(rina, H), body: { departmentId: security.id } })).message)
-      .toBe('cannot manage departments for hotels you do not manage')
+      .toBe('admin access required')
   })
 })
 
@@ -238,11 +239,20 @@ describe('staff lifecycle', () => {
       .toBe('password must be at least 10 characters')
     expect(errOf(() => call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'x@aston.example', name: 'X', password: 'longenough1', role: 'staff', hotels: [IDS.hotel.fave] } })).message)
       .toBe('cannot grant access to hotels you do not manage')
+    // An email that is already a member here is a 409; one from another hotel
+    // is ATTACHED (200) — name and password ignored, memberships extended.
     expect(errOf(() => call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'admin@aston.example', name: 'X', password: 'longenough1', role: 'staff', hotels: [H] } })).message)
-      .toBe('email already registered')
+      .toBe('that staff member already has access to this hotel')
+    const attached = call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'nur@fave.example', name: 'Ignored', password: 'ignoredpassword', role: 'leader', hotels: [H], hotelDepartmentId: IDS.dept.smtpFrontOffice } })
+    expect(attached.status).toBe(200)
+    expect(data(attached).name).toBe('Nur Aini')
+    // The response shows memberships at the granted hotels only — what Nur is at Fave is not this admin's to see.
+    expect(data(attached).memberships).toEqual([{ hotelRef: H, role: 'leader', hotelDepartmentId: IDS.dept.smtpFrontOffice, createTask: false }])
+    expect(data(attached).properties.map((p: any) => p.hotelRef).sort()).toEqual([H, IDS.hotel.fave].sort())
     const created = call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'ayu@aston.example', name: 'Ayu Lestari', password: 'ayu1234567', role: 'staff', hotels: [H], hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true } })
     expect(created.status).toBe(201)
-    expect(data(created).role).toBe('staff')
+    expect(data(created).memberships).toEqual([{ hotelRef: H, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true }])
+    expect(data(created).properties.map((p: any) => p.hotelRef)).toEqual([H])
   })
 
   it('promotes to admin via PATCH — never at creation — with a 422 on a bad role', () => {
@@ -251,10 +261,31 @@ describe('staff lifecycle', () => {
     expect(errOf(() => call(`/v1/staff/${ayu.id}`, { method: 'PATCH', headers: h(a, H), body: { role: 'boss' } })).code)
       .toBe('UNPROCESSABLE')
     const promoted = data(call(`/v1/staff/${ayu.id}`, { method: 'PATCH', headers: h(a, H), body: { role: 'admin' } }))
-    expect(promoted.role).toBe('admin')
-    // A non-sharing admin's target collapses to the same 404 as a missing one.
+    expect(promoted.memberships.find((m: any) => m.hotelRef === H).role).toBe('admin')
+    // Role fields change ONE hotel's membership and need a hotel: without the
+    // header it is a 400; at a hotel where the target has no membership, 422.
+    expect(errOf(() => call(`/v1/staff/${ayu.id}`, { method: 'PATCH', headers: h(a), body: { createTask: false } })).message).toBe('hotel context required to change role, hotelDepartmentId or createTask')
+    const rinaAtKuningan = login('regional@aston.example', 'regional123')
+    // Rina is admin at Kuningan only: the same patch at Simatupang is refused there.
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(rinaAtKuningan, H), body: { role: 'leader' } })).message).toBe('admin access required at this hotel')
+    const budiKngn = data(call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(rinaAtKuningan, IDS.hotel.kuningan), body: { role: 'leader' } }))
+    // The response carries the membership at the named hotel, and no other.
+    expect(budiKngn.memberships).toEqual([{ hotelRef: IDS.hotel.kuningan, role: 'leader', hotelDepartmentId: IDS.dept.kngnHousekeeping, createTask: true }])
+    expect(data<any[]>(call('/v1/staff', { headers: h(a, H) })).find(s => s.id === IDS.staff.budi).memberships[0].role).toBe('staff')
+    // Ayu shares Simatupang with Rina's reach, but has no membership at Kuningan: 422.
+    expect(errOf(() => call(`/v1/staff/${ayu.id}`, { method: 'PATCH', headers: h(rinaAtKuningan, IDS.hotel.kuningan), body: { role: 'leader' } })).message).toBe('staff member has no membership at this hotel')
+    // name is account-wide: any admin who shares a hotel, no header needed —
+    // and with no hotel named the response lists no memberships at all.
+    const renamed = data(call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(rinaAtKuningan), body: { name: 'Budi S.' } }))
+    expect(renamed.name).toBe('Budi S.')
+    expect(renamed.memberships).toEqual([])
+    call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(rinaAtKuningan, IDS.hotel.kuningan), body: { role: 'staff' } })
+    call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(rinaAtKuningan), body: { name: 'Budi Santoso' } })
+    // A non-sharing admin's target collapses to the same 404 as a missing one
+    // (the operator shares no hotel with anyone; Nur now shares Simatupang
+    // since the attach above).
     const rina = login('regional@aston.example', 'regional123')
-    expect(errOf(() => call(`/v1/staff/${IDS.staff.nur}`, { method: 'PATCH', headers: h(rina), body: { name: 'X' } })).message)
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.operator}`, { method: 'PATCH', headers: h(rina), body: { name: 'X' } })).message)
       .toBe('staff')
   })
 })
@@ -288,8 +319,8 @@ describe('platform routes (operator only)', () => {
     const hotelRef = '77777777-0000-4000-8000-000000000001'
     const created = call(`/v1/platform/tenants/${hotelRef}/first-admin`, { method: 'POST', headers: h(op), body: { email: 'gm@huxley.example', name: 'Huxley GM' } })
     expect(created.status).toBe(201)
-    const payload = data<{ temporaryPassword: string, role: string }>(created)
-    expect(payload.role).toBe('admin')
+    const payload = data<{ temporaryPassword: string, memberships: Array<{ hotelRef: string, role: string }> }>(created)
+    expect(payload.memberships).toEqual([{ hotelRef, role: 'admin', hotelDepartmentId: null, createTask: true }])
     expect(payload.temporaryPassword.length).toBeGreaterThanOrEqual(20)
     expect(errOf(() => call(`/v1/platform/tenants/${hotelRef}/first-admin`, { method: 'POST', headers: h(op), body: { email: 'gm2@huxley.example', name: 'Another' } })).message)
       .toBe('tenant already has an admin')

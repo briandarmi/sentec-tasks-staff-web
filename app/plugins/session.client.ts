@@ -1,4 +1,5 @@
 import { useSession } from '~/composables/useSession'
+import { useTenant } from '~/composables/useTenant'
 
 /**
  * Re-establish the signed-in session before the first route resolves.
@@ -10,4 +11,7 @@ import { useSession } from '~/composables/useSession'
  */
 export default defineNuxtPlugin(async () => {
   await useSession().restore()
+  // Follow the selected hotel's timezone from here on (GET /v1/tenant), so
+  // every clock time on screen is the hotel's rather than the device's.
+  useTenant()
 })

@@ -113,7 +113,7 @@ onMounted(load)
       <div class="min-w-0">
         <h2 class="text-lg font-bold tracking-tight">Board</h2>
         <p class="text-xs text-muted-foreground">
-          Live workflow for this property.
+          Live workflow for this property. Project tasks are on their project's board, not here.
           <template v-if="totalCount > tasks.length"> Showing {{ tasks.length }} of {{ totalCount }}.</template>
         </p>
       </div>
