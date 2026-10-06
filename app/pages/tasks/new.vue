@@ -359,11 +359,17 @@ onBeforeUnmount(() => {
 
 const formatAbsolute = formatDateTime
 
-/** The preview task carries only hotelDepartmentId — names are an admin read. */
+/**
+ * The preview task carries only hotelDepartmentId — names are an admin read.
+ * A retired department can still be the routing target of an old rule; say
+ * so rather than show a name nobody can pick any more.
+ */
 const departmentName = computed(() => {
   const id = preview.value?.task.hotelDepartmentId
   if (!id) return null
-  return departments.value.find(d => d.id === id)?.departmentName ?? 'Assigned automatically'
+  const row = departments.value.find(d => d.id === id)
+  if (!row) return 'Assigned automatically'
+  return row.isActive === false ? `${row.departmentName} (inactive)` : row.departmentName
 })
 
 async function load() {
@@ -742,6 +748,12 @@ onMounted(load)
                 <div class="flex justify-between gap-2">
                   <dt class="text-muted-foreground">Resolve by</dt>
                   <dd class="font-medium tabular-nums">{{ formatAbsolute(preview.task.resolutionDueAt) }}</dd>
+                </div>
+                <!-- Preview-only: the API names the policy the task would get
+                     (rule's, else SLA's, else the hotel default); absent when none. -->
+                <div v-if="preview.task.escalationPolicyName" class="flex justify-between gap-2">
+                  <dt class="shrink-0 text-muted-foreground">Escalates by</dt>
+                  <dd class="text-right font-medium">{{ preview.task.escalationPolicyName }}</dd>
                 </div>
                 <div v-if="preview.checklistLabels.length" class="flex justify-between gap-2">
                   <dt class="shrink-0 text-muted-foreground">Checklist</dt>

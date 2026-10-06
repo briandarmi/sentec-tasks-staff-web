@@ -11,9 +11,30 @@ import { externalizeInlineScripts } from './build/externalize-inline-scripts'
 const baseURL = process.env.NUXT_APP_BASE_URL || '/'
 const withBase = (path: string) => `${baseURL.replace(/\/$/, '')}${path}`
 
+/**
+ * The dev copy of sentec-tasks-api on AWS Lambda (ap-southeast-3). `nuxt dev`
+ * talks to it BY DEFAULT: /v1 is proxied there so the browser sees one origin
+ * and the API's SameSite=Lax `st_session` cookie is stored on localhost.
+ *
+ *   pnpm dev                    → live data from the dev API through the proxy
+ *   NUXT_USE_MOCK=1 pnpm dev    → the in-browser mock (tests always use it)
+ *   NUXT_DEV_API_PROXY=<url>    → a different API behind /v1 (e.g. a local go run ./cmd/server)
+ *   NUXT_PUBLIC_API_BASE=<url>  → this app's OWN dev server; never the Function URL itself
+ *
+ * Static builds (`nuxt generate`: GitHub Pages, CloudFront) have no dev proxy
+ * and stay on the mock unless NUXT_PUBLIC_API_BASE names a same-site API.
+ */
+const DEV_API_URL = 'https://cy2ori3ybex2n5ibpa3j2kxq3e0zyzjo.lambda-url.ap-southeast-3.on.aws'
+/** The port the dev API's CORS and sign-in redirects expect this app on. */
+const DEV_PORT = 3000
+const useMock = ['1', 'true', 'yes'].includes(String(process.env.NUXT_USE_MOCK ?? '').toLowerCase())
+const devProxyTarget = useMock ? '' : (process.env.NUXT_DEV_API_PROXY ?? DEV_API_URL).replace(/\/+$/, '')
+const devApiBase = useMock ? '' : (process.env.NUXT_PUBLIC_API_BASE ?? `http://localhost:${DEV_PORT}`)
+
 export default defineNuxtConfig({
   // Single-page app: no server rendering, no per-route HTML.
   ssr: false,
+  devServer: { port: DEV_PORT },
   css: ['~/assets/css/tailwind.css'],
   compatibilityDate: '2025-01-01',
   /**
@@ -35,22 +56,26 @@ export default defineNuxtConfig({
      * cookie is stored on localhost — calling a Lambda Function URL directly
      * signs in and then 401s on every following call. The target keeps /v1
      * because h3 strips the mount prefix; changeOrigin is required because a
-     * Function URL routes on the Host header. See README, "Against the dev API".
+     * Function URL routes on the Host header. See README, "Running against the dev API".
      */
-    devProxy: process.env.NUXT_DEV_API_PROXY
-      ? { '/v1': { target: `${process.env.NUXT_DEV_API_PROXY.replace(/\/+$/, '')}/v1`, changeOrigin: true } }
+    devProxy: devProxyTarget
+      ? { '/v1': { target: `${devProxyTarget}/v1`, changeOrigin: true } }
       : {},
   },
   runtimeConfig: {
     public: {
       /**
-       * Where the API is. Empty (the default) keeps the app on the in-browser
-       * mock. For local work against the dev Lambda set it to this app's OWN
-       * dev server (http://localhost:3000 / :3001) and let the devProxy above
-       * carry /v1 across; never point it at the Function URL itself.
+       * Where the API is. Empty keeps the app on the in-browser mock — the
+       * right answer for a static build, which has no proxy. `nuxt dev`
+       * overrides it below with this app's own dev server so the devProxy
+       * carries /v1 across; never point it at the Function URL itself.
        */
       apiBase: process.env.NUXT_PUBLIC_API_BASE || '',
     },
+  },
+  /** `nuxt dev` only (Nuxt's per-environment override): live by default. */
+  $development: {
+    runtimeConfig: { public: { apiBase: devApiBase } },
   },
   /**
    * Moves Nuxt's inline bootstrap scripts into external files at prerender time,

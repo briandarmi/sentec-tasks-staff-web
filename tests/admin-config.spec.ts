@@ -247,11 +247,11 @@ describe('staff lifecycle', () => {
     expect(attached.status).toBe(200)
     expect(data(attached).name).toBe('Nur Aini')
     // The response shows memberships at the granted hotels only — what Nur is at Fave is not this admin's to see.
-    expect(data(attached).memberships).toEqual([{ hotelRef: H, role: 'leader', hotelDepartmentId: IDS.dept.smtpFrontOffice, createTask: false }])
+    expect(data(attached).memberships).toEqual([{ hotelRef: H, role: 'leader', hotelDepartmentId: IDS.dept.smtpFrontOffice, createTask: false, syncIssue: null }])
     expect(data(attached).properties.map((p: any) => p.hotelRef).sort()).toEqual([H, IDS.hotel.fave].sort())
     const created = call('/v1/staff', { method: 'POST', headers: h(a, H), body: { email: 'ayu@aston.example', name: 'Ayu Lestari', password: 'ayu1234567', role: 'staff', hotels: [H], hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true } })
     expect(created.status).toBe(201)
-    expect(data(created).memberships).toEqual([{ hotelRef: H, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true }])
+    expect(data(created).memberships).toEqual([{ hotelRef: H, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true, syncIssue: null }])
     expect(data(created).properties.map((p: any) => p.hotelRef)).toEqual([H])
   })
 
@@ -270,7 +270,7 @@ describe('staff lifecycle', () => {
     expect(errOf(() => call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(rinaAtKuningan, H), body: { role: 'leader' } })).message).toBe('admin access required at this hotel')
     const budiKngn = data(call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(rinaAtKuningan, IDS.hotel.kuningan), body: { role: 'leader' } }))
     // The response carries the membership at the named hotel, and no other.
-    expect(budiKngn.memberships).toEqual([{ hotelRef: IDS.hotel.kuningan, role: 'leader', hotelDepartmentId: IDS.dept.kngnHousekeeping, createTask: true }])
+    expect(budiKngn.memberships).toEqual([{ hotelRef: IDS.hotel.kuningan, role: 'leader', hotelDepartmentId: IDS.dept.kngnHousekeeping, createTask: true, syncIssue: null }])
     expect(data<any[]>(call('/v1/staff', { headers: h(a, H) })).find(s => s.id === IDS.staff.budi).memberships[0].role).toBe('staff')
     // Ayu shares Simatupang with Rina's reach, but has no membership at Kuningan: 422.
     expect(errOf(() => call(`/v1/staff/${ayu.id}`, { method: 'PATCH', headers: h(rinaAtKuningan, IDS.hotel.kuningan), body: { role: 'leader' } })).message).toBe('staff member has no membership at this hotel')
@@ -320,7 +320,7 @@ describe('platform routes (operator only)', () => {
     const created = call(`/v1/platform/tenants/${hotelRef}/first-admin`, { method: 'POST', headers: h(op), body: { email: 'gm@huxley.example', name: 'Huxley GM' } })
     expect(created.status).toBe(201)
     const payload = data<{ temporaryPassword: string, memberships: Array<{ hotelRef: string, role: string }> }>(created)
-    expect(payload.memberships).toEqual([{ hotelRef, role: 'admin', hotelDepartmentId: null, createTask: true }])
+    expect(payload.memberships).toEqual([{ hotelRef, role: 'admin', hotelDepartmentId: null, createTask: true, syncIssue: null }])
     expect(payload.temporaryPassword.length).toBeGreaterThanOrEqual(20)
     expect(errOf(() => call(`/v1/platform/tenants/${hotelRef}/first-admin`, { method: 'POST', headers: h(op), body: { email: 'gm2@huxley.example', name: 'Another' } })).message)
       .toBe('tenant already has an admin')

@@ -13,26 +13,33 @@ Tasks is not a Butler module. Butler, Sentec PMS and Sentec EMS are all just
 *integration partners* that dispatch work into it, and Tasks stays fully usable
 with no partner connected at all.
 
-## The mock is the real API's contract
+## Two backends, one contract
 
-There is no server in this workspace; the app runs against an in-browser mock:
+`pnpm dev` runs this app against the **dev copy of `sentec-tasks-api`** on AWS
+Lambda through a local proxy (see [Running against the dev API](#running-against-the-dev-api)).
+Tests, static builds (GitHub Pages, CloudFront) and `NUXT_USE_MOCK=1 pnpm dev`
+run against the in-browser mock:
 [`app/utils/clientFakeApi.ts`](app/utils/clientFakeApi.ts). Since 2026-09-02
 that mock is **wire-faithful to `sentec-tasks-api`** (Go + PostgreSQL, pinned
 at `master` commit `c3f52ad` plus the passwordless sign-in branch
-`feat/google-and-magic-link-auth` @ `48756a3`, re-aligned 2026-09-16, and the
+`feat/google-and-magic-link-auth` @ `48756a3`, re-aligned 2026-09-16, the
 `feat/projects` branch @ `fe5e99d` — per-hotel roles, projects, checklist
 steps, recurring tasks, hotel time zone, time attribution — reconciled
-2026-09-29 against its Go handlers and openapi.yaml): the
+2026-09-29 against its Go handlers and openapi.yaml, and the
+`refactor/ponytail-audit` tip @ `1ee8c12`, 2026-10-06 — escalation policies
+and the escalation sweep, department soft delete, EMS staff sync and
+offboarding, the main/interface surface split): the
 exact paths, methods, response envelope, UUID ids,
 `X-Hotel-Id` scoping, error codes and message literals, and the serialization
 quirks (`data: null` for an empty task list but `[]` for config lists;
 `meta.total`, not `totalCount`; `meta.warnings: null` on a clean create) —
 extracted from the Go handlers and their tests, not just the OpenAPI file.
 
-Swapping the mock for the real API means replacing the `request()` body in
-[`useSession.ts`](app/composables/useSession.ts) with `$fetch` and a base URL —
-the headers, paths and shapes are already the real contract. What a browser
-mock cannot BE, it simulates at the seam and says so:
+The live transport is the other half of `transport()` in
+[`useSession.ts`](app/composables/useSession.ts): `$fetch` with credentials
+against the same paths and shapes, so the two backends are interchangeable
+per request. What a browser mock cannot BE, it simulates at the seam and says
+so:
 
 - **JWT verification** — `Bearer service:…` / `Bearer partner:<id>` stand-ins,
   and staff bearer tokens minted at login.
@@ -49,7 +56,13 @@ mock cannot BE, it simulates at the seam and says so:
 - **S3** — presigned uploads validate exactly what the API validates and hand
   back real-shaped storage keys; the bytes go nowhere and signed GET URLs are
   stable placeholders.
-- **SQS events, PostgreSQL partitions, bcrypt** — not simulated at all.
+- **The two workers** — the recurring-task sweep and the escalation sweep
+  run lazily before every authenticated request, so due templates and due
+  escalation steps have landed before any read could show them.
+- **EMS** — a seeded in-memory directory stands in for EMS's employee list,
+  and `PUT /v1/ems/hotels/{syncId}/employees/{id}` with the EMS partner token
+  plays an EMS push.
+- **EventBridge events, PostgreSQL partitions, bcrypt** — not simulated at all.
 
 Scope is by **hotel**: every hotel-scoped request carries `X-Hotel-Id`, which
 for a human must be in their token's hotels claim (in PostgreSQL this is the
@@ -58,12 +71,14 @@ for a human must be in their token's hotels claim (in PostgreSQL this is the
 ## Getting started
 
 ```bash
-pnpm install              # from the workspace root
-pnpm dev:tasks-staff      # or: pnpm --filter sentec-tasks-staff-web dev
+pnpm install                 # from the workspace root
+pnpm dev:tasks-staff         # live, against the dev API: http://localhost:3000
+NUXT_USE_MOCK=1 pnpm dev     # the in-browser mock, with the demo accounts below
 ```
 
-Sign in with any of the demo accounts listed on the login screen (email +
-password, per the real auth model):
+Live, sign in with a real Sentec Tasks account (the dev database has no demo
+people). On the mock, sign in with any of the demo accounts listed on the
+login screen (email + password, per the real auth model):
 
 | Email                            | Password       | Who they are                                   |
 | -------------------------------- | -------------- | ---------------------------------------------- |
@@ -217,33 +232,76 @@ staff need before they may raise work at all.
   picker, and the project page passes `projectId`. With neither, the
   delegate / helper pickers degrade to the caller's own teams' member ids,
   labeled as such.
+- **Escalation** (`refactor/ponytail-audit`, 2026-10-06). A task resolves its
+  escalation policy once at creation — the matched routing rule's, else the
+  SLA's, else the hotel's active default, else none — and the API's worker
+  applies each due step once, in working minutes on the task's schedule:
+  bump the priority, reassign to a person or a team, route to another
+  department, notify (department leaders, admins, a team, named staff, the
+  previous assignee). Steps are independent and never fire twice; an
+  inactive policy stops escalating. The task carries `escalationPolicyId`,
+  `escalationLevel` (highest applied step + 1) and `escalatedAt`; the detail
+  shows an "Escalated · Level N" pill and an Escalation card from
+  `GET /v1/tasks/{id}/escalations` (what each step changed, what it skipped
+  and why, who was told); the worker's history rows read "Escalated (level N,
+  …)" verbatim; the new-task preview names the policy a task would get
+  (`escalationPolicyName`). Policies are edited in the admin console.
+- **Two API deployments.** Staff and admin calls go to the *main* API; partner
+  tokens (Butler, PMS, EMS) are accepted by the *interface* API only, where
+  dispatch (`POST /v1/tasks`), guest attachments and the EMS push live. The
+  mock gates the same way: a partner token on a main route is 403 "partner
+  tokens must use the interface API", a staff cookie on dispatch is 403 "the
+  interface API accepts partner tokens only".
+- **Inactive departments.** A hotel can soft-delete a department
+  (`HotelDepartment.isActive: false`; `masterIsActive: false` when the
+  platform retired the master). Staff, teams, schedules and tasks that point
+  at it keep working and show it as inactive; nothing new may choose it.
+- **Offboarding.** When an admin removes someone from the property, or
+  deactivates their account, or EMS says they left, their open tasks go back
+  to their pools by the Return rule (an IN_PROGRESS task returns to NEW with
+  the reason in history: "Removed from this property by an admin", "Account
+  deactivated", "Left the property (EMS)"), and their helper, offer,
+  checklist-step and team roles are cleared.
 
-## Against the dev API
+## Running against the dev API
 
-A dev copy of `sentec-tasks-api` (feat/projects) runs on AWS Lambda behind a
-Function URL. The API signs you in with the `SameSite=Lax` `st_session`
+`pnpm dev` talks to the dev copy of `sentec-tasks-api` (`refactor/ponytail-audit`)
+on AWS Lambda **by default** — the Function URL is `DEV_API_URL` in
+`nuxt.config.ts`. The API signs you in with the `SameSite=Lax` `st_session`
 cookie, so the app and the API must look like **one site** to the browser:
-`nuxt dev` proxies `/v1/*` to the Function URL and the app talks to its own
-dev server.
+`nuxt dev` proxies `/v1/*` to the Function URL (`nitro.devProxy`,
+`changeOrigin` because a Function URL routes on the Host header) and the app
+calls its own dev server. Nothing to configure; `.env.example` lists the
+overrides:
 
 ```bash
-cp .env.example .env      # NUXT_DEV_API_PROXY + NUXT_PUBLIC_API_BASE=http://localhost:3000
-pnpm dev                  # then open http://localhost:3000
+pnpm dev                     # live data, http://localhost:3000
+NUXT_USE_MOCK=1 pnpm dev     # the in-browser mock instead (what the tests use)
+NUXT_DEV_API_PROXY=http://localhost:8080 pnpm dev   # a local `go run ./cmd/server`
 ```
 
 - Open the app at **http://localhost:3000, never 127.0.0.1** — a different
   site, so the cookie will not match and the origin is not on the API's
-  allow-list. This app must be on port 3000 (the admin console on 3001).
+  allow-list (`CORS_ALLOWED_ORIGINS` = `localhost:3000`, `localhost:3001`).
+  This app is pinned to port 3000 (`devServer.port`), the admin console to
+  3001. `NUXT_PUBLIC_API_BASE` must be this app's own dev server, never the
+  Function URL itself.
 - Google and magic-link sign-in come back **through port 3000**
   (`GOOGLE_REDIRECT_URL` and `API_BASE_URL` on the Lambda point at it), so keep
   this dev server running for either flow, from the admin console too.
 - The Lambda runs with `MAIL_DEV_CONSOLE=true`: magic links are **not emailed**,
   they land in the Lambda's CloudWatch log. Use password login if you cannot
   read that log.
-- With `NUXT_PUBLIC_API_BASE` set the login screen hides its demo accounts,
-  demo inbox and stand-in Google chooser (`useSession().isLive`); the sign-in
-  flows themselves are unchanged. Restart `nuxt dev` after changing `.env`.
-  With both lines unset the app runs on the in-browser mock as before.
+- The dev database has no demo accounts: sign in with a real account. Live,
+  the login screen hides the demo accounts, demo inbox and stand-in Google
+  chooser (`useSession().isLive`) and says it is connected to the development
+  API; the sign-in flows themselves are unchanged.
+- Static builds (`pnpm generate`: GitHub Pages, CloudFront) have no dev proxy
+  and stay on the mock unless `NUXT_PUBLIC_API_BASE` names a same-site API.
+- Verified 2026-10-07: `/v1/*` through the dev server reaches the Lambda (a
+  wrong password answers the API's own 401 envelope; the served runtime
+  config points at the dev server). A full sign-in was not exercised here,
+  for want of a dev account on this machine.
 
 ## Auth
 
@@ -420,6 +478,10 @@ scale. Mobile-first: 44px targets, one column capped rather than a second pane.
   browser (`libnss3` missing, install needs root). `pnpm build` and
   `pnpm typecheck` pass, which covers templates and types but not runtime
   rendering.
-- **The mock's timezone math uses a fixed offset map** (Asia/Jakarta,
-  Asia/Makassar) rather than a tz database — honest enough for the demo's
-  schedule-aware SLA deadlines, and pinned by tests either way.
+- **Sign-in against the dev API.** The proxy and the API's error envelope were
+  checked from this machine (2026-10-07); a real account was not available to
+  sign in with, so the screens have been exercised against the mock only.
+- **The escalation sweep's clock is the mock's.** It uses the same
+  schedule-aware minute arithmetic as the SLA deadlines (`Intl` zone offsets,
+  not a tz database) and is pinned by `tests/api-fidelity.spec.ts`; against
+  the Lambda the sweep is the API's own worker on its own schedule.

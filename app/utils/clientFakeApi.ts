@@ -11,6 +11,14 @@
  * (reconciled 2026-09-29); the few places a browser mock cannot follow the
  * server are marked "MOCK LIMIT".)
  *
+ * 2026-10-06: re-aligned to `refactor/ponytail-audit` @ 1ee8c12, the tip the
+ * dev Lambda serves. It contains feat/escalation (escalation policies, the
+ * escalation sweep, task escalation fields), feat/department-crud (master
+ * department CRUD, hotel-department soft delete), feat/ems-staff-sync (EMS
+ * employee browse/add, inbound EMS push, offboarding, tenant sync ids,
+ * partner capabilities) and feat/interface-lambda (the main/interface
+ * surface split). Each is marked in place; literals come from the Go.
+ *
  * Wire-faithful by decision: exact paths, envelope, error codes and message
  * literals, UUID ids, X-Hotel-Id scoping, cookie-session + CSRF shape, and the
  * null-vs-[] serialization quirks — extracted from the Go handlers and their
@@ -67,20 +75,40 @@ export interface TenantGroup {
   updatedAt: string
 }
 
-/** Master (Sentinel-curated) department vocabulary — global, not hotel-scoped. */
+/**
+ * Master (Sentinel-curated) department vocabulary — global, not hotel-scoped;
+ * `Department` on the wire. feat/department-crud gave it `code`,
+ * `description` and `updatedAt`, and an operator (or a non-partner service
+ * token) may now create, patch and delete it.
+ */
 export interface MasterDepartment {
   id: Id
   name: string
+  /** Optional, 1-16 chars of A-Z 0-9 _ (stored upper-case). */
+  code: string | null
+  description: string | null
+  /** false retires it for NEW use only: hotels already using it keep it. */
   isActive: boolean
+  updatedAt: string
 }
 
-/** A master department enabled for one hotel. Tasks reference THESE ids. */
+/**
+ * A master department enabled for one hotel. Tasks reference THESE ids.
+ * `isActive:false` is the hotel's soft delete (PATCH /v1/hotel-departments/{id}):
+ * nothing new may use it, but staff, teams, schedules and tasks that already
+ * point at it keep working and show it as inactive.
+ */
 export interface HotelDepartment {
   id: Id
   hotelRef: Id
   departmentId: Id
   departmentName: string
+  code: string | null
+  description: string | null
   isActive: boolean
+  /** false means the master is retired; the hotel cannot reactivate it. */
+  masterIsActive: boolean
+  updatedAt: string
 }
 
 export interface StaffAccount {
@@ -90,6 +118,12 @@ export interface StaffAccount {
   name: string
   isActive: boolean
   isOperator: boolean
+  /**
+   * Links this person to Sentec EMS (feat/ems-staff-sync); null for manual
+   * staff. EMS then owns their name, email and membership at EMS-mapped
+   * properties — an admin's edit lasts until the next EMS push.
+   */
+  emsEmployeeId: string | null
 }
 
 /** A property the person can reach — directly or through a group grant. Sorted by name. */
@@ -109,6 +143,14 @@ export interface HotelMembership {
   role: StaffRole
   hotelDepartmentId: Id | null
   createTask: boolean
+  /** Something EMS sent for this membership that Tasks could not apply; null when clean. */
+  syncIssue: SyncIssue | null
+}
+
+/** One kind today: EMS named a department this property does not have (decision #7). */
+export interface SyncIssue {
+  type: 'unknown_department'
+  emsDepartmentName: string
 }
 
 /**
@@ -158,6 +200,8 @@ export interface Sla {
   /** Minutes of open time from responseDueAt — the clocks CHAIN. */
   resolutionTime: number
   isDefault: boolean
+  /** feat/escalation: the policy tasks routed to this SLA escalate by, unless the rule names one. */
+  escalationPolicyId: Id | null
   createdAt: string
   updatedAt: string
 }
@@ -174,6 +218,8 @@ export interface RoutingRule {
   hotelDepartmentId: Id
   slaId: Id
   remark: string | null
+  /** feat/escalation: wins over the SLA's policy for tasks this rule routes. */
+  escalationPolicyId: Id | null
   createdAt: string
   updatedAt: string
 }
@@ -281,10 +327,15 @@ export interface SourceApp {
   isActive: boolean
 }
 
+/** Per-partner permissions beyond dispatch. `staff_sync` lets EMS push employee changes. */
+export type PartnerCapability = 'staff_sync'
+export const PARTNER_CAPABILITIES: PartnerCapability[] = ['staff_sync']
+
 export interface Partner {
   id: Id
   name: string
   isActive: boolean
+  capabilities: PartnerCapability[]
   createdAt: string
   updatedAt: string
 }
@@ -333,6 +384,18 @@ export interface Task {
   /** Set on tasks a recurring template made (feat/projects). */
   templateId: Id | null
   occurrenceKey: string | null
+  /**
+   * feat/escalation. Resolved ONCE at creation: the matched routing rule's
+   * policy, else the SLA's, else the hotel's active default, else none.
+   * Tasks created before a policy existed are not backfilled.
+   */
+  escalationPolicyId: Id | null
+  /** Highest applied step's sort + 1; 0 = never escalated. Steps are independent, so a level does not imply every lower step fired. */
+  escalationLevel: number
+  /** When the most recent escalation step was applied. */
+  escalatedAt: string | null
+  /** POST /v1/tasks/preview only (omitempty): the resolved policy's name. */
+  escalationPolicyName?: string
   /** Storage column; the wire shows it as `project: {id, name}` on the read models. */
   projectId: Id | null
   createdAt: string
@@ -624,6 +687,134 @@ export interface StaffImportRowResult {
   error?: ApiErrorBody
 }
 
+// ── Escalation (feat/escalation, spec 2026-09-29) ────────────────────────────
+
+export type EscalationTriggerKind = 'RESPONSE_OVERDUE' | 'PERCENT_OF_RESOLUTION' | 'RESOLUTION_OVERDUE' | 'UNASSIGNED_FOR'
+export const ESCALATION_TRIGGER_KINDS: EscalationTriggerKind[] = ['RESPONSE_OVERDUE', 'PERCENT_OF_RESOLUTION', 'RESOLUTION_OVERDUE', 'UNASSIGNED_FOR']
+export type EscalationActionType = 'bumpPriority' | 'reassign' | 'routeToDepartment'
+export const ESCALATION_ACTION_TYPES: EscalationActionType[] = ['bumpPriority', 'reassign', 'routeToDepartment']
+export type EscalationRecipientKind = 'departmentLeaders' | 'admins' | 'team' | 'staff' | 'assignee'
+export const ESCALATION_RECIPIENT_KINDS: EscalationRecipientKind[] = ['departmentLeaders', 'admins', 'team', 'staff', 'assignee']
+/** A policy holds at most this many steps; `sort` runs 0-9. */
+export const ESCALATION_MAX_STEPS = 10
+
+/** `reassign` names exactly one of staffId/teamId; `routeToDepartment` names hotelDepartmentId only; `bumpPriority` takes no target. */
+export interface EscalationAction {
+  type: EscalationActionType
+  staffId?: Id
+  teamId?: Id
+  hotelDepartmentId?: Id
+}
+
+/** `team` carries teamId, `staff` carries staffId; the other kinds take no target. */
+export interface EscalationRecipient {
+  kind: EscalationRecipientKind
+  teamId?: Id
+  staffId?: Id
+}
+
+export interface EscalationStep {
+  id: Id
+  sort: number
+  triggerKind: EscalationTriggerKind
+  /** Minutes (≥0; ≥1 for UNASSIGNED_FOR) or a percent 1-100 for PERCENT_OF_RESOLUTION. Working minutes on the task's operating schedule. */
+  triggerValue: number
+  actions: EscalationAction[]
+  recipients: EscalationRecipient[]
+}
+
+export interface EscalationPolicy {
+  id: Id
+  hotelRef: Id
+  name: string
+  /** New tasks with no rule/SLA policy get the hotel's active default. A new default demotes the old one. */
+  isDefault: boolean
+  /** An inactive policy stops escalating; reactivating resumes, including any catch-up burst. */
+  isActive: boolean
+  /** Live steps only, by sort. */
+  steps: EscalationStep[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** A step with an id updates that step; without one it is created; a live step missing from the request is soft-deleted. */
+export interface EscalationStepWrite {
+  id?: Id | null
+  sort: number
+  triggerKind: EscalationTriggerKind
+  triggerValue: number
+  actions?: EscalationAction[]
+  recipients?: EscalationRecipient[]
+}
+
+/** POST /v1/escalation-policies — upsert the policy AND its steps in one call. */
+export interface EscalationPolicyWrite {
+  /** Omit to create; set to update. */
+  id?: Id | null
+  name: string
+  isDefault?: boolean
+  /** Omit: true on create, unchanged on update. */
+  isActive?: boolean | null
+  steps?: EscalationStepWrite[]
+}
+
+export type EscalationSkipReason = 'no_change' | 'target_invalid' | 'not_configured'
+
+/** GET /v1/tasks/{id}/escalations — one applied step: what changed, what was skipped, who was told. */
+export interface TaskEscalation {
+  hotelRef: Id
+  taskId: Id
+  appliedAt: string
+  policyId: Id
+  stepId: Id
+  level: number
+  trigger: { kind: EscalationTriggerKind, value: number }
+  /** before/after: a priority, or staff:<id> / team:<id> / department:<id>, or '' for none. */
+  applied: Array<{ type: EscalationActionType, before: string, after: string }>
+  skipped: Array<{ type: EscalationActionType, reason: EscalationSkipReason }>
+  /** Staff ids resolved when the step fired. */
+  recipients: Id[]
+}
+
+// ── EMS staff sync (feat/ems-staff-sync, spec 2026-10-06) ───────────────────
+
+export type EmsEmployeeState = 'added' | 'addable' | 'no_email' | 'inactive'
+
+/** GET /v1/ems/employees — one EMS row, annotated with this property's view of it. */
+export interface EmsEmployee {
+  emsEmployeeId: string
+  name: string
+  email: string | null
+  /** Works at this property now, per EMS. */
+  active: boolean
+  departmentName: string | null
+  /** The property's department matching departmentName by name, or null. */
+  hotelDepartmentId: Id | null
+  state: EmsEmployeeState
+}
+
+export type EmsAddOutcome = 'created' | 'linked' | 'granted' | 'skipped' | 'failed'
+
+/** POST /v1/ems/employees — one result per requested id. */
+export interface EmsAddResult {
+  emsEmployeeId: string
+  outcome: EmsAddOutcome
+  staffId?: Id
+  /** Set on `failed`: not_found_at_this_property | inactive | no_email | invalid_email | email_taken | email_linked_to_other_employee | error. */
+  reason?: string
+}
+
+/** /v1/platform/tenants/{hotelRef}/sync — a partner's own id for one property (EMS's hotel id). */
+export interface TenantSyncLink {
+  id: Id
+  hotelRef: Id
+  partnerId: Id
+  partnerName: string
+  syncId: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ApiErrorBody { code: string, message: string }
 
 export interface Envelope<T = unknown> {
@@ -711,7 +902,7 @@ const isUuid = (value: unknown): value is string => typeof value === 'string' &&
 export const IDS = {
   hotel: { simatupang: uid('a1', 1), kuningan: uid('a1', 2), fave: uid('a1', 3) },
   group: { aston: uid('a2', 1), fave: uid('a2', 2) },
-  masterDept: { housekeeping: uid('a3', 1), maintenance: uid('a3', 2), frontOffice: uid('a3', 3), fnb: uid('a3', 4) },
+  masterDept: { housekeeping: uid('a3', 1), maintenance: uid('a3', 2), frontOffice: uid('a3', 3), fnb: uid('a3', 4), spa: uid('a3', 5) },
   dept: {
     smtpHousekeeping: uid('a4', 1),
     smtpMaintenance: uid('a4', 2),
@@ -721,6 +912,8 @@ export const IDS = {
     kngnMaintenance: uid('a4', 6),
     faveHousekeeping: uid('a4', 7),
     faveFrontOffice: uid('a4', 8),
+    /** Soft-deleted at Simatupang under a retired master: shows the "cannot reactivate" case. */
+    smtpSpa: uid('a4', 9),
   },
   staff: {
     budi: uid('a5', 1), // staff@aston.example — HK staff, works two hotels
@@ -773,6 +966,9 @@ export const IDS = {
     faveCatchAll: uid('b6', 9),
   },
   partner: { butler: uid('b7', 1), pms: uid('b7', 2), ems: uid('b7', 3) },
+  policy: { smtpStandard: uid('b8', 1), smtpUrgent: uid('b8', 2) },
+  step: { stdResponse: uid('b9', 1), stdHalfway: uid('b9', 2), stdOverdue: uid('b9', 3), urgUnassigned: uid('b9', 4), urgOverdue: uid('b9', 5) },
+  syncLink: { smtpEms: uid('c9', 1) },
   task: {
     towels1204: uid('c1', 1),
     acFault0908: uid('c1', 2),
@@ -788,6 +984,8 @@ export const IDS = {
     acFilterOffer: uid('c1', 12),
     faveCleaning: uid('c1', 13),
     kngnAircon: uid('c1', 14),
+    /** Escalated three times by the Standard policy yesterday; sits in the Maintenance pool. */
+    leakEscalated: uid('c1', 15),
   },
   guest: { amelia: uid('c2', 1), marcus: uid('c2', 2) },
   offer: { filterToMade: uid('c3', 1) },
@@ -816,38 +1014,56 @@ const tenantGroups: TenantGroup[] = [
 ]
 
 const masterDepartments: MasterDepartment[] = [
-  { id: IDS.masterDept.housekeeping, name: 'Housekeeping', isActive: true },
-  { id: IDS.masterDept.maintenance, name: 'Maintenance', isActive: true },
-  { id: IDS.masterDept.frontOffice, name: 'Front Office', isActive: true },
-  { id: IDS.masterDept.fnb, name: 'Food & Beverage', isActive: true },
+  { id: IDS.masterDept.housekeeping, name: 'Housekeeping', code: 'HK', description: 'Rooms, public areas and linen', isActive: true, updatedAt: SEED },
+  { id: IDS.masterDept.maintenance, name: 'Maintenance', code: 'ENG', description: 'Engineering and repairs', isActive: true, updatedAt: SEED },
+  { id: IDS.masterDept.frontOffice, name: 'Front Office', code: 'FO', description: null, isActive: true, updatedAt: SEED },
+  { id: IDS.masterDept.fnb, name: 'Food & Beverage', code: 'FNB', description: null, isActive: true, updatedAt: SEED },
+  // Retired by the platform (decision #6): no hotel may add it or reactivate it.
+  { id: IDS.masterDept.spa, name: 'Spa & Wellness', code: 'SPA', description: 'Retired 2026-09: spa operations moved to a separate system', isActive: false, updatedAt: '2026-09-01T00:00:00.000Z' },
 ]
+
+/** A hotel_department row joined to its master, as the API reads it. */
+function seedHotelDept(id: Id, hotelRef: Id, departmentId: Id, isActive = true, updatedAt = SEED): HotelDepartment {
+  const master = masterDepartments.find(d => d.id === departmentId)!
+  return { id, hotelRef, departmentId, departmentName: master.name, code: master.code, description: master.description, isActive, masterIsActive: master.isActive, updatedAt }
+}
 
 const hotelDepartments: HotelDepartment[] = [
-  { id: IDS.dept.smtpHousekeeping, hotelRef: IDS.hotel.simatupang, departmentId: IDS.masterDept.housekeeping, departmentName: 'Housekeeping', isActive: true },
-  { id: IDS.dept.smtpMaintenance, hotelRef: IDS.hotel.simatupang, departmentId: IDS.masterDept.maintenance, departmentName: 'Maintenance', isActive: true },
-  { id: IDS.dept.smtpFrontOffice, hotelRef: IDS.hotel.simatupang, departmentId: IDS.masterDept.frontOffice, departmentName: 'Front Office', isActive: true },
-  { id: IDS.dept.smtpFnb, hotelRef: IDS.hotel.simatupang, departmentId: IDS.masterDept.fnb, departmentName: 'Food & Beverage', isActive: true },
-  { id: IDS.dept.kngnHousekeeping, hotelRef: IDS.hotel.kuningan, departmentId: IDS.masterDept.housekeeping, departmentName: 'Housekeeping', isActive: true },
-  { id: IDS.dept.kngnMaintenance, hotelRef: IDS.hotel.kuningan, departmentId: IDS.masterDept.maintenance, departmentName: 'Maintenance', isActive: true },
-  { id: IDS.dept.faveHousekeeping, hotelRef: IDS.hotel.fave, departmentId: IDS.masterDept.housekeeping, departmentName: 'Housekeeping', isActive: true },
-  { id: IDS.dept.faveFrontOffice, hotelRef: IDS.hotel.fave, departmentId: IDS.masterDept.frontOffice, departmentName: 'Front Office', isActive: true },
+  seedHotelDept(IDS.dept.smtpHousekeeping, IDS.hotel.simatupang, IDS.masterDept.housekeeping),
+  seedHotelDept(IDS.dept.smtpMaintenance, IDS.hotel.simatupang, IDS.masterDept.maintenance),
+  seedHotelDept(IDS.dept.smtpFrontOffice, IDS.hotel.simatupang, IDS.masterDept.frontOffice),
+  seedHotelDept(IDS.dept.smtpFnb, IDS.hotel.simatupang, IDS.masterDept.fnb),
+  seedHotelDept(IDS.dept.kngnHousekeeping, IDS.hotel.kuningan, IDS.masterDept.housekeeping),
+  seedHotelDept(IDS.dept.kngnMaintenance, IDS.hotel.kuningan, IDS.masterDept.maintenance),
+  seedHotelDept(IDS.dept.faveHousekeeping, IDS.hotel.fave, IDS.masterDept.housekeeping),
+  seedHotelDept(IDS.dept.faveFrontOffice, IDS.hotel.fave, IDS.masterDept.frontOffice),
+  // Simatupang deactivated its spa department before the master was retired.
+  seedHotelDept(IDS.dept.smtpSpa, IDS.hotel.simatupang, IDS.masterDept.spa, false, '2026-08-15T00:00:00.000Z'),
 ]
 
-interface SeedAccount extends StaffAccount { password: string }
+/** Storage row: the wire's StaffAccount plus the password; emsEmployeeId is null unless EMS linked the person. */
+interface SeedAccount extends Omit<StaffAccount, 'emsEmployeeId'> {
+  password: string
+  emsEmployeeId?: string | null
+  /** staff.ems_updated_at: the newest EMS push applied to the person at any hotel. */
+  emsUpdatedAt?: string | null
+}
 
 /**
  * Accounts are identity only. A password of '' is an account made by the
  * roster import — it has no password and signs in by magic link or Google.
  */
 const staffAccounts: SeedAccount[] = [
-  { id: IDS.staff.budi, email: 'staff@aston.example', name: 'Budi Santoso', isActive: true, isOperator: false, password: 'staff123' },
+  // Budi and Made were added from EMS (EMP-00101 / EMP-00106): EMS owns their
+  // name, email and membership at Simatupang, which is mapped to EMS below.
+  { id: IDS.staff.budi, email: 'staff@aston.example', name: 'Budi Santoso', isActive: true, isOperator: false, password: 'staff123', emsEmployeeId: 'EMP-00101' },
   { id: IDS.staff.sari, email: 'leader@aston.example', name: 'Sari Dewi', isActive: true, isOperator: false, password: 'leader123' },
   { id: IDS.staff.agus, email: 'admin@aston.example', name: 'Agus Wijaya', isActive: true, isOperator: false, password: 'admin123' },
   // A platform operator has ZERO staff_hotel rows: hotel-scoped routes refuse
   // them (auth.HotelFor requires membership for humans) — platform-only actor.
   { id: IDS.staff.operator, email: 'operator@sentineltech.example', name: 'Platform Operator', isActive: true, isOperator: true, password: 'operator123' },
   { id: IDS.staff.rina, email: 'regional@aston.example', name: 'Rina Hartono', isActive: true, isOperator: false, password: 'regional123' },
-  { id: IDS.staff.made, email: 'made@aston.example', name: 'Made Putra', isActive: true, isOperator: false, password: 'made12345' },
+  { id: IDS.staff.made, email: 'made@aston.example', name: 'Made Putra', isActive: true, isOperator: false, password: 'made12345', emsEmployeeId: 'EMP-00106' },
   { id: IDS.staff.joko, email: 'joko@aston.example', name: 'Joko Susilo', isActive: true, isOperator: false, password: 'joko12345' },
   { id: IDS.staff.nur, email: 'nur@fave.example', name: 'Nur Aini', isActive: true, isOperator: false, password: 'nur1234567' },
 ]
@@ -864,14 +1080,26 @@ const staffAccounts: SeedAccount[] = [
  * privilege). The branch notes do not say what role a grant confers; the
  * old account-wide model made Rina admin everywhere in the Aston group.
  */
-interface MembershipRow { staffId: Id, hotelRef: Id, role: StaffRole, hotelDepartmentId: Id | null, createTask: boolean }
+interface MembershipRow {
+  staffId: Id
+  hotelRef: Id
+  role: StaffRole
+  hotelDepartmentId: Id | null
+  createTask: boolean
+  /** staff_profile.sync_issue: the EMS department name Tasks could not match (null = clean). */
+  syncIssue?: string | null
+  /** staff_profile.ems_updated_at: the newest EMS push applied to this membership; null = any push is newer. */
+  emsUpdatedAt?: string | null
+}
 const staffHotels: MembershipRow[] = [
   { staffId: IDS.staff.budi, hotelRef: IDS.hotel.simatupang, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true },
   { staffId: IDS.staff.budi, hotelRef: IDS.hotel.kuningan, role: 'staff', hotelDepartmentId: IDS.dept.kngnHousekeeping, createTask: true },
   { staffId: IDS.staff.sari, hotelRef: IDS.hotel.simatupang, role: 'leader', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true },
   { staffId: IDS.staff.agus, hotelRef: IDS.hotel.simatupang, role: 'admin', hotelDepartmentId: null, createTask: true },
   { staffId: IDS.staff.rina, hotelRef: IDS.hotel.kuningan, role: 'admin', hotelDepartmentId: null, createTask: true },
-  { staffId: IDS.staff.made, hotelRef: IDS.hotel.simatupang, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: false },
+  // EMS says Made is in "Laundry", which Simatupang has no department for:
+  // the membership keeps its department and carries the sync issue.
+  { staffId: IDS.staff.made, hotelRef: IDS.hotel.simatupang, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: false, syncIssue: 'Laundry', emsUpdatedAt: '2026-08-20T01:00:00.000Z' },
   { staffId: IDS.staff.joko, hotelRef: IDS.hotel.simatupang, role: 'staff', hotelDepartmentId: IDS.dept.smtpMaintenance, createTask: true },
   { staffId: IDS.staff.nur, hotelRef: IDS.hotel.fave, role: 'staff', hotelDepartmentId: IDS.dept.faveHousekeeping, createTask: true },
 ]
@@ -914,11 +1142,12 @@ const boardColumns: BoardColumn[] = [
 ]
 
 const slas: Sla[] = [
-  { id: IDS.sla.smtpStandard, hotelRef: IDS.hotel.simatupang, name: 'Standard', responseTime: 15, resolutionTime: 45, isDefault: true, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.sla.smtpUrgent, hotelRef: IDS.hotel.simatupang, name: 'Urgent', responseTime: 5, resolutionTime: 20, isDefault: false, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.sla.smtpScheduled, hotelRef: IDS.hotel.simatupang, name: 'Scheduled', responseTime: 120, resolutionTime: 480, isDefault: false, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.sla.kngnStandard, hotelRef: IDS.hotel.kuningan, name: 'Standard', responseTime: 20, resolutionTime: 60, isDefault: true, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.sla.faveStandard, hotelRef: IDS.hotel.fave, name: 'Standard', responseTime: 30, resolutionTime: 90, isDefault: true, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.sla.smtpStandard, hotelRef: IDS.hotel.simatupang, name: 'Standard', responseTime: 15, resolutionTime: 45, isDefault: true, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  // The Urgent SLA names its own policy; everything else falls through to the hotel's default policy.
+  { id: IDS.sla.smtpUrgent, hotelRef: IDS.hotel.simatupang, name: 'Urgent', responseTime: 5, resolutionTime: 20, isDefault: false, escalationPolicyId: IDS.policy.smtpUrgent, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.sla.smtpScheduled, hotelRef: IDS.hotel.simatupang, name: 'Scheduled', responseTime: 120, resolutionTime: 480, isDefault: false, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.sla.kngnStandard, hotelRef: IDS.hotel.kuningan, name: 'Standard', responseTime: 20, resolutionTime: 60, isDefault: true, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.sla.faveStandard, hotelRef: IDS.hotel.fave, name: 'Standard', responseTime: 30, resolutionTime: 90, isDefault: true, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
 ]
 
 const categories: Category[] = [
@@ -1036,10 +1265,69 @@ const sourceApps: SourceApp[] = [
 ]
 
 const partners: Partner[] = [
-  { id: IDS.partner.butler, name: 'Sentec Butler', isActive: true, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.partner.pms, name: 'Sentec PMS', isActive: true, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.partner.ems, name: 'Sentec EMS', isActive: false, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.partner.butler, name: 'Sentec Butler', isActive: true, capabilities: [], createdAt: SEED, updatedAt: SEED },
+  { id: IDS.partner.pms, name: 'Sentec PMS', isActive: true, capabilities: [], createdAt: SEED, updatedAt: SEED },
+  // EMS is the one partner allowed to push staff changes (capability staff_sync).
+  { id: IDS.partner.ems, name: 'Sentec EMS', isActive: true, capabilities: ['staff_sync'], createdAt: SEED, updatedAt: SEED },
 ]
+
+/** Env EMS_PARTNER_ID: which partner row IS Sentec EMS, for the outbound directory calls and the "managed by EMS" check. */
+const EMS_PARTNER_ID: Id = IDS.partner.ems
+
+/**
+ * tenant_sync rows (feat/ems-staff-sync): a partner's own id for a property.
+ * Only Simatupang is mapped to EMS; the other two answer 422 "this property
+ * is not linked to EMS" on the EMS routes and are never touched by a push.
+ */
+const tenantSyncLinks: TenantSyncLink[] = [
+  { id: IDS.syncLink.smtpEms, hotelRef: IDS.hotel.simatupang, partnerId: IDS.partner.ems, partnerName: 'Sentec EMS', syncId: 'EMS-HTL-01', createdAt: SEED, updatedAt: SEED },
+]
+
+/**
+ * The EMS seam (ems.Directory): what GET {EMS_BASE_URL}/employees?hotelId=
+ * would return per EMS hotel id. A browser mock cannot call EMS, so the
+ * directory lives here; an unknown hotel id reads as EMS being unreachable.
+ */
+interface EmsDirectoryRow { id: string, name: string, email: string | null, active: boolean, departmentName: string | null }
+const emsDirectory = new Map<string, EmsDirectoryRow[]>([
+  ['EMS-HTL-01', [
+    { id: 'EMP-00101', name: 'Budi Santoso', email: 'staff@aston.example', active: true, departmentName: 'Housekeeping' },
+    { id: 'EMP-00106', name: 'Made Putra', email: 'made@aston.example', active: true, departmentName: 'Laundry' },
+    // Joko exists as MANUAL staff with this email: adding him LINKS the account.
+    { id: 'EMP-00107', name: 'Joko Susilo', email: 'joko@aston.example', active: true, departmentName: 'Maintenance' },
+    { id: 'EMP-00120', name: 'Ayu Lestari', email: 'ayu.lestari@aston.example', active: true, departmentName: 'Housekeeping' },
+    { id: 'EMP-00121', name: 'Dewi Kartika', email: 'dewi.kartika@aston.example', active: true, departmentName: 'Front Office' },
+    // "Spa" matches nothing active here: addable, but with a sync issue once added.
+    { id: 'EMP-00122', name: 'Rizky Pratama', email: 'rizky.pratama@aston.example', active: true, departmentName: 'Spa' },
+    { id: 'EMP-00123', name: 'Wayan Suardika', email: null, active: true, departmentName: 'Maintenance' },
+    { id: 'EMP-00124', name: 'Siti Rahma', email: 'siti.rahma@aston.example', active: false, departmentName: 'Housekeeping' },
+  ]],
+])
+
+// ── Escalation policies (feat/escalation). Steps are stored with a soft-delete
+// flag, as escalation_step.deleted_at is; reads show live steps only.
+interface PolicyRow { id: Id, hotelRef: Id, name: string, isDefault: boolean, isActive: boolean, createdAt: string, updatedAt: string }
+interface StepRow extends EscalationStep { hotelRef: Id, policyId: Id, deletedAt: string | null, createdAt: string, updatedAt: string }
+
+const escalationPolicies: PolicyRow[] = [
+  { id: IDS.policy.smtpStandard, hotelRef: IDS.hotel.simatupang, name: 'Standard escalation', isDefault: true, isActive: true, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.policy.smtpUrgent, hotelRef: IDS.hotel.simatupang, name: 'Urgent escalation', isDefault: false, isActive: true, createdAt: SEED, updatedAt: SEED },
+]
+
+const escalationSteps: StepRow[] = [
+  // Standard: tell the leaders at the response deadline; halfway to resolution
+  // bump the priority; at the resolution deadline bump again and tell admins.
+  { id: IDS.step.stdResponse, hotelRef: IDS.hotel.simatupang, policyId: IDS.policy.smtpStandard, sort: 0, triggerKind: 'RESPONSE_OVERDUE', triggerValue: 0, actions: [], recipients: [{ kind: 'departmentLeaders' }], deletedAt: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.step.stdHalfway, hotelRef: IDS.hotel.simatupang, policyId: IDS.policy.smtpStandard, sort: 1, triggerKind: 'PERCENT_OF_RESOLUTION', triggerValue: 50, actions: [{ type: 'bumpPriority' }], recipients: [{ kind: 'departmentLeaders' }, { kind: 'assignee' }], deletedAt: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.step.stdOverdue, hotelRef: IDS.hotel.simatupang, policyId: IDS.policy.smtpStandard, sort: 2, triggerKind: 'RESOLUTION_OVERDUE', triggerValue: 0, actions: [{ type: 'bumpPriority' }], recipients: [{ kind: 'admins' }, { kind: 'departmentLeaders' }], deletedAt: null, createdAt: SEED, updatedAt: SEED },
+  // Urgent: unclaimed for 10 open minutes → hand it to Engineering On-Call;
+  // 15 minutes past resolution → bump and tell the admins.
+  { id: IDS.step.urgUnassigned, hotelRef: IDS.hotel.simatupang, policyId: IDS.policy.smtpUrgent, sort: 0, triggerKind: 'UNASSIGNED_FOR', triggerValue: 10, actions: [{ type: 'reassign', teamId: IDS.team.engineering }], recipients: [{ kind: 'team', teamId: IDS.team.engineering }], deletedAt: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.step.urgOverdue, hotelRef: IDS.hotel.simatupang, policyId: IDS.policy.smtpUrgent, sort: 1, triggerKind: 'RESOLUTION_OVERDUE', triggerValue: 15, actions: [{ type: 'bumpPriority' }], recipients: [{ kind: 'admins' }, { kind: 'assignee' }], deletedAt: null, createdAt: SEED, updatedAt: SEED },
+]
+
+/** task_escalation rows: one per (task, step) ever applied — a step never fires twice. */
+const taskEscalations: TaskEscalation[] = []
 
 /**
  * The PMS seam: current visit by (hotel, location code). `found:false` rooms
@@ -1053,15 +1341,15 @@ const pmsVisits = new Map<string, { requesterRef: Id, requesterName: string, vis
 const PMS_ERROR_CODES = new Set(['PMS-DOWN'])
 
 const routingRules: RoutingRule[] = [
-  { id: IDS.rule.acFault, hotelRef: IDS.hotel.simatupang, itemRef: IDS.item.acFault, categoryId: null, locationTypeId: null, priority: null, specificity: 4, hotelDepartmentId: IDS.dept.smtpMaintenance, slaId: IDS.sla.smtpUrgent, remark: 'AC faults are urgent', createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.hk, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.hk, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpHousekeeping, slaId: IDS.sla.smtpStandard, remark: null, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.mnt, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.mnt, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpMaintenance, slaId: IDS.sla.smtpStandard, remark: null, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.concierge, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.concierge, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpFrontOffice, slaId: IDS.sla.smtpStandard, remark: null, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.fnb, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.fnb, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpFnb, slaId: IDS.sla.smtpStandard, remark: null, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.publicArea, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: null, locationTypeId: IDS.locationType.publicArea, priority: null, specificity: 2, hotelDepartmentId: IDS.dept.smtpFrontOffice, slaId: IDS.sla.smtpStandard, remark: 'Public areas are Front Office ground', createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.urgent, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: null, locationTypeId: null, priority: 'URGENT', specificity: 1, hotelDepartmentId: IDS.dept.smtpMaintenance, slaId: IDS.sla.smtpUrgent, remark: 'Unrouted urgent work goes to Maintenance', createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.faveHk, hotelRef: IDS.hotel.fave, itemRef: null, categoryId: IDS.category.faveHk, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.faveHousekeeping, slaId: IDS.sla.faveStandard, remark: null, createdAt: SEED, updatedAt: SEED },
-  { id: IDS.rule.faveCatchAll, hotelRef: IDS.hotel.fave, itemRef: null, categoryId: null, locationTypeId: null, priority: null, specificity: 0, hotelDepartmentId: IDS.dept.faveHousekeeping, slaId: IDS.sla.faveStandard, remark: 'Catch-all', createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.acFault, hotelRef: IDS.hotel.simatupang, itemRef: IDS.item.acFault, categoryId: null, locationTypeId: null, priority: null, specificity: 4, hotelDepartmentId: IDS.dept.smtpMaintenance, slaId: IDS.sla.smtpUrgent, remark: 'AC faults are urgent', escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.hk, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.hk, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpHousekeeping, slaId: IDS.sla.smtpStandard, remark: null, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.mnt, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.mnt, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpMaintenance, slaId: IDS.sla.smtpStandard, remark: null, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.concierge, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.concierge, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpFrontOffice, slaId: IDS.sla.smtpStandard, remark: null, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.fnb, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: IDS.category.fnb, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.smtpFnb, slaId: IDS.sla.smtpStandard, remark: null, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.publicArea, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: null, locationTypeId: IDS.locationType.publicArea, priority: null, specificity: 2, hotelDepartmentId: IDS.dept.smtpFrontOffice, slaId: IDS.sla.smtpStandard, remark: 'Public areas are Front Office ground', escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.urgent, hotelRef: IDS.hotel.simatupang, itemRef: null, categoryId: null, locationTypeId: null, priority: 'URGENT', specificity: 1, hotelDepartmentId: IDS.dept.smtpMaintenance, slaId: IDS.sla.smtpUrgent, remark: 'Unrouted urgent work goes to Maintenance', escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.faveHk, hotelRef: IDS.hotel.fave, itemRef: null, categoryId: IDS.category.faveHk, locationTypeId: null, priority: null, specificity: 3, hotelDepartmentId: IDS.dept.faveHousekeeping, slaId: IDS.sla.faveStandard, remark: null, escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
+  { id: IDS.rule.faveCatchAll, hotelRef: IDS.hotel.fave, itemRef: null, categoryId: null, locationTypeId: null, priority: null, specificity: 0, hotelDepartmentId: IDS.dept.faveHousekeeping, slaId: IDS.sla.faveStandard, remark: 'Catch-all', escalationPolicyId: null, createdAt: SEED, updatedAt: SEED },
 ]
 
 // Mutable stores the endpoints operate on.
@@ -1312,6 +1600,8 @@ export interface Actor {
   memberships: HotelMembership[]
   partnerId: Id | null
   partnerName: string
+  /** The partner row's capabilities, read on every request — a revoke applies from the next call. */
+  partnerCapabilities: string[]
   isOperator: boolean
   sessionId: Id | null
   csrfToken: string
@@ -1362,9 +1652,10 @@ function staffActor(acct: SeedAccount, session: Session | null, hotelHeader: str
     deptId: membership?.hotelDepartmentId ?? null,
     createTask: membership?.createTask ?? false,
     hotels: hotelsClaim(acct.id),
-    memberships: staffHotels.filter(r => r.staffId === acct.id).map(r => ({ hotelRef: r.hotelRef, role: r.role, hotelDepartmentId: r.hotelDepartmentId, createTask: r.createTask })),
+    memberships: staffHotels.filter(r => r.staffId === acct.id).map(membershipModel),
     partnerId: null,
     partnerName: '',
+    partnerCapabilities: [],
     isOperator: acct.isOperator,
     sessionId: session?.id ?? null,
     csrfToken: session?.csrfToken ?? '',
@@ -1391,13 +1682,13 @@ function resolveActor(headers: Record<string, string>): Actor {
     if (!match || !match[1]) throw unauthorized('missing bearer token')
     const token = match[1]
     if (token.startsWith('service:')) {
-      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
+      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: null, partnerName: '', partnerCapabilities: [], isOperator: false, sessionId: null, csrfToken: '' }
     }
     if (token.startsWith('partner:')) {
       const partner = partners.find(p => p.id === token.slice('partner:'.length))
       // A deactivated partner fails verification instantly — no caching.
       if (!partner || !partner.isActive) throw unauthorized('invalid token')
-      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: partner.id, partnerName: partner.name, isOperator: false, sessionId: null, csrfToken: '' }
+      return { isService: true, actingUser: headers['x-acting-user'] ?? '', staffId: null, role: 'admin', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: partner.id, partnerName: partner.name, partnerCapabilities: [...partner.capabilities], isOperator: false, sessionId: null, csrfToken: '' }
     }
     const bearer = staffBearerTokens.get(token)
     if (!bearer || bearer.expiresAt < Date.now()) throw unauthorized('invalid token')
@@ -1484,6 +1775,196 @@ function requireAdminAnywhere(ctx: Ctx) {
 
 function requireOperator(ctx: Ctx) {
   if (!ctx.actor.isOperator) throw forbidden('operator access required')
+}
+
+/** department.platformAdmin: an operator, or a non-partner service token — the two "platform" callers. */
+function requirePlatformAdmin(ctx: Ctx) {
+  if (!(ctx.actor.isOperator || (ctx.actor.isService && ctx.actor.partnerId === null))) throw forbidden('platform admin access required')
+}
+
+/** department.RequireActive: an ACTIVE hotel department of this hotel, else the 422 routing already uses. */
+function requireActiveDepartment(hotelRef: Id, hotelDepartmentId: Id) {
+  if (!hotelDepartments.some(d => d.id === hotelDepartmentId && d.hotelRef === hotelRef && d.isActive)) throw unprocessable('invalid department reference')
+}
+
+/** apperr.RequiredText: trimmed, non-empty, at most `max` characters — or the caller's one message. */
+function requiredText(value: unknown, max: number, message: string): string {
+  const text = asTrimmed(value)
+  if (!text || text.length > max) throw badRequest(message)
+  return text
+}
+
+/**
+ * jsonopt.Optional[uuid.UUID] for `escalationPolicyId` on SLA and routing
+ * writes: the key ABSENT keeps `stored`, JSON null (or "") clears it, a value
+ * must be an active policy of this hotel (422) — and must parse as a UUID at
+ * all, which is a decode failure in the Go (400 invalid JSON body).
+ */
+function decodeEscalationPolicyLink(body: Record<string, unknown>, hotelRef: Id, stored: Id | null): Id | null {
+  if (!('escalationPolicyId' in body) || body.escalationPolicyId === undefined) return stored
+  const raw = body.escalationPolicyId
+  if (raw === null || raw === '') return null
+  if (!isUuid(raw)) throw badRequest('invalid JSON body')
+  const id = raw.toLowerCase()
+  if (!activePolicyInHotel(hotelRef, id)) throw unprocessable('escalationPolicyId is not an active escalation policy of this hotel')
+  return id
+}
+
+
+/** One step as POST /v1/escalation-policies decodes it; a value Go's decoder would refuse is a 400 invalid JSON body. */
+interface EscalationStepInput { id: Id | null, sort: number, triggerKind: string, triggerValue: number, actions: EscalationAction[], recipients: EscalationRecipient[] }
+
+function decodeEscalationStep(raw: Record<string, unknown>): EscalationStepInput {
+  const uuidOrNull = (value: unknown): Id | null => {
+    if (value === undefined || value === null || value === '') return null
+    if (!isUuid(value)) throw badRequest('invalid JSON body')
+    return value.toLowerCase()
+  }
+  const int = (value: unknown): number => {
+    if (value === undefined || value === null) return 0
+    if (typeof value !== 'number' || !Number.isInteger(value)) throw badRequest('invalid JSON body')
+    return value
+  }
+  const actions = (Array.isArray(raw.actions) ? raw.actions as Array<Record<string, unknown>> : []).map((a) => {
+    const action: EscalationAction = { type: String(a.type ?? '') as EscalationActionType }
+    const staffId = uuidOrNull(a.staffId)
+    const teamId = uuidOrNull(a.teamId)
+    const hotelDepartmentId = uuidOrNull(a.hotelDepartmentId)
+    if (staffId) action.staffId = staffId
+    if (teamId) action.teamId = teamId
+    if (hotelDepartmentId) action.hotelDepartmentId = hotelDepartmentId
+    return action
+  })
+  const recipients = (Array.isArray(raw.recipients) ? raw.recipients as Array<Record<string, unknown>> : []).map((r) => {
+    const recipient: EscalationRecipient = { kind: String(r.kind ?? '') as EscalationRecipientKind }
+    const teamId = uuidOrNull(r.teamId)
+    const staffId = uuidOrNull(r.staffId)
+    if (teamId) recipient.teamId = teamId
+    if (staffId) recipient.staffId = staffId
+    return recipient
+  })
+  return { id: uuidOrNull(raw.id), sort: int(raw.sort), triggerKind: String(raw.triggerKind ?? ''), triggerValue: int(raw.triggerValue), actions, recipients }
+}
+
+/** escalation.validateStep — the first problem, in the Go's words, or null. */
+function validateEscalationStep(st: EscalationStepInput): string | null {
+  if (st.sort < 0 || st.sort >= ESCALATION_MAX_STEPS) return `sort must be 0-${ESCALATION_MAX_STEPS - 1}`
+  switch (st.triggerKind) {
+    case 'PERCENT_OF_RESOLUTION':
+      if (st.triggerValue < 1 || st.triggerValue > 100) return 'triggerValue must be a percent, 1-100'
+      break
+    case 'UNASSIGNED_FOR':
+      if (st.triggerValue < 1) return 'triggerValue must be at least 1 minute'
+      break
+    case 'RESPONSE_OVERDUE':
+    case 'RESOLUTION_OVERDUE':
+      if (st.triggerValue < 0) return 'triggerValue must be 0 or more minutes'
+      break
+    default:
+      return `unknown triggerKind "${st.triggerKind}"`
+  }
+  const seenAction = new Set<string>()
+  for (const a of st.actions) {
+    if (seenAction.has(a.type)) return `action "${a.type}" appears more than once`
+    seenAction.add(a.type)
+    switch (a.type) {
+      case 'bumpPriority':
+        if (a.staffId || a.teamId || a.hotelDepartmentId) return 'bumpPriority takes no target'
+        break
+      case 'reassign':
+        if (Boolean(a.staffId) === Boolean(a.teamId) || a.hotelDepartmentId) return 'reassign needs exactly one of staffId or teamId'
+        break
+      case 'routeToDepartment':
+        if (!a.hotelDepartmentId || a.staffId || a.teamId) return 'routeToDepartment needs hotelDepartmentId only'
+        break
+      default:
+        return `unknown action type "${a.type}"`
+    }
+  }
+  const seenKind = new Set<string>()
+  const seenTeam = new Set<Id>()
+  const seenStaff = new Set<Id>()
+  for (const r of st.recipients) {
+    switch (r.kind) {
+      case 'departmentLeaders':
+      case 'admins':
+      case 'assignee':
+        if (r.teamId || r.staffId) return `recipient "${r.kind}" takes no target`
+        if (seenKind.has(r.kind)) return `recipient "${r.kind}" appears more than once`
+        seenKind.add(r.kind)
+        break
+      case 'team':
+        if (!r.teamId || r.staffId) return 'team recipient needs teamId only'
+        if (seenTeam.has(r.teamId)) return `team ${r.teamId} appears more than once`
+        seenTeam.add(r.teamId)
+        break
+      case 'staff':
+        if (!r.staffId || r.teamId) return 'staff recipient needs staffId only'
+        if (seenStaff.has(r.staffId)) return `staff ${r.staffId} appears more than once`
+        seenStaff.add(r.staffId)
+        break
+      default:
+        return `unknown recipient kind "${r.kind}"`
+    }
+  }
+  return null
+}
+
+/** escalation.checkTargets: every named staff, team and department must be this hotel's (an active member, an active team, an active department). */
+function escalationTargetProblem(hotelRef: Id, st: EscalationStepInput): string | null {
+  const staffOk = (id: Id) => membershipAt(id, hotelRef) !== null && Boolean(account(id)?.isActive)
+  const teamOk = (id: Id) => teams.some(team => team.id === id && team.hotelRef === hotelRef && team.isActive)
+  const deptOk = (id: Id) => hotelDepartments.some(d => d.id === id && d.hotelRef === hotelRef && d.isActive)
+  for (const a of st.actions) {
+    if (a.staffId && !staffOk(a.staffId)) return `staff ${a.staffId} is not part of this hotel`
+    if (a.teamId && !teamOk(a.teamId)) return `team ${a.teamId} is not part of this hotel`
+    if (a.hotelDepartmentId && !deptOk(a.hotelDepartmentId)) return `department ${a.hotelDepartmentId} is not part of this hotel`
+  }
+  for (const r of st.recipients) {
+    if (r.staffId && !staffOk(r.staffId)) return `staff ${r.staffId} is not part of this hotel`
+    if (r.teamId && !teamOk(r.teamId)) return `team ${r.teamId} is not part of this hotel`
+  }
+  return null
+}
+
+/** department.normaliseCode: trimmed, upper-cased, 1-16 of A-Z 0-9 _; blank clears. */
+function normaliseDepartmentCode(raw: unknown): string | null {
+  const code = asTrimmed(raw).toUpperCase()
+  if (!code) return null
+  if (!/^[A-Z0-9_]{1,16}$/.test(code)) throw badRequest('code must be 1-16 characters of A-Z, 0-9 or _')
+  return code
+}
+
+function normaliseDepartmentDescription(raw: unknown): string | null {
+  const description = asTrimmed(raw)
+  if (description.length > 500) throw badRequest('description must be at most 500 characters')
+  return description || null
+}
+
+/** The two uniqueness rules on `department`, code first as the constraint order has it. */
+function assertMasterUnique(name: string, code: string | null, exceptId: Id | null) {
+  if (code && masterDepartments.some(d => d.id !== exceptId && d.code === code)) throw conflict('department code already exists')
+  if (masterDepartments.some(d => d.id !== exceptId && d.name.toLowerCase() === name.toLowerCase())) throw conflict('department name already exists')
+}
+
+/** EMS department names match the hotel's ACTIVE departments (master active too) by name, ignoring case and spaces. */
+function emsDepartmentFor(hotelRef: Id, departmentName: string | null): Id | null {
+  const key = (departmentName ?? '').trim().toLowerCase()
+  if (!key) return null
+  return hotelDepartments.find(d => d.hotelRef === hotelRef && d.isActive && d.masterIsActive && d.departmentName.trim().toLowerCase() === key)?.id ?? null
+}
+
+/** partner.normalizeCapabilities: trimmed, de-duplicated, every value known. */
+function normalizeCapabilities(raw: unknown): PartnerCapability[] {
+  if (!Array.isArray(raw)) return []
+  const out: PartnerCapability[] = []
+  for (const value of raw) {
+    const c = String(value ?? '').trim()
+    if (!c) continue
+    if (!(PARTNER_CAPABILITIES as string[]).includes(c)) throw badRequest(`unknown capability: ${c}`)
+    if (!out.includes(c as PartnerCapability)) out.push(c as PartnerCapability)
+  }
+  return out
 }
 
 /** DB-truth department for (staff, hotel): the membership row there — never the token's deptId claim. */
@@ -1870,6 +2351,9 @@ interface SeedTaskConfig {
   requesterRef?: Id | null
   requesterName?: string | null
   projectId?: Id | null
+  escalationPolicyId?: Id | null
+  escalationLevel?: number
+  escalatedAt?: string | null
   visitRef?: string | null
   priority?: TaskPriority
   locationId?: Id | null
@@ -1938,6 +2422,9 @@ function seedTaskRow(config: SeedTaskConfig): Task {
     submittedAt: config.submittedAt ?? null,
     templateId: null,
     occurrenceKey: null,
+    escalationPolicyId: config.escalationPolicyId ?? null,
+    escalationLevel: config.escalationLevel ?? 0,
+    escalatedAt: config.escalatedAt ?? null,
     projectId: config.projectId ?? null,
     createdAt,
     updatedAt: createdAt,
@@ -2192,6 +2679,29 @@ function seedDemoData() {
   })
   projectMembers.push({ projectId: IDS.project.poolDeck, staffId: IDS.staff.agus, level: 'MANAGER', source: 'MANUAL', addedBy: IDS.staff.agus, addedAt: '2026-06-28T01:00:00.000Z' })
 
+  // ── Escalated yesterday by the Standard policy (feat/escalation). Created
+  // 13:00 WIB Monday, Engineering hours; the three steps fired at 13:15
+  // (response overdue), 13:30 (halfway to resolution → HIGH became URGENT)
+  // and 14:00 (resolution overdue → bump skipped, already URGENT). Nobody
+  // claimed it, so it still sits with Maintenance at level 3.
+  seedTaskRow({
+    id: IDS.task.leakEscalated, hotelRef: H, status: 'NEW', title: 'Plumbing / leak', description: 'Water pooling under the basin in 1102',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.plumbing, priority: 'URGENT',
+    locationId: IDS.location.room1102, slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpMaintenance,
+    activationDate: '2026-08-24T06:00:00.000Z',
+    escalationPolicyId: IDS.policy.smtpStandard, escalationLevel: 3, escalatedAt: '2026-08-24T07:00:00.000Z',
+  })
+  seedHistoryRow(IDS.task.leakEscalated, IDS.staff.sari, 'NEW', null, '2026-08-24T06:00:00.000Z')
+  const leakEscalations: Array<Omit<TaskEscalation, 'hotelRef' | 'taskId'>> = [
+    { appliedAt: '2026-08-24T06:15:00.000Z', policyId: IDS.policy.smtpStandard, stepId: IDS.step.stdResponse, level: 1, trigger: { kind: 'RESPONSE_OVERDUE', value: 0 }, applied: [], skipped: [], recipients: [] },
+    { appliedAt: '2026-08-24T06:30:00.000Z', policyId: IDS.policy.smtpStandard, stepId: IDS.step.stdHalfway, level: 2, trigger: { kind: 'PERCENT_OF_RESOLUTION', value: 50 }, applied: [{ type: 'bumpPriority', before: 'HIGH', after: 'URGENT' }], skipped: [], recipients: [] },
+    { appliedAt: '2026-08-24T07:00:00.000Z', policyId: IDS.policy.smtpStandard, stepId: IDS.step.stdOverdue, level: 3, trigger: { kind: 'RESOLUTION_OVERDUE', value: 0 }, applied: [], skipped: [{ type: 'bumpPriority', reason: 'no_change' }], recipients: [IDS.staff.agus] },
+  ]
+  for (const record of leakEscalations) {
+    taskEscalations.push({ hotelRef: H, taskId: IDS.task.leakEscalated, ...record })
+    seedHistoryRow(IDS.task.leakEscalated, null, 'NEW', escalationDescription(record), record.appliedAt)
+  }
+
   // ── Templates. Two shared (admin-made) schedules and Budi's own weekday
   // rounds; the mock worker fills nextRunAt at boot and creates tasks lazily.
   taskTemplates.push(
@@ -2337,6 +2847,9 @@ function resolveTask(hotelRef: Id, input: ResolveInput): ResolvedTask {
   const sla = slas.find(s => s.id === slaId)
   if (!sla) throw badRequest('SLA not found')
   const hotelDepartmentId = rule?.hotelDepartmentId ?? null
+  // 9b. Escalation policy (decision 1): the rule's → the SLA's → the hotel's
+  //     active default → none. Resolved once; the steps are read live later.
+  const escalationPolicyId = rule?.escalationPolicyId ?? sla.escalationPolicyId ?? defaultEscalationPolicy(hotelRef)?.id ?? null
 
   // 10. Clocks: schedule-aware, and resolution CHAINS off the response due.
   const now = nowIso()
@@ -2393,6 +2906,9 @@ function resolveTask(hotelRef: Id, input: ResolveInput): ResolvedTask {
     submittedAt: null,
     templateId: null,
     occurrenceKey: null,
+    escalationPolicyId,
+    escalationLevel: 0,
+    escalatedAt: null,
     projectId: null,
     createdAt: now,
     updatedAt: now,
@@ -2739,7 +3255,13 @@ function propertiesOf(staffId: Id): Property[] {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-const membershipModel = (r: MembershipRow): HotelMembership => ({ hotelRef: r.hotelRef, role: r.role, hotelDepartmentId: r.hotelDepartmentId, createTask: r.createTask })
+const membershipModel = (r: MembershipRow): HotelMembership => ({
+  hotelRef: r.hotelRef,
+  role: r.role,
+  hotelDepartmentId: r.hotelDepartmentId,
+  createTask: r.createTask,
+  syncIssue: r.syncIssue ? { type: 'unknown_department', emsDepartmentName: r.syncIssue } : null,
+})
 
 /**
  * The Staff read model: identity + reach + per-property standing. `onlyHotel`
@@ -2752,6 +3274,7 @@ const staffReadModel = (acct: SeedAccount, onlyHotel?: Id): Staff => ({
   name: acct.name,
   isActive: acct.isActive,
   isOperator: acct.isOperator,
+  emsEmployeeId: acct.emsEmployeeId ?? null,
   properties: propertiesOf(acct.id),
   memberships: staffHotels.filter(r => r.staffId === acct.id && (!onlyHotel || r.hotelRef === onlyHotel)).map(membershipModel),
   groupGrants: groupGrants.filter(g => g.staffId === acct.id).map(g => g.groupId),
@@ -2946,10 +3469,13 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
     const hotelRef = resolveHotelForActor(ctx)
     requireAdminAt(ctx, hotelRef)
     // Each person's memberships hold only the listed hotel.
-    const rows = staffAccounts
+    let rows = staffAccounts
       .filter(s => s.isActive && staffHotels.some(r => r.staffId === s.id && r.hotelRef === hotelRef))
       .map(s => staffReadModel(s, hotelRef))
       .sort((a, b) => a.name.localeCompare(b.name))
+    // ?needsAttention=true: the admin's to-do list — members whose membership
+    // here carries an EMS sync issue (feat/ems-staff-sync decision #24).
+    if (ctx.query.needsAttention === 'true') rows = rows.filter(s => s.memberships.some(m => m.syncIssue !== null))
     return ok(rows)
   }
 
@@ -3013,6 +3539,8 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
     if (hotelDepartmentId) {
       const dept = hotelDepartments.find(d => d.id === hotelDepartmentId)
       if (!dept || !hotelIds.includes(dept.hotelRef)) throw badRequest('hotelDepartmentId does not belong to any of the staff member\'s hotels')
+      // New use of an inactive department is refused (dept-crud §6.3).
+      if (!dept.isActive) throw unprocessable('invalid department reference')
     }
     for (const id of hotelIds) {
       if (!tenants.some(t => t.hotelRef === id)) throw unprocessable('hotel or hotel department does not exist')
@@ -3078,17 +3606,191 @@ function handleAuthAndStaff(ctx: Ctx): FakeResponse | null {
         if (!isUuid(body.hotelDepartmentId)) throw badRequest('hotelDepartmentId must be a UUID')
         const dept = hotelDepartments.find(d => d.id === body.hotelDepartmentId)
         if (!dept || dept.hotelRef !== hotelRef) throw unprocessable('hotelDepartmentId does not belong to this hotel')
+        // An inactive department is refused only when the value CHANGES; the
+        // edit form re-sending the stored one is not a change (dept-crud §6.3).
+        if (!dept.isActive && membership.hotelDepartmentId !== dept.id) throw unprocessable('invalid department reference')
       }
       if (body.role !== undefined) membership.role = body.role as StaffRole
-      if (body.hotelDepartmentId !== undefined) membership.hotelDepartmentId = isUuid(body.hotelDepartmentId) ? body.hotelDepartmentId : null
+      if (body.hotelDepartmentId !== undefined) {
+        membership.hotelDepartmentId = isUuid(body.hotelDepartmentId) ? body.hotelDepartmentId : null
+        // A department set by hand clears the EMS sync issue until the next push (ems §6.3).
+        if (membership.hotelDepartmentId) membership.syncIssue = null
+      }
       if (body.createTask !== undefined) membership.createTask = Boolean(body.createTask)
     }
     if (typeof body.name === 'string' && body.name.trim()) target.name = body.name.trim()
     if (body.isActive !== undefined) target.isActive = Boolean(body.isActive)
+    // Every isActive:false patch offboards (ems §7.3): sessions revoked, open
+    // work released at every property; the memberships themselves are kept.
+    if (body.isActive === false) afterDeactivation(target.id, actor.staffId, nowIso())
     // The membership at the property this request named, and no other; no
     // property named means no memberships in the response, not all of them.
     return ok(staffReadModel(target, hotelRef ?? undefined) && { ...staffReadModel(target), memberships: hotelRef ? staffReadModel(target, hotelRef).memberships : [] })
   }
+
+  // ── DELETE /v1/staff/{id}/membership (feat/ems-staff-sync §8.3): remove a
+  // person from THIS property — their open work here goes back to its pool.
+  // Admin at the hotel; never yourself; never an EMS-managed member of an
+  // EMS-mapped property (EMS would quietly add them back).
+  const membershipPath = /^\/v1\/staff\/([^/]+)\/membership$/.exec(path)
+  if (method === 'DELETE' && membershipPath) {
+    const hotelRef = resolveHotelForActor(ctx)
+    if (!actor.isService && !actor.isOperator && roleAt(actor.staffId, hotelRef) !== 'admin') throw forbidden('admin access required at this hotel')
+    if (!isUuid(membershipPath[1])) throw badRequest('id must be a valid UUID')
+    const id = membershipPath[1]!.toLowerCase()
+    if (!actor.isService && id === actor.staffId) throw conflict('you cannot remove yourself from this property')
+    if (managedByEms(hotelRef, id)) throw conflict('this person is managed by EMS; remove them from this property in EMS')
+    if (!removeFromHotel(hotelRef, id, actor.staffId, 'Removed from this property by an admin', nowIso())) throw notFound('staff')
+    return noContent()
+  }
+
+  // ── EMS employees (feat/ems-staff-sync §8.1-8.2): browse the property's
+  // people in EMS and add them in bulk. Admin at the hotel. The directory is
+  // the mock's stand-in for GET {EMS_BASE_URL}/employees.
+  if (path === '/v1/ems/employees' && (method === 'GET' || method === 'POST')) {
+    const hotelRef = hotelFor(ctx)
+    requireAdminAt(ctx, hotelRef)
+    const link = tenantSyncLinks.find(l => l.hotelRef === hotelRef && l.partnerId === EMS_PARTNER_ID)
+    if (!link) throw unprocessable('this property is not linked to EMS')
+    const directory = emsDirectory.get(link.syncId)
+    // MOCK LIMIT: an EMS hotel id the directory does not know stands in for EMS failing or timing out.
+    if (!directory) throw new ApiError('UNAVAILABLE', 'EMS is not reachable')
+    const annotate = (row: EmsDirectoryRow): EmsEmployee => {
+      const hotelDepartmentId = emsDepartmentFor(hotelRef, row.departmentName)
+      const linked = staffAccounts.find(s => s.emsEmployeeId === row.id)
+      const state: EmsEmployeeState = linked && membershipAt(linked.id, hotelRef) ? 'added' : !row.email ? 'no_email' : !row.active ? 'inactive' : 'addable'
+      return { emsEmployeeId: row.id, name: row.name, email: row.email, active: row.active, departmentName: row.departmentName, hotelDepartmentId, state }
+    }
+    if (method === 'GET') {
+      const q = asTrimmed(ctx.query.q).toLowerCase()
+      let page = Number.parseInt(ctx.query.page ?? '', 10)
+      let pageSize = Number.parseInt(ctx.query.pageSize ?? '', 10)
+      if (!Number.isInteger(page) || page <= 0) page = 1
+      if (!Number.isInteger(pageSize) || pageSize <= 0 || pageSize > 100) pageSize = 50
+      const matches = directory.filter(row => !q || row.name.toLowerCase().includes(q) || (row.email ?? '').toLowerCase().includes(q) || row.id.toLowerCase().includes(q))
+      const slice = matches.slice((page - 1) * pageSize, page * pageSize)
+      return ok(slice.map(annotate), 200, { page, pageSize, total: matches.length })
+    }
+    const ids = [...new Set((Array.isArray(body.emsEmployeeIds) ? body.emsEmployeeIds : []).map(v => String(v ?? '').trim()).filter(Boolean))]
+    if (ids.length < 1 || ids.length > 100) throw badRequest('emsEmployeeIds must list 1-100 employees')
+    const role = String(body.role ?? '')
+    if (role !== 'staff' && role !== 'leader' && role !== 'admin') throw unprocessable('role must be staff, leader, or admin')
+    const createTask = Boolean(body.createTask)
+    const at = nowIso()
+    const results: EmsAddResult[] = ids.map((id) => {
+      // Re-read from EMS: an admin can only add people EMS says work here.
+      const row = directory.find(r => r.id === id)
+      if (!row) return { emsEmployeeId: id, outcome: 'failed', reason: 'not_found_at_this_property' }
+      if (!row.active) return { emsEmployeeId: id, outcome: 'failed', reason: 'inactive' }
+      if (!row.email) return { emsEmployeeId: id, outcome: 'failed', reason: 'no_email' }
+      const email = row.email.trim().toLowerCase()
+      if (!looksLikeEmail(email)) return { emsEmployeeId: id, outcome: 'failed', reason: 'invalid_email' }
+      const linked = staffAccounts.find(s => s.emsEmployeeId === id) ?? null
+      const byEmail = staffAccounts.find(s => s.email === email) ?? null
+      if (linked && byEmail && byEmail.id !== linked.id) return { emsEmployeeId: id, outcome: 'failed', reason: 'email_taken' }
+      if (!linked && byEmail?.emsEmployeeId) return { emsEmployeeId: id, outcome: 'failed', reason: 'email_linked_to_other_employee' }
+      let acct: SeedAccount
+      let outcome: EmsAddOutcome | '' = ''
+      if (!linked && !byEmail) {
+        // No password: they sign in by magic link or Google, as the roster import's accounts do.
+        acct = { id: newId(), email, name: row.name, isActive: true, isOperator: false, password: '', emsEmployeeId: id }
+        staffAccounts.push(acct)
+        outcome = 'created'
+      }
+      else if (linked) {
+        acct = linked
+      }
+      else {
+        acct = byEmail!
+        acct.emsEmployeeId = id
+        outcome = 'linked'
+      }
+      // EMS owns name and email (§6.3); a linked account comes back active.
+      acct.name = row.name
+      acct.email = email
+      acct.isActive = true
+      if (membershipAt(acct.id, hotelRef)) {
+        if (outcome === '') outcome = 'skipped'
+      }
+      else {
+        const hotelDepartmentId = emsDepartmentFor(hotelRef, row.departmentName)
+        staffHotels.push({ staffId: acct.id, hotelRef, role: role as StaffRole, hotelDepartmentId, createTask, syncIssue: hotelDepartmentId || !row.departmentName ? null : row.departmentName, emsUpdatedAt: null })
+        if (outcome === '') outcome = 'granted'
+      }
+      return { emsEmployeeId: id, outcome, staffId: acct.id }
+    })
+    void at
+    return ok(results)
+  }
+
+  // ── PUT /v1/ems/hotels/{syncId}/employees/{emsEmployeeId} (§6): EMS tells
+  // Tasks one employee's current state at one hotel. Interface surface,
+  // partner token with the staff_sync capability. One request per employee
+  // per hotel, carrying the FULL state; `updatedAt` must never go backwards.
+  const emsPush = /^\/v1\/ems\/hotels\/([^/]+)\/employees\/([^/]+)$/.exec(path)
+  if (method === 'PUT' && emsPush) {
+    if (!actor.partnerCapabilities.includes('staff_sync')) throw forbidden('this partner may not sync staff')
+    if (body.active !== undefined && typeof body.active !== 'boolean') throw badRequest('invalid JSON body')
+    if (body.updatedAt !== undefined && body.updatedAt !== null && (typeof body.updatedAt !== 'string' || Number.isNaN(Date.parse(body.updatedAt)))) throw badRequest('invalid JSON body')
+    if (body.active === undefined) throw badRequest('active is required')
+    const syncId = decodeURIComponent(emsPush[1]!).trim()
+    const employeeId = decodeURIComponent(emsPush[2]!).trim()
+    const name = asTrimmed(body.name)
+    const email = asTrimmed(body.email).toLowerCase()
+    const departmentName = asTrimmed(body.departmentName)
+    if (!syncId || syncId.length > 100) throw badRequest('hotel id is required')
+    if (!employeeId || employeeId.length > 100) throw badRequest('employee id is required (1-100 characters)')
+    if (!name || name.length > 200) throw badRequest('name is required (1-200 characters)')
+    if (!looksLikeEmail(email)) throw badRequest('email must be a valid address')
+    if (departmentName.length > 100) throw badRequest('departmentName is at most 100 characters')
+    if (!body.updatedAt) throw badRequest('updatedAt is required')
+    const updatedAt = new Date(body.updatedAt as string).toISOString()
+    const active = body.active as boolean
+    const link = tenantSyncLinks.find(l => l.partnerId === actor.partnerId && l.syncId === syncId)
+    if (!link) return ok({ status: 'ignored', reason: 'unmapped_hotel' })
+    const hotelRef = link.hotelRef
+    const acct = staffAccounts.find(s => s.emsEmployeeId === employeeId)
+    if (!acct) return ok({ status: 'ignored', reason: 'not_linked' })
+    let membership = membershipAt(acct.id, hotelRef)
+    // Stale: per membership, so a retried push for hotel B is not dropped by a
+    // newer push for hotel A; an auto-add is checked against the person's newest.
+    if (membership?.emsUpdatedAt && updatedAt < membership.emsUpdatedAt) return ok({ status: 'stale' })
+    if (!membership && acct.emsUpdatedAt && updatedAt < acct.emsUpdatedAt) return ok({ status: 'stale' })
+    const at = nowIso()
+    // Identity, only when this push is at least as new as the newest applied anywhere.
+    if (!acct.emsUpdatedAt || updatedAt >= acct.emsUpdatedAt) {
+      if (staffAccounts.some(s => s.id !== acct.id && s.email === email)) throw conflict('email is already used by another staff member')
+      acct.name = name
+      acct.email = email
+      acct.emsUpdatedAt = updatedAt
+    }
+    const hotelDepartmentId = emsDepartmentFor(hotelRef, departmentName || null)
+    if (active && membership) {
+      if (!departmentName) membership.syncIssue = null
+      else if (hotelDepartmentId) {
+        membership.hotelDepartmentId = hotelDepartmentId
+        membership.syncIssue = null
+      }
+      else {
+        membership.syncIssue = departmentName // keep the current department (decision #7)
+      }
+    }
+    else if (active && !membership) {
+      // Auto-add (decision #18): plain staff, no create-task, department from EMS; the account comes back if needed.
+      membership = { staffId: acct.id, hotelRef, role: 'staff', hotelDepartmentId, createTask: false, syncIssue: hotelDepartmentId || !departmentName ? null : departmentName, emsUpdatedAt: null }
+      staffHotels.push(membership)
+      acct.isActive = true
+    }
+    else if (!active && membership) {
+      // Offboard from this hotel (§7.1), then the left-company check (§7.2).
+      removeFromHotel(hotelRef, acct.id, null, 'Left the property (EMS)', at)
+      deactivateIfNoAccess(acct.id)
+      membership = null
+    }
+    if (membership) membership.emsUpdatedAt = updatedAt
+    return ok({ status: 'applied' })
+  }
+
 
   const grantMatch = /^\/v1\/staff\/([^/]+)\/group-grants\/([^/]+)$/.exec(path)
   if (grantMatch && (method === 'PUT' || method === 'DELETE')) {
@@ -3132,7 +3834,7 @@ function provisionTenant(body: Record<string, unknown>): FakeResponse {
   boards.push(board)
   const template: Array<[string, TaskStatus]> = [['New', 'NEW'], ['In Progress', 'IN_PROGRESS'], ['Awaiting Review', 'SUBMITTED'], ['Finished', 'FINISHED'], ['Verified', 'VERIFIED'], ['Cancelled', 'CANCELLED']]
   template.forEach(([columnName, status], index) => boardColumns.push(seedColumn(newId(), board.id, columnName, index + 1, status)))
-  slas.push({ id: newId(), hotelRef: id, name: 'Standard', responseTime: 30, resolutionTime: 90, isDefault: true, createdAt: created.createdAt, updatedAt: created.createdAt })
+  slas.push({ id: newId(), hotelRef: id, name: 'Standard', responseTime: 30, resolutionTime: 90, isDefault: true, escalationPolicyId: null, createdAt: created.createdAt, updatedAt: created.createdAt })
   return ok(created, 201)
 }
 
@@ -3220,8 +3922,10 @@ function handlePlatform(ctx: Ctx): FakeResponse | null {
     if (method === 'POST') {
       const name = asTrimmed(body.name)
       if (!name) throw badRequest('name is required')
+      // feat/ems-staff-sync: capabilities are trimmed, de-duplicated and closed (400 on an unknown one).
+      const capabilities = normalizeCapabilities(body.capabilities)
       if (partners.some(p => p.name.toLowerCase() === name.toLowerCase())) throw conflict('partner name already exists')
-      const created: Partner = { id: newId(), name, isActive: true, createdAt: nowIso(), updatedAt: nowIso() }
+      const created: Partner = { id: newId(), name, isActive: true, capabilities, createdAt: nowIso(), updatedAt: nowIso() }
       partners.push(created)
       // The ONLY response that ever carries the plaintext secret (43 chars).
       return ok({ ...created, secret: randomToken() }, 201)
@@ -3233,11 +3937,52 @@ function handlePlatform(ctx: Ctx): FakeResponse | null {
   if (method === 'PATCH' && partnerPatch) {
     const id = partnerPatch[1]!
     if (!isUuid(id)) throw badRequest('id must be a valid UUID')
+    // Before capabilities existed the body was {isActive} alone; an empty patch is refused, not applied as "deactivate".
+    if (body.isActive === undefined && body.capabilities === undefined) throw badRequest('isActive or capabilities is required')
+    const capabilities = body.capabilities === undefined ? undefined : normalizeCapabilities(body.capabilities)
     const partner = partners.find(p => p.id === id.toLowerCase())
     if (!partner) throw notFound('partner')
-    partner.isActive = Boolean(body.isActive)
+    if (body.isActive !== undefined) partner.isActive = Boolean(body.isActive)
+    if (capabilities) partner.capabilities = capabilities
     partner.updatedAt = nowIso()
     return ok(partner)
+  }
+
+  // ── Tenant sync ids (feat/ems-staff-sync §8.4): a partner's own id for a property.
+  const syncList = /^\/v1\/platform\/tenants\/([^/]+)\/sync$/.exec(path)
+  if (method === 'GET' && syncList) {
+    if (!isUuid(syncList[1])) throw badRequest('hotelRef must be a valid UUID')
+    const hotelRef = syncList[1]!.toLowerCase()
+    return ok(tenantSyncLinks.filter(l => l.hotelRef === hotelRef).sort((a, b) => a.partnerName.localeCompare(b.partnerName)))
+  }
+
+  const syncLink = /^\/v1\/platform\/tenants\/([^/]+)\/sync\/([^/]+)$/.exec(path)
+  if (syncLink && (method === 'PUT' || method === 'DELETE')) {
+    if (!isUuid(syncLink[1])) throw badRequest('hotelRef must be a valid UUID')
+    if (!isUuid(syncLink[2])) throw badRequest('partnerId must be a valid UUID')
+    const hotelRef = syncLink[1]!.toLowerCase()
+    const partnerId = syncLink[2]!.toLowerCase()
+    if (method === 'PUT') {
+      const syncId = asTrimmed(body.syncId)
+      if (!syncId || syncId.length > 100) throw badRequest('syncId is required (1-100 characters)')
+      const partner = partners.find(p => p.id === partnerId)
+      if (!partner || !tenants.some(t => t.hotelRef === hotelRef)) throw notFound('tenant or partner')
+      if (tenantSyncLinks.some(l => l.partnerId === partnerId && l.syncId === syncId && l.hotelRef !== hotelRef)) throw conflict('another property already uses this id for this partner')
+      const at = nowIso()
+      const existing = tenantSyncLinks.find(l => l.hotelRef === hotelRef && l.partnerId === partnerId)
+      if (existing) {
+        Object.assign(existing, { syncId, partnerName: partner.name, updatedAt: at })
+        return ok(existing)
+      }
+      const created: TenantSyncLink = { id: newId(), hotelRef, partnerId, partnerName: partner.name, syncId, createdAt: at, updatedAt: at }
+      tenantSyncLinks.push(created)
+      return ok(created)
+    }
+    // DELETE keeps existing memberships; future pushes for the hotel are `ignored`.
+    const index = tenantSyncLinks.findIndex(l => l.hotelRef === hotelRef && l.partnerId === partnerId)
+    if (index === -1) throw notFound('partner id for this property')
+    tenantSyncLinks.splice(index, 1)
+    return noContent()
   }
 
   if (path === '/v1/platform/source-apps') {
@@ -3350,6 +4095,90 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
     return ok({ ...board, columns: nullIfEmpty(columns) }, 200, { warnings })
   }
 
+  // ── Escalation policies (feat/escalation §8). Reads: any actor of the
+  // hotel; the upsert: admin at the hotel. One POST writes the policy AND its
+  // steps; literals and their order follow internal/escalation/service.go.
+  const policyById = /^\/v1\/escalation-policies\/([^/]+)$/.exec(path)
+  if (method === 'GET' && path === '/v1/escalation-policies') {
+    const hotelRef = hotelFor(ctx)
+    return ok(escalationPolicies
+      .filter(p => p.hotelRef === hotelRef)
+      .sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+      .map(policyModel))
+  }
+  if (method === 'GET' && policyById) {
+    const hotelRef = hotelFor(ctx)
+    if (!isUuid(policyById[1])) throw badRequest('id must be a uuid')
+    const policy = escalationPolicies.find(p => p.id === policyById[1]!.toLowerCase() && p.hotelRef === hotelRef)
+    if (!policy) throw notFound('escalation policy')
+    return ok(policyModel(policy))
+  }
+  if (method === 'POST' && path === '/v1/escalation-policies') {
+    const hotelRef = hotelFor(ctx)
+    if (!actor.isService && !actor.isOperator && actor.role !== 'admin') throw forbidden('admin access required')
+    const name = asTrimmed(body.name)
+    if (!name || name.length > 120) throw badRequest('name is required (1-120 chars)')
+    const stepsIn = Array.isArray(body.steps) ? body.steps as Array<Record<string, unknown>> : []
+    if (stepsIn.length > ESCALATION_MAX_STEPS) throw badRequest(`a policy has at most ${ESCALATION_MAX_STEPS} steps`)
+    const seenSort = new Set<number>()
+    const decoded = stepsIn.map((raw, i) => {
+      const step = decodeEscalationStep(raw)
+      const problem = validateEscalationStep(step)
+      if (problem) throw badRequest(`steps[${i}]: ${problem}`)
+      if (seenSort.has(step.sort)) throw badRequest(`steps[${i}]: duplicate sort ${step.sort}`)
+      seenSort.add(step.sort)
+      const foreign = escalationTargetProblem(hotelRef, step)
+      if (foreign) throw unprocessable(`steps[${i}]: ${foreign}`)
+      return step
+    })
+    const at = nowIso()
+    let policy: PolicyRow
+    if (isUuid(body.id)) {
+      const wantedId = body.id.toLowerCase()
+      const existing = escalationPolicies.find(p => p.id === wantedId && p.hotelRef === hotelRef)
+      if (!existing) throw notFound('escalation policy')
+      policy = existing
+    }
+    else {
+      policy = { id: newId(), hotelRef, name, isDefault: false, isActive: true, createdAt: at, updatedAt: at }
+    }
+    if (escalationPolicies.some(p => p.hotelRef === hotelRef && p.id !== policy.id && p.name.toLowerCase() === name.toLowerCase())) {
+      throw conflict('an escalation policy with this name already exists')
+    }
+    // Steps with an id must be live steps of THIS policy; checked before anything is written.
+    const live = liveSteps(policy.id)
+    for (const step of decoded) {
+      if (step.id && !live.some(st => st.id === step.id)) throw unprocessable(`unknown step id ${step.id} for this policy`)
+    }
+    const isDefault = Boolean(body.isDefault)
+    // A new default demotes the old one (as sla.Upsert does).
+    if (isDefault) escalationPolicies.filter(p => p.hotelRef === hotelRef && p.id !== policy.id && p.isDefault).forEach((p) => { p.isDefault = false })
+    policy.name = name
+    policy.isDefault = isDefault
+    // isActive omitted: true on create, unchanged on update.
+    if (typeof body.isActive === 'boolean') policy.isActive = body.isActive
+    policy.updatedAt = at
+    if (!escalationPolicies.includes(policy)) escalationPolicies.push(policy)
+    const keep = new Set<Id>()
+    for (const step of decoded) {
+      const row = step.id ? live.find(st => st.id === step.id)! : null
+      const triggerKind = step.triggerKind as EscalationTriggerKind // validated above
+      if (row) {
+        Object.assign(row, { sort: step.sort, triggerKind, triggerValue: step.triggerValue, actions: step.actions, recipients: step.recipients, updatedAt: at })
+        keep.add(row.id)
+      }
+      else {
+        const created: StepRow = { id: newId(), hotelRef, policyId: policy.id, sort: step.sort, triggerKind, triggerValue: step.triggerValue, actions: step.actions, recipients: step.recipients, deletedAt: null, createdAt: at, updatedAt: at }
+        escalationSteps.push(created)
+        keep.add(created.id)
+      }
+    }
+    // A live step missing from the request is soft-deleted (decision 20).
+    for (const row of live) if (!keep.has(row.id)) row.deletedAt = at
+    return ok(policyModel(policy))
+  }
+
+
   if (path === '/v1/slas') {
     const hotelRef = hotelFor(ctx)
     if (method === 'GET') {
@@ -3369,14 +4198,19 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
       const applyDefault = (id: Id) => {
         if (isDefault) slas.filter(s => s.hotelRef === hotelRef && s.id !== id).forEach((s) => { s.isDefault = false })
       }
-      if (isUuid(body.id)) {
-        const sla = slas.find(s => s.id === body.id && s.hotelRef === hotelRef)
-        if (!sla) throw notFound('sla')
-        applyDefault(sla.id)
-        Object.assign(sla, { name, responseTime, resolutionTime, isDefault, updatedAt: at })
-        return ok(sla)
+      const existing = isUuid(body.id) ? slas.find(s => s.id === body.id && s.hotelRef === hotelRef) : undefined
+      if (isUuid(body.id) && !existing) throw notFound('sla')
+      // feat/escalation: the key ABSENT keeps the stored link, null clears it,
+      // a value must be an active policy of this hotel. Only a newly supplied
+      // value is checked, so an SLA linked to a since-deactivated policy can
+      // still have its times edited.
+      const escalationPolicyId = decodeEscalationPolicyLink(body, hotelRef, existing?.escalationPolicyId ?? null)
+      if (existing) {
+        applyDefault(existing.id)
+        Object.assign(existing, { name, responseTime, resolutionTime, isDefault, escalationPolicyId, updatedAt: at })
+        return ok(existing)
       }
-      const created: Sla = { id: newId(), hotelRef, name, responseTime, resolutionTime, isDefault, createdAt: at, updatedAt: at }
+      const created: Sla = { id: newId(), hotelRef, name, responseTime, resolutionTime, isDefault, escalationPolicyId, createdAt: at, updatedAt: at }
       applyDefault(created.id)
       slas.push(created)
       return ok(created)
@@ -3415,14 +4249,16 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
     const existing = routingRules.find(r => r.hotelRef === hotelRef && (
       itemRef ? r.itemRef === itemRef : r.itemRef === null && r.categoryId === categoryId && r.locationTypeId === locationTypeId && r.priority === priority
     ))
+    // feat/escalation: absent keeps an existing rule's link, null clears, a value must be an active policy here.
+    const escalationPolicyId = decodeEscalationPolicyLink(body, hotelRef, existing?.escalationPolicyId ?? null)
     if (existing) {
-      Object.assign(existing, { hotelDepartmentId: departmentId, slaId, remark: asNullableTrimmed(body.remark), updatedAt: at })
+      Object.assign(existing, { hotelDepartmentId: departmentId, slaId, remark: asNullableTrimmed(body.remark), escalationPolicyId, updatedAt: at })
       return ok(existing)
     }
     const created: RoutingRule = {
       id: newId(), hotelRef, itemRef, categoryId, locationTypeId, priority,
       specificity: specificityOf({ itemRef, categoryId, locationTypeId, priority }),
-      hotelDepartmentId: departmentId, slaId, remark: asNullableTrimmed(body.remark), createdAt: at, updatedAt: at,
+      hotelDepartmentId: departmentId, slaId, remark: asNullableTrimmed(body.remark), escalationPolicyId, createdAt: at, updatedAt: at,
     }
     routingRules.push(created)
     return ok(created)
@@ -3439,16 +4275,8 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
     return noContent()
   }
 
-  const ruleByItem = /^\/v1\/routing-rules\/([^/]+)$/.exec(path)
-  if (method === 'DELETE' && ruleByItem && !path.startsWith('/v1/routing-rules/id/')) {
-    requireAdmin(ctx)
-    const hotelRef = hotelFor(ctx)
-    if (!isUuid(ruleByItem[1])) throw badRequest('itemRef must be a valid UUID')
-    const index = routingRules.findIndex(r => r.itemRef === ruleByItem[1]!.toLowerCase() && r.hotelRef === hotelRef)
-    if (index === -1) throw notFound('routing rule')
-    routingRules.splice(index, 1)
-    return noContent()
-  }
+  // DELETE /v1/routing-rules/{itemRef} is GONE (refactor/ponytail-audit):
+  // rules are deleted by id only, through /v1/routing-rules/id/{id} above.
 
   if (path === '/v1/catalog-items') {
     const hotelRef = hotelFor(ctx)
@@ -3596,7 +4424,10 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
       const name = asTrimmed(body.name)
       if (!name || name.length > 100) throw badRequest('name is required (1-100 chars)')
       const hotelDepartmentId = isUuid(body.hotelDepartmentId) ? body.hotelDepartmentId.toLowerCase() : null
-      if (hotelDepartmentId && !hotelDepartments.some(d => d.id === hotelDepartmentId && d.hotelRef === hotelRef && d.isActive)) throw unprocessable('invalid department reference')
+      // An inactive department is refused only when the value CHANGES: a team
+      // already in a now-inactive department can still be renamed (dept-crud §6.3).
+      const sameAsStored = isUuid(body.id) && teams.find(t => t.id === body.id && t.hotelRef === hotelRef)?.hotelDepartmentId === hotelDepartmentId
+      if (hotelDepartmentId && !sameAsStored) requireActiveDepartment(hotelRef, hotelDepartmentId)
       if (teams.some(t => t.hotelRef === hotelRef && t.name.toLowerCase() === name.toLowerCase() && t.id !== body.id)) throw conflict('team name already exists')
       const at = nowIso()
       const fields = { name, description: asNullableTrimmed(body.description), hotelDepartmentId, isActive: body.isActive === undefined ? true : Boolean(body.isActive), updatedAt: at }
@@ -3681,9 +4512,11 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
         return { date, isClosed: false, opensMinutes: opens, closesMinutes: closes }
       })
       const hotelDepartmentId = isUuid(body.hotelDepartmentId) ? body.hotelDepartmentId.toLowerCase() : null
-      if (hotelDepartmentId && !hotelDepartments.some(d => d.id === hotelDepartmentId && d.hotelRef === hotelRef && d.isActive)) throw unprocessable('invalid department reference')
       const isDefault = Boolean(body.isDefault)
       const id = isUuid(body.id) ? body.id.toLowerCase() : null
+      // Same "only when the value changes" rule as teams (dept-crud §6.3).
+      const sameDeptAsStored = id !== null && operatingSchedules.find(s => s.id === id && s.hotelRef === hotelRef)?.hotelDepartmentId === hotelDepartmentId
+      if (hotelDepartmentId && !sameDeptAsStored) requireActiveDepartment(hotelRef, hotelDepartmentId)
       // One default per hotel, one schedule per department.
       if (isDefault && operatingSchedules.some(s => s.hotelRef === hotelRef && s.isDefault && s.id !== id)) throw conflict('another schedule already claims this default/department slot')
       if (hotelDepartmentId && operatingSchedules.some(s => s.hotelRef === hotelRef && s.hotelDepartmentId === hotelDepartmentId && s.id !== id)) throw conflict('another schedule already claims this default/department slot')
@@ -3725,19 +4558,90 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
     return ok([...sourceApps].sort((a, b) => a.name.localeCompare(b.name)))
   }
 
+  // ── Departments (feat/department-crud). The master list: reads for an admin
+  // anywhere, writes for a platform admin; the hotel's rows: admin at the
+  // hotel, with PATCH {isActive} as the soft delete. Literals follow
+  // internal/department/{handler,service,repo}.go.
+  const masterById = /^\/v1\/departments\/([^/]+)$/.exec(path)
+  const masterId = (): Id => {
+    if (!isUuid(masterById![1])) throw badRequest('invalid id')
+    return masterById![1]!.toLowerCase()
+  }
   if (method === 'GET' && path === '/v1/departments') {
     // Names no single hotel: admin at any property the caller belongs to.
     requireAdminAnywhere(ctx)
     return ok([...masterDepartments].sort((a, b) => a.name.localeCompare(b.name)))
   }
+  if (method === 'GET' && masterById) {
+    requireAdminAnywhere(ctx)
+    const found = masterDepartments.find(d => d.id === masterId())
+    if (!found) throw notFound('department')
+    return ok(found)
+  }
+  if (method === 'POST' && path === '/v1/departments') {
+    requirePlatformAdmin(ctx)
+    const name = requiredText(body.name, 100, 'name is required (1-100 chars)')
+    const code = normaliseDepartmentCode(body.code)
+    const description = normaliseDepartmentDescription(body.description)
+    assertMasterUnique(name, code, null)
+    const created: MasterDepartment = { id: newId(), name, code, description, isActive: true, updatedAt: nowIso() }
+    masterDepartments.push(created)
+    return ok(created, 201)
+  }
+  if (method === 'PATCH' && masterById) {
+    requirePlatformAdmin(ctx)
+    const id = masterId()
+    const name = body.name === undefined || body.name === null ? undefined : requiredText(body.name, 100, 'name is required (1-100 chars)')
+    // A *string in the Go: JSON null reads as absent; "" clears the field.
+    const code = typeof body.code === 'string' ? normaliseDepartmentCode(body.code) : undefined
+    const description = typeof body.description === 'string' ? normaliseDepartmentDescription(body.description) : undefined
+    const isActive = typeof body.isActive === 'boolean' ? body.isActive : undefined
+    const found = masterDepartments.find(d => d.id === id)
+    if (!found) throw notFound('department')
+    if (name === undefined && code === undefined && description === undefined && isActive === undefined) return ok(found)
+    assertMasterUnique(name ?? found.name, code === undefined ? found.code : code, found.id)
+    if (name !== undefined) found.name = name
+    if (code !== undefined) found.code = code
+    if (description !== undefined) found.description = description
+    if (isActive !== undefined) found.isActive = isActive
+    found.updatedAt = nowIso()
+    // The hotel rows are a join onto the master: they follow its name, code, description and retirement.
+    hotelDepartments.filter(d => d.departmentId === found.id).forEach((d) => {
+      Object.assign(d, { departmentName: found.name, code: found.code, description: found.description, masterIsActive: found.isActive })
+    })
+    return ok(found)
+  }
+  if (method === 'DELETE' && masterById) {
+    requirePlatformAdmin(ctx)
+    const id = masterId()
+    const index = masterDepartments.findIndex(d => d.id === id)
+    if (index === -1) throw notFound('department')
+    // Hard delete only while no hotel has EVER used it (active or not).
+    const usedByHotels = hotelDepartments.filter(d => d.departmentId === id).length
+    if (usedByHotels > 0) throw conflict(`department is used by ${usedByHotels} hotel(s); deactivate it instead`)
+    masterDepartments.splice(index, 1)
+    return noContent()
+  }
 
-  if (path === '/v1/hotel-departments') {
-    if (method === 'GET') {
+  const hotelDeptById = /^\/v1\/hotel-departments\/([^/]+)$/.exec(path)
+  if (path === '/v1/hotel-departments' || hotelDeptById) {
+    const deptId = (): Id => {
+      if (!isUuid(hotelDeptById![1])) throw badRequest('invalid id')
+      return hotelDeptById![1]!.toLowerCase()
+    }
+    if (method === 'GET' && !hotelDeptById) {
       requireAdmin(ctx)
       const hotelRef = hotelFor(ctx)
       return ok(hotelDepartments.filter(d => d.hotelRef === hotelRef).sort((a, b) => a.departmentName.localeCompare(b.departmentName)))
     }
-    if (method === 'POST') {
+    if (method === 'GET' && hotelDeptById) {
+      requireAdmin(ctx)
+      const hotelRef = hotelFor(ctx)
+      const found = hotelDepartments.find(d => d.id === deptId() && d.hotelRef === hotelRef)
+      if (!found) throw notFound('hotel department')
+      return ok(found)
+    }
+    if (method === 'POST' && !hotelDeptById) {
       requireAdmin(ctx)
       // The one deliberate body-hotel exception: a service actor's hotelRef may
       // come from the body; a human admin resolves the header and must manage it.
@@ -3760,11 +4664,38 @@ function handleConfig(ctx: Ctx): FakeResponse | null {
       if (!departmentId) throw badRequest('departmentId is required')
       const master = masterDepartments.find(d => d.id === departmentId)
       if (!master || !tenants.some(t => t.hotelRef === hotelRef)) throw unprocessable('hotel or department does not exist')
+      // Idempotent: the existing row comes back 200 whatever its state; reactivation is PATCH's job.
       const existing = hotelDepartments.find(d => d.hotelRef === hotelRef && d.departmentId === departmentId)
       if (existing) return ok(existing, 200)
-      const created: HotelDepartment = { id: newId(), hotelRef, departmentId, departmentName: master.name, isActive: true }
+      // A retired master cannot be newly enabled anywhere (decision #6).
+      if (!master.isActive) throw unprocessable('department is not available')
+      const created = seedHotelDept(newId(), hotelRef, departmentId, true, nowIso())
       hotelDepartments.push(created)
       return ok(created, 201)
+    }
+    if (method === 'PATCH' && hotelDeptById) {
+      requireAdmin(ctx)
+      const hotelRef = hotelFor(ctx)
+      if (!actor.isService && !actor.isOperator && !staffHotels.some(r => r.staffId === actor.staffId && r.hotelRef === hotelRef)) {
+        throw forbidden('cannot manage departments for hotels you do not manage')
+      }
+      const id = deptId()
+      if (typeof body.isActive !== 'boolean') throw badRequest('isActive is required')
+      const found = hotelDepartments.find(d => d.id === id && d.hotelRef === hotelRef)
+      if (!found) throw notFound('hotel department')
+      if (found.isActive === body.isActive) return ok(found) // no-op 200
+      if (!body.isActive) {
+        // Decisions #3/#4: nothing that routes NEW work may still point here.
+        const rules = routingRules.filter(r => r.hotelRef === hotelRef && r.hotelDepartmentId === id).length
+        const steps = escalationSteps.filter(st => st.hotelRef === hotelRef && !st.deletedAt && st.actions.some(a => a.type === 'routeToDepartment' && a.hotelDepartmentId === id)).length
+        if (rules > 0 || steps > 0) throw conflict(`department is used by ${rules} routing rule(s) and ${steps} escalation policy step(s); repoint them first`)
+      }
+      else if (!found.masterIsActive) {
+        throw unprocessable('department is not available')
+      }
+      found.isActive = body.isActive
+      found.updatedAt = nowIso()
+      return ok(found)
     }
   }
 
@@ -3900,7 +4831,10 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     const assignee = validateAssignAtCreation(actor, hotelRef, body.assignee as AssigneeInput | null | undefined)
     const resolved = resolveTask(hotelRef, decodeStaffCreateRequest(ctx, 'staff'))
     if (isPreview) {
-      return ok({ task: resolved.task, checklistLabels: resolved.checklistLabels }, 200, { warnings: resolved.warnings })
+      // Preview alone names the resolved policy (omitempty: absent when there is none).
+      const policyName = resolved.task.escalationPolicyId ? escalationPolicies.find(p => p.id === resolved.task.escalationPolicyId)?.name : undefined
+      const task = policyName ? { ...resolved.task, escalationPolicyName: policyName } : resolved.task
+      return ok({ task, checklistLabels: resolved.checklistLabels }, 200, { warnings: resolved.warnings })
     }
     const t = resolved.task
     tasks.push(t)
@@ -4085,31 +5019,7 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
     if (t.status !== 'NEW' && t.status !== 'IN_PROGRESS') throw conflict('task is closed')
     const holding = activeAssignment(t.id)
     if (holding?.kind !== 'STAFF' || holding.staffId !== actor.staffId) throw forbidden('only the active assignee can return this task')
-    const at = nowIso()
-    taskAssignments.filter(a => a.taskId === t.id && a.isActive).forEach((a) => { a.isActive = false })
-    cancelPendingOffer(t.id, at)
-    // Pool selection, first match wins: (a) most recent TEAM/DEPARTMENT
-    // assignment verbatim; (b) the returner's latest active team; (c) the
-    // task's own department; (d) fully unassigned.
-    const lastPool = [...taskAssignments].reverse().find(a => a.taskId === t.id && a.kind !== 'STAFF')
-    const latestTeam = [...teamMembers]
-      .filter(m => m.staffId === actor.staffId && teams.some(team => team.id === m.teamId && team.isActive && team.hotelRef === hotelRef))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.teamId.localeCompare(a.teamId))[0]
-    let next: Pick<TaskAssignment, 'kind' | 'teamId' | 'hotelDepartmentId'> | null = null
-    if (lastPool) next = { kind: lastPool.kind, teamId: lastPool.teamId, hotelDepartmentId: lastPool.hotelDepartmentId }
-    else if (latestTeam) next = { kind: 'TEAM', teamId: latestTeam.teamId, hotelDepartmentId: null }
-    else if (t.hotelDepartmentId) next = { kind: 'DEPARTMENT', teamId: null, hotelDepartmentId: t.hotelDepartmentId }
-    if (next) {
-      taskAssignments.push({ id: newId(), taskId: t.id, kind: next.kind, staffId: null, teamId: next.teamId, hotelDepartmentId: next.hotelDepartmentId, assignedBy: actor.staffId, actingUser: null, remark: reason, isActive: true, createdAt: at })
-    }
-    if (t.status === 'IN_PROGRESS') {
-      changeStatusCore(t, actor.staffId, 'NEW', columnForStatus(hotelRef, 'NEW')?.id ?? null, reason, at)
-    }
-    else {
-      // Already NEW: no status write, but the reason still lands in history.
-      pushHistory(t, actor.staffId, 'NEW', reason, at)
-      t.updatedAt = at
-    }
+    returnToPoolCore(t, actor.staffId!, actor.staffId, reason, nowIso())
     return ok(taskDetail(t))
   }
 
@@ -4157,6 +5067,19 @@ function handleTasks(ctx: Ctx): FakeResponse | null {
       }
     }
     return ok(taskListItem(t))
+  }
+
+  // GET /v1/tasks/{id}/escalations (feat/escalation §8): the applied steps,
+  // oldest first — anyone who can open the task may ask; [] when none.
+  const escalationsPath = /^\/v1\/tasks\/([^/]+)\/escalations$/.exec(path)
+  if (method === 'GET' && escalationsPath) {
+    const hotelRef = hotelFor(ctx)
+    if (!isUuid(escalationsPath[1])) throw badRequest('id must be a valid UUID')
+    const t = tasks.find(row => row.id === escalationsPath[1]!.toLowerCase() && row.hotelRef === hotelRef)
+    if (!t || !visibleTo(actor, hotelRef, t)) throw notFound('task')
+    return ok(taskEscalations
+      .filter(r => r.taskId === t.id)
+      .sort((a, b) => a.appliedAt.localeCompare(b.appliedAt) || a.level - b.level))
   }
 
   const contextPath = /^\/v1\/tasks\/([^/]+)\/context$/.exec(path)
@@ -4648,7 +5571,7 @@ function templateActor(row: TemplateRow): Actor | null {
     if (actor.role === 'staff' && !actor.createTask) return null
     return actor
   }
-  return { isService: true, actingUser: 'recurring-worker', staffId: null, role: 'admin', deptId: null, createTask: true, hotels: [], memberships: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
+  return { isService: true, actingUser: 'recurring-worker', staffId: null, role: 'admin', deptId: null, createTask: true, hotels: [], memberships: [], partnerId: null, partnerName: '', partnerCapabilities: [], isOperator: false, sessionId: null, csrfToken: '' }
 }
 
 /** Create one task from a template through the same pipeline staff-create uses. */
@@ -4724,6 +5647,376 @@ function rescheduleTemplates(hotelRef: Id) {
   for (const row of taskTemplates) {
     if (row.hotelRef !== hotelRef || row.isArchived || !row.isActive || !row.recurrence) continue
     row.nextRunAt = nextRunAfter(row.recurrence, timezone, Date.now())
+  }
+}
+
+// ════════════════════════ Return-to-pool + offboarding (feat/ems-staff-sync §7) ════════════════════════
+
+/** NEW, IN_PROGRESS and PENDING: the statuses offboarding releases. SUBMITTED is the reviewer's wait, not the assignee's. */
+const RELEASABLE_STATUSES = new Set<TaskStatus>(['NEW', 'IN_PROGRESS', 'PENDING'])
+
+/**
+ * Return's write half (task.returnToPoolTx), shared with the offboarding
+ * release. `holder` is whose assignment ends and picks the team in rule (b);
+ * `actorStaffId` is who the history row and the new pool assignment are
+ * attributed to — null for EMS, which has no staff id.
+ *
+ * Pool selection, first match wins: (a) most recent TEAM/DEPARTMENT
+ * assignment verbatim; (b) the holder's latest active team; (c) the task's
+ * own department; (d) fully unassigned. An IN_PROGRESS task goes back to NEW;
+ * any other status keeps it, with the reason still landing in history.
+ */
+function returnToPoolCore(t: Task, holder: Id, actorStaffId: Id | null, reason: string, at: string) {
+  taskAssignments.filter(a => a.taskId === t.id && a.isActive).forEach((a) => { a.isActive = false })
+  cancelPendingOffer(t.id, at)
+  const lastPool = [...taskAssignments].reverse().find(a => a.taskId === t.id && a.kind !== 'STAFF')
+  const latestTeam = [...teamMembers]
+    .filter(m => m.staffId === holder && teams.some(team => team.id === m.teamId && team.isActive && team.hotelRef === t.hotelRef))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.teamId.localeCompare(a.teamId))[0]
+  let next: Pick<TaskAssignment, 'kind' | 'teamId' | 'hotelDepartmentId'> | null = null
+  if (lastPool) next = { kind: lastPool.kind, teamId: lastPool.teamId, hotelDepartmentId: lastPool.hotelDepartmentId }
+  else if (latestTeam) next = { kind: 'TEAM', teamId: latestTeam.teamId, hotelDepartmentId: null }
+  else if (t.hotelDepartmentId) next = { kind: 'DEPARTMENT', teamId: null, hotelDepartmentId: t.hotelDepartmentId }
+  if (next) {
+    taskAssignments.push({ id: newId(), taskId: t.id, kind: next.kind, staffId: null, teamId: next.teamId, hotelDepartmentId: next.hotelDepartmentId, assignedBy: actorStaffId, actingUser: null, remark: reason, isActive: true, createdAt: at })
+  }
+  if (t.status === 'IN_PROGRESS') {
+    changeStatusCore(t, actorStaffId, 'NEW', columnForStatus(t.hotelRef, 'NEW')?.id ?? null, reason, at)
+  }
+  else {
+    pushHistory(t, actorStaffId, t.status, reason, at)
+    t.updatedAt = at
+  }
+}
+
+/**
+ * task.Service.ReleaseStaff — the person's open work at ONE hotel goes back:
+ * every NEW/IN_PROGRESS/PENDING task they personally hold returns to its
+ * pool; their helper rows, pending offers and checklist-step assignments on
+ * open tasks are cleared; their team rows at the hotel are deleted. Safe to
+ * run again, and offboarding relies on that.
+ */
+function releaseStaffAt(hotelRef: Id, staffId: Id, actorStaffId: Id | null, reason: string, at: string) {
+  for (const t of tasks) {
+    if (t.hotelRef !== hotelRef || !RELEASABLE_STATUSES.has(t.status)) continue
+    const active = activeAssignment(t.id)
+    if (active?.kind !== 'STAFF' || active.staffId !== staffId) continue
+    returnToPoolCore(t, staffId, actorStaffId, reason, at)
+  }
+  const open = new Set(tasks.filter(t => t.hotelRef === hotelRef && RELEASABLE_STATUSES.has(t.status)).map(t => t.id))
+  taskCollaborators.filter(c => open.has(c.taskId) && c.staffId === staffId && c.isActive).forEach((c) => { c.isActive = false })
+  taskOffers.filter(o => open.has(o.taskId) && o.state === 'PENDING' && (o.toStaff === staffId || o.fromStaff === staffId)).forEach((o) => {
+    o.state = 'CANCELLED'
+    o.decidedAt = at
+  })
+  checklistItems.filter(c => open.has(c.taskId) && c.assignedStaffId === staffId).forEach((c) => {
+    c.assignedStaffId = null
+    c.assignedBy = null
+    c.assignedAt = null
+    c.updatedAt = at
+  })
+  for (let i = teamMembers.length - 1; i >= 0; i--) {
+    const m = teamMembers[i]!
+    if (m.staffId === staffId && teams.some(team => team.id === m.teamId && team.hotelRef === hotelRef)) teamMembers.splice(i, 1)
+  }
+}
+
+/** offboard.RemoveFromHotel: drop the membership first (no new work can reach them), then release. False when there was no membership — the release still runs. */
+function removeFromHotel(hotelRef: Id, staffId: Id, actorStaffId: Id | null, reason: string, at: string): boolean {
+  const index = staffHotels.findIndex(r => r.staffId === staffId && r.hotelRef === hotelRef)
+  const removed = index !== -1
+  if (removed) staffHotels.splice(index, 1)
+  releaseStaffAt(hotelRef, staffId, actorStaffId, reason, at)
+  return removed
+}
+
+/** Every session and bearer token of one person — web_session rows deleted. */
+function revokeSessions(staffId: Id) {
+  for (const [key, session] of sessions) if (session.staffId === staffId) sessions.delete(key)
+  for (const [key, bearer] of staffBearerTokens) if (bearer.staffId === staffId) staffBearerTokens.delete(key)
+}
+
+/** offboard.AfterDeactivation (§7.3): sessions revoked and open work released at EVERY hotel; memberships are kept so reactivation restores access. */
+function afterDeactivation(staffId: Id, actorStaffId: Id | null, at: string) {
+  revokeSessions(staffId)
+  for (const hotelRef of new Set(staffHotels.filter(r => r.staffId === staffId).map(r => r.hotelRef))) {
+    releaseStaffAt(hotelRef, staffId, actorStaffId, 'Account deactivated', at)
+  }
+}
+
+/** offboard.DeactivateIfNoAccess (§7.2, EMS only): no membership and no group grant left → the account goes inactive. */
+function deactivateIfNoAccess(staffId: Id): boolean {
+  const acct = account(staffId)
+  if (!acct || !acct.isActive) return false
+  if (staffHotels.some(r => r.staffId === staffId) || groupGrants.some(g => g.staffId === staffId)) return false
+  acct.isActive = false
+  revokeSessions(staffId)
+  return true
+}
+
+/** Decision #26: only EMS may remove an EMS-linked member from a property that is mapped to EMS. */
+function managedByEms(hotelRef: Id, staffId: Id): boolean {
+  const acct = account(staffId)
+  return Boolean(acct?.emsEmployeeId) && membershipAt(staffId, hotelRef) !== null
+    && tenantSyncLinks.some(l => l.hotelRef === hotelRef && l.partnerId === EMS_PARTNER_ID)
+}
+
+// ════════════════════════ Escalation sweep (feat/escalation §5-6) ════════════════════════
+
+const ESCALATABLE_STATUSES = new Set<TaskStatus>(['NEW', 'IN_PROGRESS', 'PENDING'])
+
+const defaultEscalationPolicy = (hotelRef: Id) => escalationPolicies.find(p => p.hotelRef === hotelRef && p.isDefault && p.isActive) ?? null
+
+const activePolicyInHotel = (hotelRef: Id, id: Id) => escalationPolicies.some(p => p.id === id && p.hotelRef === hotelRef && p.isActive)
+
+/** The policy's live steps, by sort. */
+const liveSteps = (policyId: Id): StepRow[] =>
+  escalationSteps.filter(st => st.policyId === policyId && !st.deletedAt).sort((a, b) => a.sort - b.sort)
+
+const stepModel = (st: StepRow): EscalationStep => ({ id: st.id, sort: st.sort, triggerKind: st.triggerKind, triggerValue: st.triggerValue, actions: st.actions, recipients: st.recipients })
+
+const policyModel = (p: PolicyRow): EscalationPolicy => ({ ...p, steps: liveSteps(p.id).map(stepModel) })
+
+/** Working minutes between two instants on the task's schedule; 0 when `to` is not after `from`. */
+function workingMinutesBetween(hotelRef: Id, schedule: OperatingSchedule | null, fromIso: string, toIso: string): number {
+  if (Date.parse(toIso) <= Date.parse(fromIso)) return 0
+  return elapsedScheduleMinutes(hotelRef, schedule, fromIso, toIso)
+}
+
+/** Working minutes past a deadline, or -1 before it (so a 0-minute trigger fires AT the deadline, never before). */
+function minutesPastDeadline(hotelRef: Id, schedule: OperatingSchedule | null, deadline: string | null, atIso: string): number {
+  if (!deadline || Date.parse(atIso) < Date.parse(deadline)) return -1
+  return workingMinutesBetween(hotelRef, schedule, deadline, atIso)
+}
+
+/** escalation.triggerDue — evaluated against the task's CURRENT state (§5). */
+function escalationStepDue(step: StepRow, t: Task, hasStaffAssignee: boolean, schedule: OperatingSchedule | null, atIso: string): boolean {
+  const effectiveDueAt = t.dueAt ?? t.resolutionDueAt
+  switch (step.triggerKind) {
+    case 'RESPONSE_OVERDUE':
+      return t.responseSlaStatus === 'EMPTY' && minutesPastDeadline(t.hotelRef, schedule, t.responseDueAt, atIso) >= step.triggerValue
+    case 'RESOLUTION_OVERDUE':
+      return minutesPastDeadline(t.hotelRef, schedule, effectiveDueAt, atIso) >= step.triggerValue
+    case 'UNASSIGNED_FOR':
+      return !hasStaffAssignee && workingMinutesBetween(t.hotelRef, schedule, t.activationDate, atIso) >= step.triggerValue
+    case 'PERCENT_OF_RESOLUTION': {
+      if (!effectiveDueAt) return false
+      const window = workingMinutesBetween(t.hotelRef, schedule, t.activationDate, effectiveDueAt)
+      if (window <= 0) return true
+      return workingMinutesBetween(t.hotelRef, schedule, t.activationDate, atIso) * 100 >= window * step.triggerValue
+    }
+  }
+  return false
+}
+
+const refOf = (kind: string, id: Id | null | undefined) => (id ? `${kind}:${id}` : '')
+
+function assignmentRefString(a: TaskAssignment | null): string {
+  if (!a) return ''
+  if (a.kind === 'STAFF') return refOf('staff', a.staffId)
+  if (a.kind === 'TEAM') return refOf('team', a.teamId)
+  return refOf('department', a.hotelDepartmentId)
+}
+
+/** The task as the steps applied so far have left it (decision 6: actions act on current values). */
+interface EscalationState { priority: TaskPriority, deptId: Id | null, assignment: TaskAssignment | null }
+
+/** Escalation acts as a system actor: assigned_by NULL, acting_user 'escalation', the human gates bypassed. */
+function replaceAssignmentByEscalation(t: Task, st: EscalationState, next: Pick<TaskAssignment, 'kind' | 'staffId' | 'teamId' | 'hotelDepartmentId'>, at: string) {
+  taskAssignments.filter(a => a.taskId === t.id && a.isActive).forEach((a) => { a.isActive = false })
+  cancelPendingOffer(t.id, at)
+  const row: TaskAssignment = { id: newId(), taskId: t.id, ...next, assignedBy: null, actingUser: 'escalation', remark: null, isActive: true, createdAt: at }
+  taskAssignments.push(row)
+  st.assignment = row
+}
+
+type EscalationDetail = Omit<TaskEscalation, 'hotelRef' | 'taskId' | 'appliedAt'>
+
+/** §6.3: actions in the fixed order bumpPriority, routeToDepartment, reassign; each applies or is recorded as skipped with its reason. */
+function applyEscalationStep(t: Task, st: EscalationState, step: StepRow, level: number, at: string): EscalationDetail {
+  const detail: EscalationDetail = {
+    policyId: t.escalationPolicyId!, stepId: step.id, level,
+    trigger: { kind: step.triggerKind, value: step.triggerValue },
+    applied: [], skipped: [], recipients: [],
+  }
+  const priorAssignee = st.assignment?.kind === 'STAFF' ? st.assignment.staffId : null
+  const bump = step.actions.find(a => a.type === 'bumpPriority')
+  const route = step.actions.find(a => a.type === 'routeToDepartment')
+  const reassign = step.actions.find(a => a.type === 'reassign')
+
+  if (bump) {
+    const index = TASK_PRIORITY_VALUES.indexOf(st.priority)
+    if (index >= 0 && index < TASK_PRIORITY_VALUES.length - 1) {
+      const next = TASK_PRIORITY_VALUES[index + 1]!
+      detail.applied.push({ type: 'bumpPriority', before: st.priority, after: next })
+      st.priority = next
+    }
+    else {
+      detail.skipped.push({ type: 'bumpPriority', reason: 'no_change' })
+    }
+  }
+
+  let routed = false
+  if (route?.hotelDepartmentId) {
+    const target = route.hotelDepartmentId
+    if (st.deptId === target) detail.skipped.push({ type: 'routeToDepartment', reason: 'no_change' })
+    else if (!hotelDepartments.some(d => d.id === target && d.hotelRef === t.hotelRef && d.isActive)) detail.skipped.push({ type: 'routeToDepartment', reason: 'target_invalid' })
+    else {
+      const from = st.deptId
+      t.hotelDepartmentId = target
+      st.deptId = target
+      routed = true
+      detail.applied.push({ type: 'routeToDepartment', before: refOf('department', from), after: refOf('department', target) })
+    }
+  }
+
+  let reassigned = false
+  if (reassign) {
+    const before = assignmentRefString(st.assignment)
+    if (reassign.staffId) {
+      const staffId = reassign.staffId
+      if (st.assignment?.kind === 'STAFF' && st.assignment.staffId === staffId) detail.skipped.push({ type: 'reassign', reason: 'no_change' })
+      else if (!membershipAt(staffId, t.hotelRef) || !account(staffId)?.isActive) detail.skipped.push({ type: 'reassign', reason: 'target_invalid' })
+      else {
+        taskCollaborators.filter(c => c.taskId === t.id && c.staffId === staffId && c.isActive).forEach((c) => { c.isActive = false })
+        replaceAssignmentByEscalation(t, st, { kind: 'STAFF', staffId, teamId: null, hotelDepartmentId: null }, at)
+        ensureAutoMember(t, staffId, null, at)
+        reassigned = true
+        detail.applied.push({ type: 'reassign', before, after: refOf('staff', staffId) })
+      }
+    }
+    else if (reassign.teamId) {
+      const teamId = reassign.teamId
+      if (st.assignment?.kind === 'TEAM' && st.assignment.teamId === teamId) detail.skipped.push({ type: 'reassign', reason: 'no_change' })
+      else if (!teams.some(team => team.id === teamId && team.hotelRef === t.hotelRef && team.isActive)) detail.skipped.push({ type: 'reassign', reason: 'target_invalid' })
+      else {
+        replaceAssignmentByEscalation(t, st, { kind: 'TEAM', staffId: null, teamId, hotelDepartmentId: null }, at)
+        reassigned = true
+        detail.applied.push({ type: 'reassign', before, after: refOf('team', teamId) })
+      }
+    }
+  }
+
+  // Decision 12: a route clears the assignee into the new department's pool
+  // unless the same step also reassigned (reassign wins).
+  if (routed && !reassigned) replaceAssignmentByEscalation(t, st, { kind: 'DEPARTMENT', staffId: null, teamId: null, hotelDepartmentId: st.deptId }, at)
+
+  detail.recipients = resolveEscalationRecipients(t.hotelRef, st, step.recipients, priorAssignee)
+  return detail
+}
+
+/** §6.3 recipients, resolved AFTER the actions except `assignee` (the assignee before this step). Duplicates removed, order kept. */
+function resolveEscalationRecipients(hotelRef: Id, st: EscalationState, recipients: EscalationRecipient[], priorAssignee: Id | null): Id[] {
+  const out: Id[] = []
+  const add = (...ids: Id[]) => ids.forEach((id) => { if (!out.includes(id)) out.push(id) })
+  const byRole = (role: StaffRole, deptId: Id | null) => staffHotels
+    .filter(r => r.hotelRef === hotelRef && r.role === role && account(r.staffId)?.isActive && (deptId === null || r.hotelDepartmentId === deptId))
+    .map(r => r.staffId)
+  for (const r of recipients) {
+    switch (r.kind) {
+      case 'assignee':
+        if (priorAssignee) add(priorAssignee)
+        break
+      case 'staff':
+        if (r.staffId && membershipAt(r.staffId, hotelRef)) add(r.staffId)
+        break
+      // A task with no department → every leader of the hotel (no leader is closer to it than another).
+      case 'departmentLeaders':
+        add(...byRole('leader', st.deptId))
+        break
+      case 'admins':
+        add(...byRole('admin', null))
+        break
+      case 'team':
+        if (r.teamId) add(...teamMembers.filter(m => m.teamId === r.teamId).map(m => m.staffId))
+        break
+    }
+  }
+  return out
+}
+
+/** The task_history description the worker writes, word for word (task/escalate.go escalationDescription). */
+export function escalationDescription(d: Pick<TaskEscalation, 'level' | 'trigger' | 'applied' | 'skipped'>): string {
+  // Function-local on purpose: seeding calls this before module-level consts below the seed exist (TDZ).
+  const labels: Record<EscalationTriggerKind, (value: number) => string> = {
+    RESPONSE_OVERDUE: value => `response overdue ${value} min`,
+    PERCENT_OF_RESOLUTION: value => `${value}% of resolution time`,
+    RESOLUTION_OVERDUE: value => `resolution overdue ${value} min`,
+    UNASSIGNED_FOR: value => `unassigned for ${value} min`,
+  }
+  const label = labels[d.trigger.kind]?.(d.trigger.value) ?? `${d.trigger.kind} ${d.trigger.value}`
+  let out = `Escalated (level ${d.level}, ${label})`
+  const parts = d.applied.map(a => (a.type === 'bumpPriority' ? `priority ${a.before} → ${a.after}` : a.type === 'reassign' ? 'reassigned' : 'moved to another department'))
+  if (parts.length) out += `: ${parts.join('; ')}`
+  out += '.'
+  if (d.skipped.length) out += ` Skipped: ${d.skipped.map(x => `${x.type} (${x.reason})`).join(', ')}.`
+  return out
+}
+
+/**
+ * The escalation sweep (escalation.Sweeper + task.Service.Escalate), run
+ * lazily before every authenticated request like the template worker. Every
+ * due, not-yet-applied step of a task's policy is applied in sort order and
+ * fully recorded; a step never fires twice; the level never goes down.
+ */
+function runDueEscalations() {
+  const at = nowIso()
+  for (const t of tasks) {
+    if (!t.escalationPolicyId || !ESCALATABLE_STATUSES.has(t.status)) continue
+    const policy = escalationPolicies.find(p => p.id === t.escalationPolicyId && p.hotelRef === t.hotelRef)
+    if (!policy?.isActive) continue // decision 20: an inactive policy stops escalating
+    const steps = liveSteps(policy.id)
+    if (!steps.length) continue
+    const applied = new Set(taskEscalations.filter(r => r.taskId === t.id).map(r => r.stepId))
+    const schedule = scheduleFor(t.hotelRef, t.hotelDepartmentId)
+    const assignment = activeAssignment(t.id)
+    const due = steps.filter(st => !applied.has(st.id) && escalationStepDue(st, t, assignment?.kind === 'STAFF', schedule, at))
+    if (!due.length) continue
+    const state: EscalationState = { priority: t.priority, deptId: t.hotelDepartmentId, assignment }
+    let level = t.escalationLevel
+    for (const step of due) {
+      const detail = applyEscalationStep(t, state, step, step.sort + 1, at)
+      taskEscalations.push({ hotelRef: t.hotelRef, taskId: t.id, appliedAt: at, ...detail })
+      pushHistory(t, null, t.status, escalationDescription(detail), at)
+      level = Math.max(level, step.sort + 1)
+    }
+    t.priority = state.priority
+    t.escalationLevel = level
+    t.escalatedAt = at
+    t.updatedAt = at
+  }
+}
+
+// ════════════════════════ Surfaces (feat/interface-lambda) ════════════════════════
+//
+// The real API is TWO deployments of one code base: the main Lambda (staff
+// cookies, service tokens) and the interface Lambda (partner tokens only).
+// Every route is tagged with the surfaces that mount it; the gate below sits
+// between EitherAuth and CSRF exactly as server.surfaceGate does.
+
+const INTERFACE_PATTERNS = new Set([
+  'GET /healthz', 'POST /v1/tasks', 'POST /v1/tasks/preview', 'POST /v1/tasks/assign', 'PATCH /v1/tasks/status', 'PATCH /v1/tasks/update',
+  'POST /v1/tasks/attachments', 'POST /v1/tasks/guest-attachments', 'GET /v1/tasks', 'GET /v1/tasks/{id}', 'GET /v1/tasks/{id}/context',
+  'GET /v1/tasks/{id}/escalations', 'PUT /v1/ems/hotels/{syncId}/employees/{emsEmployeeId}',
+])
+/** Mounted on the interface Lambda ONLY: the main deployment does not serve these at all. */
+const INTERFACE_ONLY_PATTERNS = new Set(['POST /v1/tasks', 'POST /v1/tasks/guest-attachments', 'PUT /v1/ems/hotels/{syncId}/employees/{emsEmployeeId}'])
+
+function routePattern(method: string, path: string): string {
+  const normalised = path
+    .replace(/^\/v1\/tasks\/[0-9a-f-]{36}(\/(context|escalations))?$/i, (_m, tail: string | undefined) => `/v1/tasks/{id}${tail ?? ''}`)
+    .replace(/^\/v1\/ems\/hotels\/[^/]+\/employees\/[^/]+$/, '/v1/ems/hotels/{syncId}/employees/{emsEmployeeId}')
+  return `${method} ${normalised}`
+}
+
+/** A partner token is only ever accepted by the interface API; nobody else reaches its exclusive routes. */
+function surfaceGate(ctx: Ctx) {
+  const pattern = routePattern(ctx.method, ctx.path)
+  if (ctx.actor.partnerId !== null) {
+    if (!INTERFACE_PATTERNS.has(pattern)) throw forbidden('partner tokens must use the interface API')
+  }
+  else if (INTERFACE_ONLY_PATTERNS.has(pattern)) {
+    throw forbidden('the interface API accepts partner tokens only')
   }
 }
 
@@ -5370,19 +6663,14 @@ export function handleFakeApiRequest(path: string, opts: RequestOpts = {}): Fake
     return ok({ status: 'ok' })
   }
 
-  // serviceAuth-only mounts: no Actor, a different 401 message.
-  if ((method === 'POST' && path === '/v1/tenants') || (method === 'POST' && path === '/v1/departments')) {
+  // The one serviceAuth-only mount left: no Actor, a different 401 message.
+  // (POST /v1/departments moved onto the EitherAuth mux with department CRUD.)
+  if (method === 'POST' && path === '/v1/tenants') {
     const authorization = headers.authorization
     const match = authorization ? /^Bearer (.+)$/.exec(authorization) : null
     if (!match || !match[1]) throw unauthorized('missing bearer token')
     if (!match[1].startsWith('service:')) throw unauthorized('invalid service token')
-    if (path === '/v1/tenants') return provisionTenant(body)
-    const name = asTrimmed(body.name)
-    if (!name) throw badRequest('name is required')
-    if (masterDepartments.some(d => d.name.toLowerCase() === name.toLowerCase())) throw conflict('department name already exists')
-    const created: MasterDepartment = { id: newId(), name, isActive: true }
-    masterDepartments.push(created)
-    return ok(created, 201)
+    return provisionTenant(body)
   }
 
   // The sign-in routes mount RAW — no EitherAuth, no CSRF — since a request
@@ -5390,14 +6678,19 @@ export function handleFakeApiRequest(path: string, opts: RequestOpts = {}): Fake
   const needsActor = !RAW_ROUTES.has(`${method} ${path}`)
   const actor: Actor = needsActor
     ? resolveActor(headers)
-    : { isService: false, actingUser: '', staffId: null, role: 'staff', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: null, partnerName: '', isOperator: false, sessionId: null, csrfToken: '' }
+    : { isService: false, actingUser: '', staffId: null, role: 'staff', deptId: null, createTask: false, hotels: [], memberships: [], partnerId: null, partnerName: '', partnerCapabilities: [], isOperator: false, sessionId: null, csrfToken: '' }
 
   const ctx: Ctx = { method, path, body, headers, query, actor }
+  if (needsActor) surfaceGate(ctx)
   if (needsActor) checkCsrf(ctx)
 
-  // The recurring-task worker, run lazily: due templates create their tasks
-  // before any read that could show them (go run ./cmd/worker, in effect).
-  if (needsActor) runDueTemplates()
+  // The workers, run lazily: due templates create their tasks and due
+  // escalation steps apply before any read that could show them (the
+  // combined runner in cmd/worker, in effect).
+  if (needsActor) {
+    runDueTemplates()
+    runDueEscalations()
+  }
 
   const response = handleAuthAndStaff(ctx)
     ?? handlePlatform(ctx)

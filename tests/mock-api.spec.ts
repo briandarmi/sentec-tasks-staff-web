@@ -80,7 +80,7 @@ describe('auth model', () => {
     expect(reach).toContain(IDS.hotel.kuningan)
     expect(reach).toContain(IDS.hotel.simatupang)
     expect(regional.staff.properties.map(p => p.name)).toEqual([...regional.staff.properties.map(p => p.name)].sort())
-    expect(regional.staff.memberships).toEqual([{ hotelRef: IDS.hotel.kuningan, role: 'admin', hotelDepartmentId: null, createTask: true }])
+    expect(regional.staff.memberships).toEqual([{ hotelRef: IDS.hotel.kuningan, role: 'admin', hotelDepartmentId: null, createTask: true, syncIssue: null }])
     // The old account-wide fields are gone from the wire.
     expect('role' in regional.staff).toBe(false)
     expect('hotels' in regional.staff).toBe(false)
@@ -145,19 +145,25 @@ describe('auth model', () => {
     expect(errOf(() => call('/v1/tasks', { headers: h(admin, H) })).code).toBe('UNAUTHORIZED')
   })
 
-  it('serviceAuth-only mounts refuse everything but a service token', () => {
+  it('the serviceAuth-only mount refuses everything but a service token; master departments moved onto the mux', () => {
     const admin = login('admin@aston.example', 'admin123')
     expect(errOf(() => call('/v1/tenants', { method: 'POST', headers: h(admin), body: {} })).message)
       .toBe('missing bearer token')
+    // POST /v1/departments is EitherAuth now (feat/department-crud): an unknown
+    // partner fails verification, a hotel admin is not a platform admin.
     expect(errOf(() => call('/v1/departments', { method: 'POST', headers: { authorization: 'Bearer partner:whatever' }, body: { name: 'X' } })).message)
-      .toBe('invalid service token')
+      .toBe('invalid token')
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: h(admin), body: { name: 'X' } })).message)
+      .toBe('platform admin access required')
   })
 
   it('a deactivated partner token stops verifying immediately', () => {
-    // Partner 3 (Sentec EMS) is seeded inactive.
+    const operator = login('operator@sentineltech.example', 'operator123')
+    call(`/v1/platform/partners/${IDS.partner.ems}`, { method: 'PATCH', headers: h(operator), body: { isActive: false } })
     expect(errOf(() => call('/v1/tasks', { headers: { 'authorization': `Bearer partner:${IDS.partner.ems}`, 'x-hotel-id': H } })).message)
       .toBe('invalid token')
-    // Partner 1 (Butler) is active and reads fine.
+    call(`/v1/platform/partners/${IDS.partner.ems}`, { method: 'PATCH', headers: h(operator), body: { isActive: true } })
+    // Partner 1 (Butler) is active and reads fine — the task list is an interface route.
     expect(call('/v1/tasks', { headers: { 'authorization': `Bearer partner:${IDS.partner.butler}`, 'x-hotel-id': H } }).status).toBe(200)
   })
 })

@@ -23,6 +23,8 @@ function h(session: Session, hotelId?: string) {
 }
 
 const service = (hotelId?: string) => ({ authorization: 'Bearer service:test', ...(hotelId ? { 'x-hotel-id': hotelId } : {}) })
+/** The interface-only routes (dispatch, guest attachments) take partner tokens; Butler is a registered partner. */
+const butler = (hotelId?: string) => ({ authorization: `Bearer partner:${IDS.partner.butler}`, ...(hotelId ? { 'x-hotel-id': hotelId } : {}) })
 
 function errOf(fn: () => unknown): { code: string, message: string } {
   try {
@@ -76,7 +78,7 @@ describe('creation resolves server-side (staff-create + preview share one pipeli
     expect(errOf(() => call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Clean 1204', itemRef: IDS.item.roomCleaning } })).message)
       .toBe('this item requires a location')
     // The dispatch path has no locationRef field and is deliberately exempt.
-    const dispatched = data(call('/v1/tasks', { method: 'POST', headers: service(H), body: { source: { product: 'sentec-butler', channel: 'guest' }, itemRef: IDS.item.roomCleaning, item: { name: 'Room cleaning' }, requester: { roomNumber: '0908' } } }))
+    const dispatched = data(call('/v1/tasks', { method: 'POST', headers: butler(H), body: { source: { product: 'sentec-butler', channel: 'guest' }, itemRef: IDS.item.roomCleaning, item: { name: 'Room cleaning' }, requester: { roomNumber: '0908' } } }))
     expect(dispatched.status).toBe('NEW')
   })
 
@@ -150,20 +152,21 @@ describe('creation resolves server-side (staff-create + preview share one pipeli
       .toBe('assigneeKind=DEPARTMENT is not yet supported at creation — use hotelDepartmentId routing instead')
   })
 
-  it('dispatch is service-only and idempotent on idempotencyKey', () => {
+  it('dispatch is partner-only (interface surface) and idempotent on idempotencyKey', () => {
     const a = admin()
-    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: h(a, H), body: {} })).message).toBe('forbidden')
+    // A staff cookie never reaches the interface-only dispatch route (feat/interface-lambda).
+    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: h(a, H), body: {} })).message).toBe('the interface API accepts partner tokens only')
     const key = '12345678-0000-4000-8000-000000000042'
-    const first = call('/v1/tasks', { method: 'POST', headers: service(H), body: { idempotencyKey: key, source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'Slippers' }, requester: {} } })
+    const first = call('/v1/tasks', { method: 'POST', headers: butler(H), body: { idempotencyKey: key, source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'Slippers' }, requester: {} } })
     expect(first.status).toBe(201)
-    const replay = call('/v1/tasks', { method: 'POST', headers: service(H), body: { idempotencyKey: key, source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'Slippers' }, requester: {} } })
+    const replay = call('/v1/tasks', { method: 'POST', headers: butler(H), body: { idempotencyKey: key, source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'Slippers' }, requester: {} } })
     expect(replay.status).toBe(200)
     expect(data(replay).id).toBe(data(first).id)
     expect(replay.body!.meta).toEqual({ warnings: null })
   })
 
   it('refuses a past activationDate on the guest channel only', () => {
-    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: service(H), body: { source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'X' }, requester: {}, activationDate: '2020-01-01T00:00:00.000Z' } })).message)
+    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: butler(H), body: { source: { product: 'sentec-butler', channel: 'guest' }, item: { name: 'X' }, requester: {}, activationDate: '2020-01-01T00:00:00.000Z' } })).message)
       .toBe('activationDate cannot be in the past')
     // Staff may backdate freely.
     const backdated = call('/v1/tasks/staff-create', { method: 'POST', headers: h(admin(), H), body: { title: 'Backdated', activationDate: '2020-01-01T00:00:00.000Z' } })
@@ -516,15 +519,15 @@ describe('uploads and attachments', () => {
     expect(call('/v1/tasks/attachments', { method: 'POST', headers: h(b, H), body: { id: lastId, taskId: t.id, filetype: 'PHOTO', isRemoved: true } }).status).toBe(200)
   })
 
-  it('guest attachments are service-only and URL-only', () => {
+  it('guest attachments are partner-only and URL-only', () => {
     const b = budi()
     expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: h(b, H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })).message)
-      .toBe('forbidden')
-    expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', storageKey: `hotels/${H}/uploads/x.jpg` } })).message)
+      .toBe('the interface API accepts partner tokens only')
+    expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: butler(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', storageKey: `hotels/${H}/uploads/x.jpg` } })).message)
       .toBe('guest attachments are URL-only')
-    expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.marcus, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })).message)
+    expect(errOf(() => call('/v1/tasks/guest-attachments', { method: 'POST', headers: butler(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.marcus, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })).message)
       .toBe('not authorized for this task')
-    const created = call('/v1/tasks/guest-attachments', { method: 'POST', headers: service(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })
+    const created = call('/v1/tasks/guest-attachments', { method: 'POST', headers: butler(H), body: { taskId: IDS.task.towels1204, guestRef: IDS.guest.amelia, filetype: 'PHOTO', url: 'https://x.example/a.jpg' } })
     expect(created.status).toBe(201)
     expect(data(created).staffId).toBeNull()
   })

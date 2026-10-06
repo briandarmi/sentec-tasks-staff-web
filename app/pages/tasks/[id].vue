@@ -10,6 +10,7 @@ import {
   RepeatIcon,
   RotateCcwIcon,
   SendIcon,
+  SirenIcon,
   UserRoundIcon,
   UserRoundPlusIcon,
 } from '@lucide/vue'
@@ -19,6 +20,7 @@ import { useCaps } from '~/composables/useCaps'
 import { useSourceApps } from '~/composables/useSourceApps'
 import type { BoardColumn, ProjectLevel, TaskDetail } from '~/utils/clientFakeApi'
 import { displayName, formatDateTime, initials, isClaimable, priorityMeta, relativeTime, taskRef } from '~/utils/task-ui'
+import { levelLabel } from '~/utils/escalation-ui'
 
 definePageMeta({ title: 'Task' })
 
@@ -303,6 +305,16 @@ onMounted(load)
             >
               {{ priorityMeta(task.priority).label }}
             </span>
+            <!-- The policy has stepped in at least once. The level is the
+                 highest step that fired, not a count — steps are independent. -->
+            <span
+              v-if="task.escalationLevel > 0"
+              class="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] font-semibold text-destructive"
+              :title="`escalated ${relativeTime(task.escalatedAt)}`"
+            >
+              <SirenIcon class="h-3 w-3" aria-hidden="true" />
+              Escalated · {{ levelLabel(task.escalationLevel) }}
+            </span>
             <!-- Only when the task came from elsewhere: a Butler request has a
                  guest waiting on the other end. The dot is the registry's
                  colour — data, not a theme token. -->
@@ -331,7 +343,9 @@ onMounted(load)
           </NuxtLink>
         </CardHeader>
         <CardContent class="flex flex-wrap gap-1.5">
-          <Badge v-if="task.department" variant="outline">{{ task.department.name }}</Badge>
+          <!-- A department the hotel has since retired still owns its old
+               tasks; say so rather than show a name nobody can pick any more. -->
+          <Badge v-if="task.department" variant="outline">{{ task.department.name }}{{ task.department.isActive === false ? ' (inactive)' : '' }}</Badge>
           <Badge v-if="task.itemName && task.itemName !== task.title" variant="outline">{{ task.itemName }}</Badge>
           <Badge v-if="task.quantity && task.quantity > 1" variant="outline">×{{ task.quantity }}</Badge>
           <Badge v-if="task.categoryName" variant="outline">{{ task.categoryName }}</Badge>
@@ -495,6 +509,10 @@ onMounted(load)
       <HelpersCard :task="task" :can-manage="canManageHelpers" @updated="refresh" />
 
       <AttachmentsCard :task="task" @updated="refresh" />
+
+      <!-- Keyed on updatedAt: the sweep stamps the task when a step fires, so
+           a refetch that shows a new level also reloads the steps. -->
+      <EscalationCard :key="`escalation-${task.updatedAt}`" :task="task" />
 
       <!-- Keyed on updatedAt so a claim, return or submit refreshes the split. -->
       <TimeAttributionCard :key="task.updatedAt" :task-id="task.id" />

@@ -7,6 +7,10 @@ import type {
   CatalogItem,
   ChecklistItem,
   Collaborator,
+  EmsAddResult,
+  EmsEmployee,
+  EscalationPolicy,
+  EscalationPolicyWrite,
   HotelDepartment,
   InboxOffer,
   Location,
@@ -16,6 +20,7 @@ import type {
   OperatingSchedule,
   OperatingWindow,
   Partner,
+  PartnerCapability,
   Project,
   ProjectMember,
   ProjectStatus,
@@ -29,6 +34,7 @@ import type {
   TaskComment,
   TaskContextEntry,
   TaskDetail,
+  TaskEscalation,
   TaskListItem,
   TaskOffer,
   TaskPriority,
@@ -40,12 +46,15 @@ import type {
   Team,
   Tenant,
   TenantGroup,
+  TenantSyncLink,
 } from '~/utils/clientFakeApi'
 
 /**
  * Typed client for the Sentec Tasks API — paths, methods and shapes are the
  * real contract (master @ c3f52ad plus the feat/projects and sign-in
- * branches, per the 2026-09-28 frontend-impact notes). Every call goes through
+ * branches, per the 2026-09-28 frontend-impact notes, and the
+ * refactor/ponytail-audit tip @ 1ee8c12: escalation policies, department CRUD,
+ * EMS staff sync, partner capabilities, 2026-10-06). Every call goes through
  * `useSession().request`, which injects the session cookie, the CSRF echo and
  * the X-Hotel-Id scope. Nothing here takes a role as an argument: the server
  * decides what the caller may do, and the UI only decides what to ask for.
@@ -220,8 +229,34 @@ export function useTasksApi() {
     async listAssignableStaff(departmentId?: string | null, context: { taskId?: string | null, projectId?: string | null } = {}) {
       return (await req<AssignableStaff[]>('/v1/staff/assignable', { query: clean({ departmentId, taskId: context.taskId, projectId: context.projectId }) })).data
     },
-    async listStaff() {
-      return (await req<Staff[]>('/v1/staff')).data
+    /** Admin at the active hotel. `needsAttention` narrows to members whose membership here carries an EMS sync issue. */
+    async listStaff(filter: { needsAttention?: boolean } = {}) {
+      return (await req<Staff[]>('/v1/staff', { query: clean({ needsAttention: filter.needsAttention ? 'true' : undefined }) })).data
+    },
+    /**
+     * DELETE /v1/staff/{id}/membership — remove a person from the ACTIVE
+     * property only: their open work here goes back to its pool, their
+     * helper/offer/checklist roles and team rows here are cleared. 204; 404
+     * for a non-member; 409 for yourself, and for an EMS-linked member of an
+     * EMS-mapped property ("remove this person in EMS").
+     */
+    async removeStaffFromProperty(id: string) {
+      await req(`/v1/staff/${id}/membership`, { method: 'DELETE' })
+    },
+
+    // ── EMS staff sync (feat/ems-staff-sync) ──────────────────────────────────
+    /**
+     * The property's people in Sentec EMS, annotated with their `state` here.
+     * Admin at the hotel. 422 "this property is not linked to EMS" when the
+     * operator has not mapped it; 503 when EMS is down. `meta` is EMS's paging.
+     */
+    async listEmsEmployees(query: { q?: string, page?: number, pageSize?: number } = {}) {
+      const env = await req<EmsEmployee[] | null>('/v1/ems/employees', { query: clean(query as Record<string, unknown>) })
+      return { data: env.data ?? [], meta: (env.meta ?? { page: 1, pageSize: 50, total: 0 }) as unknown as { page: number, pageSize: number, total: number } }
+    },
+    /** Add 1-100 EMS employees here with one role and one create-task flag; one result per id (created/linked/granted/skipped/failed). */
+    async addEmsEmployees(payload: { emsEmployeeIds: string[], role: 'staff' | 'leader' | 'admin', createTask: boolean }) {
+      return (await req<EmsAddResult[] | null>('/v1/ems/employees', { method: 'POST', body: payload })).data ?? []
     },
     /**
      * 201 for a new account; 200 when the email already exists — then the
@@ -247,15 +282,45 @@ export function useTasksApi() {
       await req(`/v1/staff/${staffId}/group-grants/${groupId}`, { method: 'DELETE' })
     },
 
-    // ── departments ───────────────────────────────────────────────────────────
+    // ── departments (feat/department-crud) ────────────────────────────────────
+    /** The master catalogue: admin at any property, operator or service. Includes retired masters (isActive false). */
     async listMasterDepartments() {
       return (await req<MasterDepartment[]>('/v1/departments')).data
     },
+    async getMasterDepartment(id: string) {
+      return (await req<MasterDepartment>(`/v1/departments/${id}`)).data
+    },
+    /** Platform admin (operator). `code`: 1-16 of A-Z 0-9 _, stored upper-case; `description` ≤ 500. 409 on a duplicate name or code. */
+    async createMasterDepartment(payload: { name: string, code?: string | null, description?: string | null }) {
+      return (await req<MasterDepartment>('/v1/departments', { method: 'POST', body: payload })).data
+    },
+    /** Platform admin. Omit a field to leave it; send "" to clear code/description (JSON null reads as "unchanged" server-side). */
+    async updateMasterDepartment(id: string, payload: { name?: string, code?: string, description?: string, isActive?: boolean }) {
+      return (await req<MasterDepartment>(`/v1/departments/${id}`, { method: 'PATCH', body: payload })).data
+    },
+    /** Platform admin. Hard delete, allowed only while no hotel has EVER used it; otherwise 409 "deactivate it instead". */
+    async deleteMasterDepartment(id: string) {
+      await req(`/v1/departments/${id}`, { method: 'DELETE' })
+    },
+    /** This property's rows, active and inactive; `masterIsActive` says whether a retired master is behind one. */
     async listHotelDepartments() {
       return (await req<HotelDepartment[]>('/v1/hotel-departments')).data
     },
+    async getHotelDepartment(id: string) {
+      return (await req<HotelDepartment>(`/v1/hotel-departments/${id}`)).data
+    },
+    /** 201 new, 200 existing (whatever its state). 422 "department is not available" for a retired master. */
     async enableHotelDepartment(hotelRef: string, departmentId: string) {
       return (await req<HotelDepartment>('/v1/hotel-departments', { method: 'POST', body: { hotelRef, departmentId } })).data
+    },
+    /**
+     * The hotel's soft delete and its undo. Deactivating is refused (409) while
+     * a routing rule or an escalation policy step still points here — the
+     * message names both counts; reactivating is refused (422) once the
+     * master is retired. Staff, teams and schedules keep an inactive one.
+     */
+    async setHotelDepartmentActive(id: string, isActive: boolean) {
+      return (await req<HotelDepartment>(`/v1/hotel-departments/${id}`, { method: 'PATCH', body: { isActive } })).data
     },
 
     // ── catalog ───────────────────────────────────────────────────────────────
@@ -307,18 +372,46 @@ export function useTasksApi() {
     async listSlas() {
       return (await req<Sla[]>('/v1/slas')).data
     },
-    async upsertSla(payload: { id?: string | null, name: string, responseTime: number, resolutionTime: number, isDefault?: boolean }) {
+    /**
+     * `escalationPolicyId` (feat/escalation): the key ABSENT keeps the stored
+     * link, `null` clears it, a value must be an active policy of this hotel.
+     * The form always sends it, so what is shown is what is saved.
+     */
+    async upsertSla(payload: { id?: string | null, name: string, responseTime: number, resolutionTime: number, isDefault?: boolean, escalationPolicyId?: string | null }) {
       return (await req<Sla>('/v1/slas', { method: 'POST', body: payload })).data
     },
     async listRoutingRules() {
       return (await req<RoutingRule[]>('/v1/routing-rules')).data
     },
-    /** Natural-key idempotent PUT: at most one matcher; none at all = catch-all. */
-    async upsertRoutingRule(payload: { itemRef?: string | null, categoryId?: string | null, locationTypeId?: string | null, priority?: TaskPriority | null, departmentId: string, slaId: string, remark?: string | null }) {
+    /** Natural-key idempotent PUT: at most one matcher; none at all = catch-all. `escalationPolicyId` as on SLAs: absent keeps, null clears. */
+    async upsertRoutingRule(payload: { itemRef?: string | null, categoryId?: string | null, locationTypeId?: string | null, priority?: TaskPriority | null, departmentId: string, slaId: string, remark?: string | null, escalationPolicyId?: string | null }) {
       return (await req<RoutingRule>('/v1/routing-rules', { method: 'PUT', body: payload })).data
     },
+    /** By id only — the old DELETE /v1/routing-rules/{itemRef} is gone from the API. */
     async deleteRoutingRule(id: string) {
       await req(`/v1/routing-rules/id/${id}`, { method: 'DELETE' })
+    },
+
+    // ── escalation policies (feat/escalation) ─────────────────────────────────
+    /** Any actor of the hotel may read. Default first, then by name; live steps only, by sort. */
+    async listEscalationPolicies() {
+      return (await req<EscalationPolicy[] | null>('/v1/escalation-policies')).data ?? []
+    },
+    async getEscalationPolicy(id: string) {
+      return (await req<EscalationPolicy>(`/v1/escalation-policies/${id}`)).data
+    },
+    /**
+     * One POST upserts the policy AND its steps (admin at the hotel): a step
+     * with an id updates that step, one without is created, a live step left
+     * out of the request is removed. A new default demotes the old one.
+     * `isActive` omitted means true on create and unchanged on update.
+     */
+    async upsertEscalationPolicy(payload: EscalationPolicyWrite) {
+      return (await req<EscalationPolicy>('/v1/escalation-policies', { method: 'POST', body: payload })).data
+    },
+    /** GET /v1/tasks/{id}/escalations — the applied steps, oldest first; [] when it never escalated. Anyone who can open the task. */
+    async listTaskEscalations(taskId: string) {
+      return (await req<TaskEscalation[] | null>(`/v1/tasks/${taskId}/escalations`)).data ?? []
     },
 
     // ── schedules + terminology ───────────────────────────────────────────────
@@ -372,12 +465,28 @@ export function useTasksApi() {
     async listPartners() {
       return (await req<Partner[]>('/v1/platform/partners')).data
     },
-    /** The 201 body is the ONLY response that ever carries the secret. */
-    async registerPartner(name: string) {
-      return (await req<Partner & { secret: string }>('/v1/platform/partners', { method: 'POST', body: { name } })).data
+    /** The 201 body is the ONLY response that ever carries the secret. `capabilities`: what the partner may do beyond dispatch (staff_sync for EMS). */
+    async registerPartner(name: string, capabilities: PartnerCapability[] = []) {
+      return (await req<Partner & { secret: string }>('/v1/platform/partners', { method: 'POST', body: { name, capabilities } })).data
+    },
+    /** isActive and/or capabilities; an empty patch is refused. A revoked capability applies from the partner's next request. */
+    async updatePartner(id: string, patch: { isActive?: boolean, capabilities?: PartnerCapability[] }) {
+      return (await req<Partner>(`/v1/platform/partners/${id}`, { method: 'PATCH', body: patch })).data
     },
     async setPartnerActive(id: string, isActive: boolean) {
       return (await req<Partner>(`/v1/platform/partners/${id}`, { method: 'PATCH', body: { isActive } })).data
+    },
+    /** Operator: a property's ids at each partner (its EMS hotel id, for instance). */
+    async listTenantSyncLinks(hotelRef: string) {
+      return (await req<TenantSyncLink[] | null>(`/v1/platform/tenants/${hotelRef}/sync`)).data ?? []
+    },
+    /** Create or replace. 409 when another property already holds this id for the partner. */
+    async setTenantSyncLink(hotelRef: string, partnerId: string, syncId: string) {
+      return (await req<TenantSyncLink>(`/v1/platform/tenants/${hotelRef}/sync/${partnerId}`, { method: 'PUT', body: { syncId } })).data
+    },
+    /** Memberships are kept; future pushes from that partner for the property are ignored. */
+    async removeTenantSyncLink(hotelRef: string, partnerId: string) {
+      await req(`/v1/platform/tenants/${hotelRef}/sync/${partnerId}`, { method: 'DELETE' })
     },
 
     // ── group reports ─────────────────────────────────────────────────────────

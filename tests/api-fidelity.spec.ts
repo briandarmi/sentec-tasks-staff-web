@@ -713,7 +713,7 @@ describe('feat/projects: roster import', () => {
     // The new hire has no password: password login is refused, the account exists.
     expect(errOf(() => call('/v1/auth/staff/login', { method: 'POST', query: { delivery: 'cookie' }, body: { email: 'new.hire@aston.example', password: '' } })).code).toBe('UNAUTHORIZED')
     const staff = data<any[]>(call('/v1/staff', { headers: h(a, H) }))
-    expect(staff.find(s => s.email === 'new.hire@aston.example').memberships).toEqual([{ hotelRef: H, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true }])
+    expect(staff.find(s => s.email === 'new.hire@aston.example').memberships).toEqual([{ hotelRef: H, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: true, syncIssue: null }])
     // The file's createTask cell was blank for Joko: blank reads as false and is applied.
     expect(staff.find(s => s.id === IDS.staff.joko).memberships[0]).toMatchObject({ role: 'leader', createTask: false })
     expect(staff.find(s => s.id === IDS.staff.nur).memberships[0]).toMatchObject({ role: 'staff', hotelDepartmentId: IDS.dept.smtpFrontOffice })
@@ -727,5 +727,413 @@ describe('feat/projects: roster import', () => {
     expect(template.body).toBeNull()
     expect(template.raw?.filename).toBe('staff-import-template.csv')
     expect(template.raw?.content.split('\n')[0]).toBe('email,name,role,department,createTask')
+  })
+})
+
+// ════════════════════════ refactor/ponytail-audit @ 1ee8c12 (2026-10-06) ════════════════════════
+// feat/escalation, feat/department-crud, feat/ems-staff-sync, feat/interface-lambda.
+// Literals and orderings follow the Go in internal/{escalation,department,emssync,offboard,tenantsync,server}.
+
+const asAdmin = () => login('admin@aston.example', 'admin123')
+const asRina = () => login('regional@aston.example', 'regional123')
+const asOperator = () => login('operator@sentineltech.example', 'operator123')
+const KNGN = IDS.hotel.kuningan
+const GHOST = '99999999-0000-4000-8000-000000000001'
+const butlerPartner = (hotelId: string) => ({ 'authorization': `Bearer partner:${IDS.partner.butler}`, 'x-hotel-id': hotelId })
+const emsPartner = { authorization: `Bearer partner:${IDS.partner.ems}` }
+const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString()
+
+describe('surfaces: one code base, a main and an interface deployment (feat/interface-lambda)', () => {
+  it('a partner token reaches the interface routes only; nobody else reaches its exclusive ones', () => {
+    expect(call('/v1/tasks', { headers: butlerPartner(H) }).status).toBe(200)
+    expect(errOf(() => call('/v1/staff', { headers: butlerPartner(H) })).message).toBe('partner tokens must use the interface API')
+    expect(errOf(() => call('/v1/escalation-policies', { headers: butlerPartner(H) })).message).toBe('partner tokens must use the interface API')
+    const a = asAdmin()
+    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: h(a, H), body: {} })).message).toBe('the interface API accepts partner tokens only')
+    expect(errOf(() => call('/v1/tasks', { method: 'POST', headers: { 'authorization': 'Bearer service:test', 'x-hotel-id': H }, body: {} })).message).toBe('the interface API accepts partner tokens only')
+    // Butler dispatches as a partner now; the task carries the policy it resolved to.
+    const dispatched = data(call('/v1/tasks', { method: 'POST', headers: butlerPartner(H), body: { source: { product: 'sentec-butler', channel: 'guest' }, itemRef: IDS.item.towels, item: { name: 'Extra towels' }, requester: { roomNumber: '1204' } } }))
+    expect(dispatched).toMatchObject({ escalationPolicyId: IDS.policy.smtpStandard, escalationLevel: 0, escalatedAt: null })
+  })
+})
+
+describe('escalation policies (feat/escalation)', () => {
+  // Leaves behind at Simatupang: the "Night audit" and "Paused" policies, a floor rule deleted again, four escalated tasks.
+
+  it('lists for any actor of the hotel, default first, live steps by sort', () => {
+    const b = login('staff@aston.example', 'staff123')
+    const rows = data<any[]>(call('/v1/escalation-policies', { headers: h(b, H) }))
+    expect(rows.map(p => p.name)).toEqual(['Standard escalation', 'Urgent escalation'])
+    expect(rows[0].isDefault).toBe(true)
+    expect(rows[0].steps.map((s: any) => [s.sort, s.triggerKind, s.triggerValue])).toEqual([[0, 'RESPONSE_OVERDUE', 0], [1, 'PERCENT_OF_RESOLUTION', 50], [2, 'RESOLUTION_OVERDUE', 0]])
+    expect(data(call(`/v1/escalation-policies/${IDS.policy.smtpUrgent}`, { headers: h(b, H) })).steps[0].actions).toEqual([{ type: 'reassign', teamId: IDS.team.engineering }])
+    expect(errOf(() => call('/v1/escalation-policies/nope', { headers: h(b, H) })).message).toBe('id must be a uuid')
+    expect(errOf(() => call(`/v1/escalation-policies/${IDS.policy.smtpUrgent}`, { headers: h(b, KNGN) })).message).toBe('escalation policy')
+    expect(errOf(() => call('/v1/escalation-policies', { method: 'POST', headers: h(b, H), body: { name: 'X' } })).message).toBe('admin access required')
+  })
+
+  it('validates the upsert in the Go\'s words, step by step', () => {
+    const a = asAdmin()
+    const post = (body: Record<string, unknown>) => errOf(() => call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body }))
+    const step = (extra: Record<string, unknown>) => ({ sort: 0, triggerKind: 'RESOLUTION_OVERDUE', triggerValue: 0, ...extra })
+    expect(post({ name: '  ' }).message).toBe('name is required (1-120 chars)')
+    expect(post({ name: 'X', steps: Array.from({ length: 11 }, (_, i) => step({ sort: i })) }).message).toBe('a policy has at most 10 steps')
+    expect(post({ name: 'X', steps: [step({ sort: 10 })] }).message).toBe('steps[0]: sort must be 0-9')
+    expect(post({ name: 'X', steps: [step({ triggerKind: 'PERCENT_OF_RESOLUTION', triggerValue: 0 })] }).message).toBe('steps[0]: triggerValue must be a percent, 1-100')
+    expect(post({ name: 'X', steps: [step({ triggerKind: 'UNASSIGNED_FOR', triggerValue: 0 })] }).message).toBe('steps[0]: triggerValue must be at least 1 minute')
+    expect(post({ name: 'X', steps: [step({ triggerValue: -1 })] }).message).toBe('steps[0]: triggerValue must be 0 or more minutes')
+    expect(post({ name: 'X', steps: [step({ triggerKind: 'LATE' })] }).message).toBe('steps[0]: unknown triggerKind "LATE"')
+    expect(post({ name: 'X', steps: [step({ actions: [{ type: 'bumpPriority', staffId: IDS.staff.joko }] })] }).message).toBe('steps[0]: bumpPriority takes no target')
+    expect(post({ name: 'X', steps: [step({ actions: [{ type: 'reassign' }] })] }).message).toBe('steps[0]: reassign needs exactly one of staffId or teamId')
+    expect(post({ name: 'X', steps: [step({ actions: [{ type: 'routeToDepartment' }] })] }).message).toBe('steps[0]: routeToDepartment needs hotelDepartmentId only')
+    expect(post({ name: 'X', steps: [step({ actions: [{ type: 'bumpPriority' }, { type: 'bumpPriority' }] })] }).message).toBe('steps[0]: action "bumpPriority" appears more than once')
+    expect(post({ name: 'X', steps: [step({ recipients: [{ kind: 'admins' }, { kind: 'admins' }] })] }).message).toBe('steps[0]: recipient "admins" appears more than once')
+    expect(post({ name: 'X', steps: [step({ recipients: [{ kind: 'team' }] })] }).message).toBe('steps[0]: team recipient needs teamId only')
+    expect(post({ name: 'X', steps: [step({ recipients: [{ kind: 'everyone' }] })] }).message).toBe('steps[0]: unknown recipient kind "everyone"')
+    expect(post({ name: 'X', steps: [step({}), step({ sort: 0, triggerValue: 5 })] }).message).toBe('steps[1]: duplicate sort 0')
+    // Targets must be this hotel's — and a department must be ACTIVE here.
+    expect(post({ name: 'X', steps: [step({ recipients: [{ kind: 'staff', staffId: GHOST }] })] })).toEqual({ code: 'UNPROCESSABLE', message: `steps[0]: staff ${GHOST} is not part of this hotel` })
+    expect(post({ name: 'X', steps: [step({ actions: [{ type: 'reassign', teamId: GHOST }] })] })).toEqual({ code: 'UNPROCESSABLE', message: `steps[0]: team ${GHOST} is not part of this hotel` })
+    expect(post({ name: 'X', steps: [step({ actions: [{ type: 'routeToDepartment', hotelDepartmentId: IDS.dept.smtpSpa }] })] })).toEqual({ code: 'UNPROCESSABLE', message: `steps[0]: department ${IDS.dept.smtpSpa} is not part of this hotel` })
+    expect(post({ name: 'standard ESCALATION' }).message).toBe('an escalation policy with this name already exists')
+    expect(post({ id: GHOST, name: 'X' }).message).toBe('escalation policy')
+  })
+
+  it('upserts policy and steps together: ids update, omissions soft-delete, a new default demotes the old one', () => {
+    const a = asAdmin()
+    const created = data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: {
+      name: 'Night audit',
+      steps: [
+        { sort: 0, triggerKind: 'UNASSIGNED_FOR', triggerValue: 30, actions: [{ type: 'reassign', staffId: IDS.staff.joko }], recipients: [{ kind: 'staff', staffId: IDS.staff.joko }] },
+        { sort: 1, triggerKind: 'RESOLUTION_OVERDUE', triggerValue: 60, actions: [{ type: 'bumpPriority' }], recipients: [{ kind: 'admins' }] },
+      ],
+    } }))
+    expect(created.isActive).toBe(true) // omitted → true on create
+    expect(created.isDefault).toBe(false)
+    const [first, second] = created.steps
+    // Update step 0 in place, drop step 1, add a step 2; the dropped step's id is then unknown.
+    const updated = data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: {
+      id: created.id, name: 'Night audit', steps: [
+        { id: first.id, sort: 0, triggerKind: 'UNASSIGNED_FOR', triggerValue: 45, actions: [], recipients: [{ kind: 'departmentLeaders' }] },
+        { sort: 2, triggerKind: 'RESPONSE_OVERDUE', triggerValue: 10, actions: [{ type: 'bumpPriority' }], recipients: [] },
+      ],
+    } }))
+    expect(updated.steps.map((s: any) => [s.id === first.id, s.sort, s.triggerValue])).toEqual([[true, 0, 45], [false, 2, 10]])
+    expect(errOf(() => call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { id: created.id, name: 'Night audit', steps: [{ id: second.id, sort: 1, triggerKind: 'RESOLUTION_OVERDUE', triggerValue: 1 }] } })))
+      .toEqual({ code: 'UNPROCESSABLE', message: `unknown step id ${second.id} for this policy` })
+    // isActive omitted on an update keeps it; no steps in the request removes every live step.
+    const paused = data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { id: created.id, name: 'Night audit', isActive: false } }))
+    expect(paused.isActive).toBe(false)
+    expect(paused.steps).toEqual([])
+    expect(data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { id: created.id, name: 'Night audit' } })).isActive).toBe(false)
+    // A new default demotes the old one; then the Standard policy is put back for the suites below.
+    expect(data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { id: created.id, name: 'Night audit', isDefault: true, isActive: true } })).isDefault).toBe(true)
+    const list = data<any[]>(call('/v1/escalation-policies', { headers: h(a, H) }))
+    expect(list.filter(p => p.isDefault).map(p => p.name)).toEqual(['Night audit'])
+    const standard = list.find(p => p.id === IDS.policy.smtpStandard)
+    data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { id: standard.id, name: standard.name, isDefault: true, steps: standard.steps } }))
+    expect(data(call(`/v1/escalation-policies/${created.id}`, { headers: h(a, H) })).isDefault).toBe(false)
+    expect(data(call(`/v1/escalation-policies/${IDS.policy.smtpStandard}`, { headers: h(a, H) })).steps).toHaveLength(3) // ids re-sent = updated, not recreated
+  })
+
+  it('links to SLAs and routing rules: the key absent keeps, null clears, a value must be an active policy here', () => {
+    const a = asAdmin()
+    const urgent = () => data<any[]>(call('/v1/slas', { headers: h(a, H) })).find(s => s.id === IDS.sla.smtpUrgent)
+    expect(urgent().escalationPolicyId).toBe(IDS.policy.smtpUrgent)
+    const slaBody = { id: IDS.sla.smtpUrgent, name: 'Urgent', responseTime: 5, resolutionTime: 20 }
+    data(call('/v1/slas', { method: 'POST', headers: h(a, H), body: slaBody }))
+    expect(urgent().escalationPolicyId).toBe(IDS.policy.smtpUrgent) // no key: the link survives an edit of the times
+    const paused = data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { name: 'Paused', isActive: false } }))
+    expect(errOf(() => call('/v1/slas', { method: 'POST', headers: h(a, H), body: { ...slaBody, escalationPolicyId: paused.id } })).message).toBe('escalationPolicyId is not an active escalation policy of this hotel')
+    expect(errOf(() => call('/v1/slas', { method: 'POST', headers: h(a, H), body: { ...slaBody, escalationPolicyId: 'nope' } })).message).toBe('invalid JSON body')
+    expect(data(call('/v1/slas', { method: 'POST', headers: h(a, H), body: { ...slaBody, escalationPolicyId: null } })).escalationPolicyId).toBeNull()
+    expect(data(call('/v1/slas', { method: 'POST', headers: h(a, H), body: { ...slaBody, escalationPolicyId: IDS.policy.smtpUrgent } })).escalationPolicyId).toBe(IDS.policy.smtpUrgent)
+    // Routing rules: the same three states on the natural-key PUT.
+    const rule = { locationTypeId: IDS.locationType.floor, departmentId: IDS.dept.smtpHousekeeping, slaId: IDS.sla.smtpStandard }
+    expect(data(call('/v1/routing-rules', { method: 'PUT', headers: h(a, H), body: { ...rule, escalationPolicyId: IDS.policy.smtpUrgent } })).escalationPolicyId).toBe(IDS.policy.smtpUrgent)
+    expect(data(call('/v1/routing-rules', { method: 'PUT', headers: h(a, H), body: rule })).escalationPolicyId).toBe(IDS.policy.smtpUrgent)
+    expect(errOf(() => call('/v1/routing-rules', { method: 'PUT', headers: h(a, H), body: { ...rule, escalationPolicyId: paused.id } })).message).toBe('escalationPolicyId is not an active escalation policy of this hotel')
+    const cleared = data(call('/v1/routing-rules', { method: 'PUT', headers: h(a, H), body: { ...rule, escalationPolicyId: null } }))
+    expect(cleared.escalationPolicyId).toBeNull()
+    expect(call(`/v1/routing-rules/id/${cleared.id}`, { method: 'DELETE', headers: h(a, H) }).status).toBe(204)
+    // The old delete-by-itemRef route is gone: the mux's plain-text 404.
+    expect(errOf(() => call(`/v1/routing-rules/${IDS.item.acFault}`, { method: 'DELETE', headers: h(a, H) })).message).toBe('404 page not found')
+  })
+
+  it('resolves the policy once at creation (rule → SLA → default) and previews its name', () => {
+    const a = asAdmin()
+    const towels = data(call('/v1/tasks/preview', { method: 'POST', headers: h(a, H), body: { title: 'Towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204 } }))
+    expect(towels.task.escalationPolicyId).toBe(IDS.policy.smtpStandard) // the Standard SLA names no policy → the hotel default
+    expect(towels.task.escalationPolicyName).toBe('Standard escalation')
+    const ac = data(call('/v1/tasks/preview', { method: 'POST', headers: h(a, H), body: { title: 'AC', itemRef: IDS.item.acFault, locationRef: IDS.location.room1204 } }))
+    expect(ac.task.escalationPolicyName).toBe('Urgent escalation') // the Urgent SLA's own policy
+    const nur = login('nur@fave.example', 'nur1234567')
+    const fave = data(call('/v1/tasks/preview', { method: 'POST', headers: h(nur, IDS.hotel.fave), body: { title: 'Clean', itemRef: IDS.item.faveCleaning, locationRef: IDS.location.faveRoom0210 } }))
+    expect(fave.task.escalationPolicyId).toBeNull()
+    expect('escalationPolicyName' in fave.task).toBe(false)
+    const created = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204 } }))
+    expect(created).toMatchObject({ escalationPolicyId: IDS.policy.smtpStandard, escalationLevel: 0, escalatedAt: null })
+    expect('escalationPolicyName' in created).toBe(false)
+  })
+
+  it('the sweep applies every due step in sort order, records each, and never fires a step twice', () => {
+    const a = asAdmin()
+    // Eight days ago: every trigger of the Standard policy is long due on Housekeeping's 24/7 schedule.
+    const created = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Old towels', itemRef: IDS.item.towels, locationRef: IDS.location.room1204, activationDate: daysAgo(8) } }))
+    expect(created.escalationLevel).toBe(0)
+    // The next request sweeps before it answers.
+    const t = data(call(`/v1/tasks/${created.id}`, { headers: h(a, H) }))
+    expect(t.escalationLevel).toBe(3)
+    expect(t.priority).toBe('URGENT') // NORMAL → HIGH at 50%, HIGH → URGENT at the deadline
+    expect(t.escalatedAt).not.toBeNull()
+    const log = data<any[]>(call(`/v1/tasks/${created.id}/escalations`, { headers: h(a, H) }))
+    expect(log.map(r => [r.level, r.trigger.kind, r.trigger.value, r.policyId === IDS.policy.smtpStandard])).toEqual([[1, 'RESPONSE_OVERDUE', 0, true], [2, 'PERCENT_OF_RESOLUTION', 50, true], [3, 'RESOLUTION_OVERDUE', 0, true]])
+    expect(log[1].applied).toEqual([{ type: 'bumpPriority', before: 'NORMAL', after: 'HIGH' }])
+    expect(log[2].applied).toEqual([{ type: 'bumpPriority', before: 'HIGH', after: 'URGENT' }])
+    expect(log[0].recipients).toEqual([IDS.staff.sari]) // Housekeeping's leader
+    expect(log[2].recipients).toEqual(expect.arrayContaining([IDS.staff.agus, IDS.staff.sari]))
+    expect(t.history.filter((row: any) => row.description?.startsWith('Escalated')).map((row: any) => [row.staffId, row.description])).toEqual([
+      [null, 'Escalated (level 1, response overdue 0 min).'],
+      [null, 'Escalated (level 2, 50% of resolution time): priority NORMAL → HIGH.'],
+      [null, 'Escalated (level 3, resolution overdue 0 min): priority HIGH → URGENT.'],
+    ])
+    // Idempotent: another request changes nothing. Visibility is the task's own.
+    expect(data<any[]>(call(`/v1/tasks/${created.id}/escalations`, { headers: h(a, H) }))).toHaveLength(3)
+    expect(data(call(`/v1/tasks/${created.id}`, { headers: h(a, H) })).escalationLevel).toBe(3)
+    expect(errOf(() => call(`/v1/tasks/${created.id}/escalations`, { headers: h(login('nur@fave.example', 'nur1234567'), H) })).message).toBe('task')
+    expect(errOf(() => call('/v1/tasks/nope/escalations', { headers: h(a, H) })).message).toBe('id must be a valid UUID')
+  })
+
+  it('reassigns to a team, skips what cannot apply, and stops while a policy is inactive', () => {
+    const a = asAdmin()
+    const ac = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Old AC fault', itemRef: IDS.item.acFault, locationRef: IDS.location.room0908, activationDate: daysAgo(8) } }))
+    const t = data(call(`/v1/tasks/${ac.id}`, { headers: h(a, H) }))
+    expect(t.escalationLevel).toBe(2)
+    expect(t.assignment).toMatchObject({ kind: 'TEAM', teamId: IDS.team.engineering })
+    const log = data<any[]>(call(`/v1/tasks/${ac.id}/escalations`, { headers: h(a, H) }))
+    expect(log[0].applied).toEqual([{ type: 'reassign', before: '', after: `team:${IDS.team.engineering}` }])
+    expect(log[0].recipients).toEqual([IDS.staff.joko])
+    expect(log[1].skipped).toEqual([{ type: 'bumpPriority', reason: 'no_change' }]) // already URGENT
+    expect(t.history.at(-1).description).toBe('Escalated (level 2, resolution overdue 15 min). Skipped: bumpPriority (no_change).')
+    // Decision 20: an inactive policy stops escalating; reactivating resumes with the catch-up.
+    const policy = data(call(`/v1/escalation-policies/${IDS.policy.smtpUrgent}`, { headers: h(a, H) }))
+    data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { ...policy, isActive: false } }))
+    const second = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Older AC fault', itemRef: IDS.item.acFault, locationRef: IDS.location.room0908, activationDate: daysAgo(8) } }))
+    expect(second.escalationPolicyId).toBe(IDS.policy.smtpUrgent) // the SLA still names it; it just does nothing while paused
+    expect(data(call(`/v1/tasks/${second.id}`, { headers: h(a, H) })).escalationLevel).toBe(0)
+    data(call('/v1/escalation-policies', { method: 'POST', headers: h(a, H), body: { ...policy, isActive: true } }))
+    expect(data(call(`/v1/tasks/${second.id}`, { headers: h(a, H) })).escalationLevel).toBe(2)
+  })
+})
+
+describe('departments: master CRUD and the hotel soft delete (feat/department-crud)', () => {
+  it('platform admins curate the master list; hotel admins only read it', () => {
+    const a = asAdmin()
+    const op = asOperator()
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: h(a, H), body: { name: 'Concierge' } })).message).toBe('platform admin access required')
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: h(op), body: { name: ' ' } })).message).toBe('name is required (1-100 chars)')
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: h(op), body: { name: 'Concierge', code: 'con-1' } })).message).toBe('code must be 1-16 characters of A-Z, 0-9 or _')
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: h(op), body: { name: 'Concierge', description: 'x'.repeat(501) } })).message).toBe('description must be at most 500 characters')
+    const created = call('/v1/departments', { method: 'POST', headers: h(op), body: { name: 'Concierge', code: ' con ', description: ' Guest services ' } })
+    expect(created.status).toBe(201)
+    expect(data(created)).toMatchObject({ name: 'Concierge', code: 'CON', description: 'Guest services', isActive: true })
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: h(op), body: { name: 'concierge' } })).message).toBe('department name already exists')
+    expect(errOf(() => call('/v1/departments', { method: 'POST', headers: h(op), body: { name: 'Bell desk', code: 'CON' } })).message).toBe('department code already exists')
+    // A service token that is not a partner is the other platform admin.
+    expect(call('/v1/departments', { method: 'POST', headers: { authorization: 'Bearer service:test' }, body: { name: 'Bell desk' } }).status).toBe(201)
+    const id = data(created).id
+    expect(data(call(`/v1/departments/${id}`, { headers: h(a, H) })).code).toBe('CON')
+    expect(data(call(`/v1/departments/${id}`, { method: 'PATCH', headers: h(op), body: {} })).updatedAt).toBe(data(created).updatedAt) // empty patch: unchanged
+    expect(data(call(`/v1/departments/${id}`, { method: 'PATCH', headers: h(op), body: { name: 'Concierge & Bell', code: '', isActive: false } }))).toMatchObject({ name: 'Concierge & Bell', code: null, isActive: false })
+    expect(errOf(() => call(`/v1/departments/${id}`, { method: 'PATCH', headers: h(op), body: { code: 'toolongtoolongtoo' } })).message).toBe('code must be 1-16 characters of A-Z, 0-9 or _')
+    expect(errOf(() => call('/v1/departments/nope', { method: 'PATCH', headers: h(op), body: {} })).message).toBe('invalid id')
+    // Hard delete while unused; 409 once any hotel ever used it.
+    expect(call(`/v1/departments/${id}`, { method: 'DELETE', headers: h(op) }).status).toBe(204)
+    expect(errOf(() => call(`/v1/departments/${id}`, { method: 'DELETE', headers: h(op) })).message).toBe('department')
+    expect(errOf(() => call(`/v1/departments/${IDS.masterDept.housekeeping}`, { method: 'DELETE', headers: h(op) })).message).toBe('department is used by 3 hotel(s); deactivate it instead')
+  })
+
+  it('a hotel deactivates a department it no longer uses; nothing new may use it, existing use keeps working', () => {
+    const r = asRina()
+    const rows = data<any[]>(call('/v1/hotel-departments', { headers: h(r, KNGN) }))
+    expect(rows.map(d => d.departmentName)).toEqual(['Housekeeping', 'Maintenance'])
+    const maintenance = rows.find(d => d.departmentName === 'Maintenance')
+    expect(maintenance).toMatchObject({ code: 'ENG', masterIsActive: true, isActive: true })
+    const team = data(call('/v1/teams', { method: 'POST', headers: h(r, KNGN), body: { name: 'Night engineers', hotelDepartmentId: maintenance.id } }))
+    expect(errOf(() => call(`/v1/hotel-departments/${maintenance.id}`, { method: 'PATCH', headers: h(r, KNGN), body: {} })).message).toBe('isActive is required')
+    const off = data(call(`/v1/hotel-departments/${maintenance.id}`, { method: 'PATCH', headers: h(r, KNGN), body: { isActive: false } }))
+    expect(off.isActive).toBe(false)
+    expect(data(call(`/v1/hotel-departments/${maintenance.id}`, { headers: h(r, KNGN) })).isActive).toBe(false)
+    expect(data(call(`/v1/hotel-departments/${maintenance.id}`, { method: 'PATCH', headers: h(r, KNGN), body: { isActive: false } })).updatedAt).toBe(off.updatedAt) // no-op 200
+    // No new use: staff, teams and schedules may not newly point at it…
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.budi}`, { method: 'PATCH', headers: h(r, KNGN), body: { hotelDepartmentId: maintenance.id } })).message).toBe('invalid department reference')
+    expect(errOf(() => call('/v1/teams', { method: 'POST', headers: h(r, KNGN), body: { name: 'Day engineers', hotelDepartmentId: maintenance.id } })).message).toBe('invalid department reference')
+    expect(errOf(() => call('/v1/operating-schedules', { method: 'POST', headers: h(r, KNGN), body: { name: 'Eng hours', hotelDepartmentId: maintenance.id, windows: [{ weekday: 1, opensMinutes: 480, closesMinutes: 1020 }], exceptions: [] } })).message).toBe('invalid department reference')
+    // …but the team that was already there can still be renamed.
+    expect(data(call('/v1/teams', { method: 'POST', headers: h(r, KNGN), body: { id: team.id, name: 'Night engineering', hotelDepartmentId: maintenance.id } })).name).toBe('Night engineering')
+    // Enabling again is PATCH's job; the POST just answers the existing row.
+    expect(call('/v1/hotel-departments', { method: 'POST', headers: h(r, KNGN), body: { departmentId: IDS.masterDept.maintenance } }).status).toBe(200)
+    expect(data(call(`/v1/hotel-departments/${maintenance.id}`, { method: 'PATCH', headers: h(r, KNGN), body: { isActive: true } })).isActive).toBe(true)
+  })
+
+  it('refuses deactivation while rules or escalation steps route there; a retired master never comes back', () => {
+    const a = asAdmin()
+    const r = asRina()
+    const rules = data<any[]>(call('/v1/routing-rules', { headers: h(a, H) })).filter(rule => rule.hotelDepartmentId === IDS.dept.smtpMaintenance).length
+    expect(rules).toBeGreaterThan(0)
+    expect(errOf(() => call(`/v1/hotel-departments/${IDS.dept.smtpMaintenance}`, { method: 'PATCH', headers: h(a, H), body: { isActive: false } })).message)
+      .toBe(`department is used by ${rules} routing rule(s) and 0 escalation policy step(s); repoint them first`)
+    // A step that routes here counts too, active policy or not (decision #4).
+    const policy = data(call('/v1/escalation-policies', { method: 'POST', headers: h(r, KNGN), body: { name: 'Kuningan night', isActive: false, steps: [{ sort: 0, triggerKind: 'RESOLUTION_OVERDUE', triggerValue: 0, actions: [{ type: 'routeToDepartment', hotelDepartmentId: IDS.dept.kngnHousekeeping }] }] } }))
+    expect(errOf(() => call(`/v1/hotel-departments/${IDS.dept.kngnHousekeeping}`, { method: 'PATCH', headers: h(r, KNGN), body: { isActive: false } })).message)
+      .toBe('department is used by 0 routing rule(s) and 1 escalation policy step(s); repoint them first')
+    data(call('/v1/escalation-policies', { method: 'POST', headers: h(r, KNGN), body: { id: policy.id, name: 'Kuningan night', steps: [] } }))
+    // The retired Spa master: Simatupang's row cannot be reactivated, and no hotel can newly add it.
+    expect(data<any[]>(call('/v1/hotel-departments', { headers: h(a, H) })).find(d => d.id === IDS.dept.smtpSpa)).toMatchObject({ departmentName: 'Spa & Wellness', code: 'SPA', isActive: false, masterIsActive: false })
+    expect(errOf(() => call(`/v1/hotel-departments/${IDS.dept.smtpSpa}`, { method: 'PATCH', headers: h(a, H), body: { isActive: true } })).message).toBe('department is not available')
+    expect(errOf(() => call('/v1/hotel-departments', { method: 'POST', headers: h(r, KNGN), body: { departmentId: IDS.masterDept.spa } })).message).toBe('department is not available')
+    expect(errOf(() => call(`/v1/hotel-departments/${GHOST}`, { headers: h(a, H) })).message).toBe('hotel department')
+    // Retiring a master flips masterIsActive on every hotel's row; the rows themselves keep working.
+    const op = asOperator()
+    data(call(`/v1/departments/${IDS.masterDept.fnb}`, { method: 'PATCH', headers: h(op), body: { isActive: false } }))
+    expect(data<any[]>(call('/v1/hotel-departments', { headers: h(a, H) })).find(d => d.id === IDS.dept.smtpFnb)).toMatchObject({ isActive: true, masterIsActive: false })
+    data(call(`/v1/departments/${IDS.masterDept.fnb}`, { method: 'PATCH', headers: h(op), body: { isActive: true } }))
+  })
+})
+
+describe('EMS staff sync + offboarding (feat/ems-staff-sync)', () => {
+  // Leaves behind: Joko linked to EMS, Ayu + Rizky added from EMS, Budi removed from Kuningan, Joko deactivated and reactivated.
+
+  it('browses the property\'s EMS employees with their state here; unlinked properties say so', () => {
+    const a = asAdmin()
+    expect(errOf(() => call('/v1/ems/employees', { headers: h(login('staff@aston.example', 'staff123'), H) })).message).toBe('admin access required')
+    expect(errOf(() => call('/v1/ems/employees', { headers: h(asRina(), KNGN) })).message).toBe('this property is not linked to EMS')
+    const page = call('/v1/ems/employees', { headers: h(a, H) })
+    expect(page.body!.meta).toEqual({ page: 1, pageSize: 50, total: 8 })
+    const byId = Object.fromEntries(data<any[]>(page).map(e => [e.emsEmployeeId, e]))
+    expect(byId['EMP-00101']).toMatchObject({ name: 'Budi Santoso', state: 'added', hotelDepartmentId: IDS.dept.smtpHousekeeping })
+    expect(byId['EMP-00106']).toMatchObject({ state: 'added', departmentName: 'Laundry', hotelDepartmentId: null })
+    expect(byId['EMP-00107']).toMatchObject({ state: 'addable' }) // Joko: manual staff with this email
+    expect(byId['EMP-00122']).toMatchObject({ state: 'addable', departmentName: 'Spa', hotelDepartmentId: null }) // inactive here
+    expect(byId['EMP-00123']).toMatchObject({ state: 'no_email', email: null })
+    expect(byId['EMP-00124']).toMatchObject({ state: 'inactive', active: false })
+    expect(data<any[]>(call('/v1/ems/employees', { headers: h(a, H), query: { q: 'ayu' } })).map(e => e.emsEmployeeId)).toEqual(['EMP-00120'])
+    const small = call('/v1/ems/employees', { headers: h(a, H), query: { page: 2, pageSize: 3 } })
+    expect(data<any[]>(small)).toHaveLength(3)
+    expect(small.body!.meta).toEqual({ page: 2, pageSize: 3, total: 8 })
+  })
+
+  it('shows and clears sync issues: the needs-attention filter, and a department set by hand', () => {
+    const a = asAdmin()
+    const flagged = data<any[]>(call('/v1/staff', { headers: h(a, H), query: { needsAttention: 'true' } }))
+    expect(flagged.map(s => s.id)).toEqual([IDS.staff.made])
+    expect(flagged[0].emsEmployeeId).toBe('EMP-00106')
+    expect(flagged[0].memberships[0].syncIssue).toEqual({ type: 'unknown_department', emsDepartmentName: 'Laundry' })
+    expect(data(call(`/v1/staff/${IDS.staff.made}`, { method: 'PATCH', headers: h(a, H), body: { hotelDepartmentId: IDS.dept.smtpHousekeeping } })).memberships[0].syncIssue).toBeNull()
+    expect(data<any[]>(call('/v1/staff', { headers: h(a, H), query: { needsAttention: 'true' } }))).toEqual([])
+  })
+
+  it('adds from EMS in bulk with one outcome per id, linking an existing manual account by email', () => {
+    const a = asAdmin()
+    expect(errOf(() => call('/v1/ems/employees', { method: 'POST', headers: h(a, H), body: { emsEmployeeIds: [], role: 'staff' } })).message).toBe('emsEmployeeIds must list 1-100 employees')
+    expect(errOf(() => call('/v1/ems/employees', { method: 'POST', headers: h(a, H), body: { emsEmployeeIds: ['EMP-00120'], role: 'boss' } })).message).toBe('role must be staff, leader, or admin')
+    const results = data<any[]>(call('/v1/ems/employees', { method: 'POST', headers: h(a, H), body: { emsEmployeeIds: ['EMP-00107', 'EMP-00120', 'EMP-00101', 'EMP-00123', 'EMP-00124', 'EMP-00999', 'EMP-00122', 'EMP-00120'], role: 'staff', createTask: false } }))
+    expect(results.map(r => [r.emsEmployeeId, r.outcome, r.reason ?? null])).toEqual([
+      ['EMP-00107', 'linked', null],
+      ['EMP-00120', 'created', null],
+      ['EMP-00101', 'skipped', null],
+      ['EMP-00123', 'failed', 'no_email'],
+      ['EMP-00124', 'failed', 'inactive'],
+      ['EMP-00999', 'failed', 'not_found_at_this_property'],
+      ['EMP-00122', 'created', null],
+    ])
+    const staff = data<any[]>(call('/v1/staff', { headers: h(a, H) }))
+    expect(staff.find(s => s.id === IDS.staff.joko).emsEmployeeId).toBe('EMP-00107')
+    expect(staff.find(s => s.email === 'ayu.lestari@aston.example').memberships).toEqual([{ hotelRef: H, role: 'staff', hotelDepartmentId: IDS.dept.smtpHousekeeping, createTask: false, syncIssue: null }])
+    expect(staff.find(s => s.email === 'rizky.pratama@aston.example').memberships[0].syncIssue).toEqual({ type: 'unknown_department', emsDepartmentName: 'Spa' })
+    expect(data<any[]>(call('/v1/staff', { headers: h(a, H), query: { needsAttention: 'true' } })).map(s => s.email)).toEqual(['rizky.pratama@aston.example'])
+    // Created from EMS = no password; they sign in by magic link or Google.
+    expect(errOf(() => call('/v1/auth/staff/login', { method: 'POST', query: { delivery: 'cookie' }, body: { email: 'ayu.lestari@aston.example', password: '' } })).code).toBe('UNAUTHORIZED')
+  })
+
+  it('removes a person from one property — never yourself, never an EMS-managed member of an EMS-mapped property', () => {
+    const a = asAdmin()
+    const r = asRina()
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.budi}/membership`, { method: 'DELETE', headers: h(login('staff@aston.example', 'staff123'), H) })).message).toBe('admin access required at this hotel')
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.agus}/membership`, { method: 'DELETE', headers: h(a, H) })).message).toBe('you cannot remove yourself from this property')
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.budi}/membership`, { method: 'DELETE', headers: h(a, H) })).message).toBe('this person is managed by EMS; remove them from this property in EMS')
+    expect(errOf(() => call(`/v1/staff/${GHOST}/membership`, { method: 'DELETE', headers: h(a, H) })).message).toBe('staff')
+    // Kuningan is not mapped to EMS, so Budi can be removed there; the task he held goes back to its pool.
+    const held = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(r, KNGN), body: { title: 'Kuningan towels', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.budi } } }))
+    expect(held.assignment).toMatchObject({ kind: 'STAFF', staffId: IDS.staff.budi })
+    expect(call(`/v1/staff/${IDS.staff.budi}/membership`, { method: 'DELETE', headers: h(r, KNGN) }).status).toBe(204)
+    expect(data<any[]>(call('/v1/staff', { headers: h(r, KNGN) })).some(s => s.id === IDS.staff.budi)).toBe(false)
+    const released = data(call(`/v1/tasks/${held.id}`, { headers: h(r, KNGN) }))
+    expect(released.assignment).toMatchObject({ kind: 'DEPARTMENT', departmentId: IDS.dept.kngnHousekeeping })
+    expect(released.history.at(-1)).toMatchObject({ staffId: IDS.staff.rina, description: 'Removed from this property by an admin' })
+    expect(errOf(() => call(`/v1/staff/${IDS.staff.budi}/membership`, { method: 'DELETE', headers: h(r, KNGN) })).message).toBe('staff')
+    // Budi still works at Simatupang; the account is untouched.
+    expect(login('staff@aston.example', 'staff123').staff.properties.map(p => p.hotelRef)).toEqual([H])
+  })
+
+  it('deactivating an account offboards it everywhere: sessions revoked, open work released, memberships kept', () => {
+    const a = asAdmin()
+    const joko = login('joko@aston.example', 'joko12345')
+    const held = data(call('/v1/tasks/staff-create', { method: 'POST', headers: h(a, H), body: { title: 'Fix the pump', assignee: { assigneeKind: 'STAFF', assigneeStaffId: IDS.staff.joko } } }))
+    data(call(`/v1/staff/${IDS.staff.joko}`, { method: 'PATCH', headers: h(a), body: { isActive: false } }))
+    expect(errOf(() => call('/v1/auth/session', { headers: h(joko) })).code).toBe('UNAUTHORIZED')
+    const released = data(call(`/v1/tasks/${held.id}`, { headers: h(a, H) }))
+    expect(released.assignment).toMatchObject({ kind: 'TEAM', teamId: IDS.team.engineering }) // his latest team, by the Return rule
+    expect(released.history.at(-1)).toMatchObject({ staffId: IDS.staff.agus, description: 'Account deactivated' })
+    // Reactivation restores access: the membership rows were never deleted.
+    expect(data(call(`/v1/staff/${IDS.staff.joko}`, { method: 'PATCH', headers: h(a, H), body: { isActive: true } })).memberships).toHaveLength(1)
+  })
+
+  it('applies EMS pushes: identity, department, auto-add and offboarding, with ignored/stale answers', () => {
+    const a = asAdmin()
+    const push = (employeeId: string, body: Record<string, unknown>, headers: Record<string, string> = emsPartner, syncId = 'EMS-HTL-01') =>
+      call(`/v1/ems/hotels/${syncId}/employees/${employeeId}`, { method: 'PUT', headers, body })
+    const full = { name: 'Ayu Lestari', email: 'ayu.lestari@aston.example', active: true, departmentName: 'Front Office', updatedAt: '2026-10-06T08:00:00Z' }
+    expect(errOf(() => push('EMP-00120', full, { 'cookie': a.cookie, 'x-csrf-token': a.csrf })).message).toBe('the interface API accepts partner tokens only')
+    expect(errOf(() => push('EMP-00120', full, { authorization: `Bearer partner:${IDS.partner.butler}` })).message).toBe('this partner may not sync staff')
+    expect(errOf(() => push('EMP-00120', { ...full, active: undefined })).message).toBe('active is required')
+    expect(errOf(() => push('EMP-00120', { ...full, updatedAt: undefined })).message).toBe('updatedAt is required')
+    expect(errOf(() => push('EMP-00120', { ...full, name: '' })).message).toBe('name is required (1-200 characters)')
+    expect(data(push('EMP-00120', full, emsPartner, 'EMS-HTL-99'))).toEqual({ status: 'ignored', reason: 'unmapped_hotel' })
+    expect(data(push('EMP-00555', full))).toEqual({ status: 'ignored', reason: 'not_linked' })
+    expect(data(push('EMP-00120', full))).toEqual({ status: 'applied' })
+    const ayu = () => data<any[]>(call('/v1/staff', { headers: h(a, H) })).find(s => s.emsEmployeeId === 'EMP-00120')
+    expect(ayu().memberships[0].hotelDepartmentId).toBe(IDS.dept.smtpFrontOffice)
+    // Older than what was applied: stale. An unknown department keeps the current one and raises the issue.
+    expect(data(push('EMP-00120', { ...full, departmentName: 'Housekeeping', updatedAt: '2026-10-05T08:00:00Z' }))).toEqual({ status: 'stale' })
+    expect(data(push('EMP-00120', { ...full, departmentName: 'Laundry', updatedAt: '2026-10-06T09:00:00Z' }))).toEqual({ status: 'applied' })
+    expect(ayu().memberships[0]).toMatchObject({ hotelDepartmentId: IDS.dept.smtpFrontOffice, syncIssue: { type: 'unknown_department', emsDepartmentName: 'Laundry' } })
+    // Left the property: membership removed, and with no access anywhere else the account is deactivated.
+    expect(data(push('EMP-00120', { ...full, active: false, updatedAt: '2026-10-06T10:00:00Z' }))).toEqual({ status: 'applied' })
+    expect(ayu()).toBeUndefined()
+    // Rejoined: auto-added as plain staff, account active again.
+    expect(data(push('EMP-00120', { ...full, departmentName: 'Housekeeping', updatedAt: '2026-10-06T11:00:00Z' }))).toEqual({ status: 'applied' })
+    expect(ayu().memberships[0]).toMatchObject({ role: 'staff', createTask: false, hotelDepartmentId: IDS.dept.smtpHousekeeping, syncIssue: null })
+  })
+
+  it('operators map a property to a partner id, and give partners capabilities', () => {
+    const op = asOperator()
+    expect(data<any[]>(call(`/v1/platform/tenants/${H}/sync`, { headers: h(op) }))).toEqual([expect.objectContaining({ partnerId: IDS.partner.ems, partnerName: 'Sentec EMS', syncId: 'EMS-HTL-01' })])
+    expect(errOf(() => call(`/v1/platform/tenants/${KNGN}/sync/${IDS.partner.ems}`, { method: 'PUT', headers: h(op), body: { syncId: 'EMS-HTL-01' } })).message).toBe('another property already uses this id for this partner')
+    expect(errOf(() => call(`/v1/platform/tenants/${KNGN}/sync/${IDS.partner.ems}`, { method: 'PUT', headers: h(op), body: { syncId: '' } })).message).toBe('syncId is required (1-100 characters)')
+    expect(errOf(() => call(`/v1/platform/tenants/${KNGN}/sync/${GHOST}`, { method: 'PUT', headers: h(op), body: { syncId: 'X' } })).message).toBe('tenant or partner')
+    expect(errOf(() => call('/v1/platform/tenants/nope/sync', { headers: h(op) })).message).toBe('hotelRef must be a valid UUID')
+    expect(data(call(`/v1/platform/tenants/${KNGN}/sync/${IDS.partner.ems}`, { method: 'PUT', headers: h(op), body: { syncId: 'EMS-HTL-02' } }))).toMatchObject({ hotelRef: KNGN, syncId: 'EMS-HTL-02', partnerName: 'Sentec EMS' })
+    // MOCK LIMIT: an EMS hotel id the mock's directory does not know reads as EMS being down.
+    expect(errOf(() => call('/v1/ems/employees', { headers: h(asRina(), KNGN) })).message).toBe('EMS is not reachable')
+    expect(call(`/v1/platform/tenants/${KNGN}/sync/${IDS.partner.ems}`, { method: 'DELETE', headers: h(op) }).status).toBe(204)
+    expect(errOf(() => call(`/v1/platform/tenants/${KNGN}/sync/${IDS.partner.ems}`, { method: 'DELETE', headers: h(op) })).message).toBe('partner id for this property')
+    // Partner capabilities: a closed set, on registration and by PATCH; an empty PATCH is refused.
+    expect(errOf(() => call('/v1/platform/partners', { method: 'POST', headers: h(op), body: { name: 'Sentec HRIS', capabilities: ['payroll'] } })).message).toBe('unknown capability: payroll')
+    const created = data(call('/v1/platform/partners', { method: 'POST', headers: h(op), body: { name: 'Sentec HRIS', capabilities: ['staff_sync', 'staff_sync'] } }))
+    expect(created.capabilities).toEqual(['staff_sync'])
+    expect(errOf(() => call(`/v1/platform/partners/${created.id}`, { method: 'PATCH', headers: h(op), body: {} })).message).toBe('isActive or capabilities is required')
+    expect(data(call(`/v1/platform/partners/${created.id}`, { method: 'PATCH', headers: h(op), body: { capabilities: [] } })).capabilities).toEqual([])
+    expect(data<any[]>(call('/v1/platform/partners', { headers: h(op) })).find(p => p.id === IDS.partner.ems).capabilities).toEqual(['staff_sync'])
   })
 })

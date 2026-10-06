@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { TaskDetail, TaskStatus } from '~/utils/clientFakeApi'
+import type { TaskDetail, TaskHistory, TaskStatus } from '~/utils/clientFakeApi'
 import { useSession } from '~/composables/useSession'
 import { displayName, relativeTime, statusMeta } from '~/utils/task-ui'
+import { ESCALATION_ACTOR, isEscalationHistoryRow } from '~/utils/escalation-ui'
 
 /**
  * One chronological stream: history rows and comments interleaved.
@@ -10,17 +11,20 @@ import { displayName, relativeTime, statusMeta } from '~/utils/task-ui'
  * History rows carry only a staffId (never a name — the API resolves names on
  * comments and collaborators, not history), so the actor label is derived from
  * what the detail already knows: "You", the current assignee's name, a helper's
- * name, or plain "Staff"; a nil staffId is a system/partner action.
+ * name, or plain "Staff"; a nil staffId is a system/partner action — or the
+ * escalation worker, which the description gives away.
  */
 const props = defineProps<{ task: TaskDetail }>()
 
 const session = useSession()
 
 type Entry =
-  | { kind: 'status', at: string, actor: string, status: TaskStatus, text: string | null }
+  | { kind: 'status', at: string, actor: string, status: TaskStatus, text: string | null, escalation: boolean }
   | { kind: 'comment', at: string, actor: string, text: string }
 
-function actorFor(staffId: string | null): string {
+function actorFor(row: TaskHistory): string {
+  if (isEscalationHistoryRow(row)) return ESCALATION_ACTOR
+  const staffId = row.staffId
   if (!staffId) return 'System'
   if (staffId === session.userId.value) return 'You'
   const assignment = props.task.assignment
@@ -34,9 +38,10 @@ const entries = computed<Entry[]>(() => {
   const status: Entry[] = (props.task.history ?? []).map(row => ({
     kind: 'status',
     at: row.createdAt,
-    actor: actorFor(row.staffId),
+    actor: actorFor(row),
     status: row.status as TaskStatus,
     text: row.description,
+    escalation: isEscalationHistoryRow(row),
   }))
   const comments: Entry[] = (props.task.comments ?? []).map(row => ({
     kind: 'comment',
@@ -59,7 +64,13 @@ const entries = computed<Entry[]>(() => {
       />
       <div class="flex items-baseline justify-between gap-2">
         <p class="text-xs font-semibold text-foreground">
-          <template v-if="entry.kind === 'status'">
+          <!-- An escalation row keeps the status it found the task in; it did
+               not move anything, so it is not worded as a move. -->
+          <template v-if="entry.kind === 'status' && entry.escalation">
+            {{ entry.actor }} ·
+            <span :class="statusMeta(entry.status).badge" class="ml-0.5 rounded-full px-1.5 py-0.5">{{ statusMeta(entry.status).label }}</span>
+          </template>
+          <template v-else-if="entry.kind === 'status'">
             {{ entry.actor }} moved to
             <span :class="statusMeta(entry.status).badge" class="ml-0.5 rounded-full px-1.5 py-0.5">{{ statusMeta(entry.status).label }}</span>
           </template>

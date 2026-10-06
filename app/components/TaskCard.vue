@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { ChevronRightIcon, FolderKanbanIcon, MapPinIcon } from '@lucide/vue'
+import { ChevronRightIcon, FolderKanbanIcon, MapPinIcon, SirenIcon } from '@lucide/vue'
 import type { TaskListItem } from '~/utils/clientFakeApi'
 import { useSourceApps } from '~/composables/useSourceApps'
 import { initials, priorityMeta, relativeTime, slaAccent, taskRef } from '~/utils/task-ui'
@@ -71,7 +71,18 @@ const sourceBadge = computed(() => {
       >
         {{ priorityMeta(task.priority).label }}
       </span>
-      <Badge v-if="task.department" variant="outline" class="text-[10px]">{{ task.department.name }}</Badge>
+      <!-- The policy stepped in. One word at level 1; the level once it has
+           climbed, because a card at L3 is a different kind of late. -->
+      <Badge
+        v-if="task.escalationLevel > 0"
+        variant="destructive"
+        class="gap-1 text-[10px]"
+        :title="`escalated ${relativeTime(task.escalatedAt)}`"
+      >
+        <SirenIcon aria-hidden="true" />
+        {{ task.escalationLevel >= 2 ? `Esc. L${task.escalationLevel}` : 'Escalated' }}
+      </Badge>
+      <Badge v-if="task.department" variant="outline" class="text-[10px]">{{ task.department.name }}{{ task.department.isActive === false ? ' (inactive)' : '' }}</Badge>
       <Badge v-if="task.quantity && task.quantity > 1" variant="outline" class="text-[10px]">×{{ task.quantity }}</Badge>
       <!-- The originating app matters operationally: a Butler task has a guest
            waiting on the other end. The dot is the registry's colour — data,
