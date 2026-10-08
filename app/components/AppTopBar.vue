@@ -1,15 +1,23 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ChevronsUpDownIcon } from '@lucide/vue'
+import { ChevronsUpDownIcon, UserRoundIcon } from '@lucide/vue'
 import { useSession } from '~/composables/useSession'
 
 defineProps<{ title: string }>()
 
+const route = useRoute()
 const session = useSession()
 
 const activeProperty = computed(() => session.activeHotel.value)
 const canSwitch = computed(() => session.hotels.value.length > 1)
 const switcherOpen = ref(false)
+
+/**
+ * Profile lives up here as an icon beside the theme toggle rather than as a
+ * bottom tab: it is a settings screen visited a few times a shift, not a
+ * work surface, and the bottom bar is reserved for the places work happens.
+ */
+const profileActive = computed(() => route.path === '/profile')
 </script>
 
 <template>
@@ -36,7 +44,25 @@ const switcherOpen = ref(false)
       </button>
     </div>
 
-    <ThemeToggle />
+    <div class="flex shrink-0 items-center gap-1">
+      <ThemeToggle />
+
+      <Button
+        as-child
+        variant="ghost"
+        size="icon"
+        :class="profileActive ? 'text-primary hover:text-primary' : 'text-muted-foreground hover:text-foreground'"
+      >
+        <NuxtLink
+          to="/profile"
+          title="Profile"
+          aria-label="Profile"
+          :aria-current="profileActive ? 'page' : undefined"
+        >
+          <UserRoundIcon class="h-4 w-4" />
+        </NuxtLink>
+      </Button>
+    </div>
 
     <PropertySwitcher v-if="canSwitch" v-model:open="switcherOpen" />
   </header>

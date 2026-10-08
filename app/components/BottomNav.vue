@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ClipboardListIcon, FolderKanbanIcon, LayoutListIcon, PlusIcon, SquareKanbanIcon, UserRoundIcon } from '@lucide/vue'
+import { ClipboardListIcon, FolderKanbanIcon, LayoutListIcon, PlusIcon, SquareKanbanIcon } from '@lucide/vue'
 import { useCaps } from '~/composables/useCaps'
 
 const route = useRoute()
@@ -9,21 +9,21 @@ const { canCreateTask } = useCaps()
 interface Tab { to: string, label: string, icon: unknown, match: (path: string) => boolean }
 
 /**
- * Five tabs plus the create action. Every target is at least 44px tall — this
+ * Four tabs plus the create action. Every target is at least 44px tall — this
  * is used one-handed, walking a corridor, so the hit areas matter more than the
- * density. The action sits after the third tab: with an odd count it cannot be
- * dead centre, and slightly right favours the thumb that presses it.
+ * density. The action sits dead centre between the two pairs, where either
+ * thumb reaches it. Profile is not a tab: it is a settings screen, not a work
+ * surface, and lives as an icon button in the top bar beside the theme toggle.
  */
 const tabs: Tab[] = [
   { to: '/', label: 'My work', icon: ClipboardListIcon, match: path => path === '/' },
   { to: '/tasks', label: 'Tasks', icon: LayoutListIcon, match: path => path.startsWith('/tasks') && path !== '/tasks/new' },
   { to: '/board', label: 'Board', icon: SquareKanbanIcon, match: path => path === '/board' },
   { to: '/projects', label: 'Projects', icon: FolderKanbanIcon, match: path => path.startsWith('/projects') },
-  { to: '/profile', label: 'Profile', icon: UserRoundIcon, match: path => path === '/profile' },
 ]
 
-const leftTabs = tabs.slice(0, 3)
-const rightTabs = tabs.slice(3)
+const leftTabs = tabs.slice(0, 2)
+const rightTabs = tabs.slice(2)
 const createActive = computed(() => route.path === '/tasks/new')
 </script>
 
