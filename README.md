@@ -394,6 +394,45 @@ sibling app byte-for-byte (`pnpm run check:shared`). Tested:
 the redirect itself needs the Nuxt runtime and was checked by typecheck and
 build only.
 
+## One traffic light (2026-10-08)
+
+The app was reworked so that someone with no training — a child, a new hire
+on their first shift — can read a screen at arm's length. Three rules carry
+it, all in `app/utils/task-signals.ts` (this app's own; the shared
+`task-ui.ts` is untouched) and pinned by `tests/task-signals.spec.ts`:
+
+- **Red, amber and green mean one thing: how urgently a task needs a person.**
+  Three things can raise it and each has its own icon, so the colour says how
+  much and the icon says why: the running clock (`ClockAlert` once late,
+  amber inside the last 30 minutes), the priority flag (`Urgent` red, `High
+  priority` amber, `Low priority` grey, Normal carries no chip) and the
+  escalation siren (`Escalated`, `Escalated · level N`). A card's left edge
+  is the hottest of them while the work runs (NEW, IN_PROGRESS, PENDING);
+  submitted and closed work has no edge, only a stamped verdict chip
+  (`Finished late`, `Picked up late`, `On time`). Lists sort hottest first,
+  then by priority, then oldest first (`compareByHeat`). The detail page opens
+  with a banner that spells every red or amber reason out in a sentence.
+- **Lifecycle status never borrows those colours.** Each status has an icon
+  and a neutral or brand tone (`STATUS_SIGNAL`): New is a dashed circle, In
+  progress a play mark, In review an eye (the API's SUBMITTED, kept as the
+  tooltip), On hold a pause, Finished a tick, Verified a double tick,
+  Cancelled a ban sign — and Cancelled is grey, not red. The board columns,
+  the move sheet, the timeline nodes and the status filter chips all wear the
+  same icon as the pill. Projects follow the same rule (`project-ui.ts`).
+- **Plain words for the signals, product verbs for the actions.** The two
+  SLA clocks are "Pick up by" and "Finish by" everywhere (`CLOCK_WORDS`);
+  "SLA breached" is "Late"; the Tasks scope chips read "Picked up late" and
+  "Late". Claim, Submit, Review, Verified and the other actions keep their
+  names, which the admin console and the API share.
+
+Sizes follow from the same goal: no text under 12px, every tap target at
+least 44px (`FilterChip` for every filter strip, 56px bottom-nav tabs with a
+tinted pill behind the active icon, 56px New-task action, 44px form radios
+with the icon and tint they will produce), card titles 16px. The home screen
+counts the red and amber open tasks in two tappable chips above the tabs.
+Signal chips are `SignalChip` (28px, not targets); the detail banner is
+`HeatBanner`.
+
 ## Kept in step with the remote staff app
 
 The remote `sentec-tasks-web` (SentinelTech-com, `master`) is the reference
@@ -402,11 +441,12 @@ this app is periodically re-aligned with. Its 2026-09-03 redesign
 ported as **information architecture, not palette** — the Sentinel Tech Design
 System stays untouched, per the standing decision:
 
-- **Three signals, kept apart.** SLA urgency is the only meaning of the
-  red/amber tones (card stripe, running clock — amber inside 30 minutes,
-  breached reads `due HH:MM · 25m over`); the source app is a small dot in the
-  registry's own colour (data, never a token); lifecycle status keeps its own
-  pill. Scan order on cards and the detail header: stripe, room, clock, title.
+- **Three signals, kept apart** — superseded on 2026-10-08 by the one
+  traffic light below. The source app is still a small dot in the registry's
+  own colour (data, never a token) and lifecycle status still keeps its own
+  pill; what changed is that priority and escalation now share the clock's
+  red/amber scale instead of borrowing blue and red of their own. Scan order
+  on cards and the detail header is unchanged: edge, room, clock, title.
 - **Queue chips carry server totals** (`Mine (4)`, `Helping (1)`, and for
   leaders `In review (2)`) from `limit=1` list calls read for `meta.total`;
   a failed count leaves the plain label. "To claim" is the remote's "Team pool"

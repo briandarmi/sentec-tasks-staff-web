@@ -1,17 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ChevronRightIcon, ClipboardCheckIcon, HandIcon, InboxIcon, RefreshCwIcon } from '@lucide/vue'
+import { CheckIcon, ChevronRightIcon, ClipboardCheckIcon, ClockAlertIcon, ClockIcon, HandIcon, InboxIcon, PlayIcon, RefreshCwIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
+import { useNow } from '~/composables/useNow'
 import type { TaskListItem } from '~/utils/clientFakeApi'
 import { isClaimable, isOpen } from '~/utils/task-ui'
+import { HEAT_TONE, compareByHeat, taskHeat } from '~/utils/task-signals'
+import type { Heat } from '~/utils/task-signals'
 
 definePageMeta({ title: 'My work' })
 
 const api = useTasksApi()
 const session = useSession()
 const caps = useCaps()
+const now = useNow()
 
 const mine = ref<TaskListItem[]>([])
 const queue = ref<TaskListItem[]>([])
@@ -21,17 +25,42 @@ const isLoading = ref(false)
 const errorMessage = ref('')
 const tab = ref<'open' | 'queue' | 'done'>('open')
 
-const openTasks = computed(() => mine.value.filter(task => isOpen(task.status)))
+/** Hottest first: the red cards are what someone opening the app came for. */
+const byHeat = (rows: TaskListItem[]) => [...rows].sort((a, b) => compareByHeat(a, b, now.value))
+
+const openTasks = computed(() => byHeat(mine.value.filter(task => isOpen(task.status))))
 const doneTasks = computed(() => mine.value.filter(task => !isOpen(task.status)))
 /** Unclaimed work in the user's own department — what they should pick up next. */
-const claimable = computed(() => queue.value.filter(task => isOpen(task.status)))
+const claimable = computed(() => byHeat(queue.value.filter(task => isOpen(task.status))))
+
+/**
+ * The two numbers that decide what to do next, as tappable chips above the
+ * list: how many open tasks are red, how many amber. Tapping one narrows the
+ * Open tab to that colour; tapping again shows everything.
+ */
+const lateCount = computed(() => openTasks.value.filter(task => taskHeat(task, now.value) === 'late').length)
+const soonCount = computed(() => openTasks.value.filter(task => taskHeat(task, now.value) === 'soon').length)
+const focus = ref<Extract<Heat, 'late' | 'soon'> | null>(null)
+
+function toggleFocus(which: 'late' | 'soon') {
+  focus.value = focus.value === which ? null : which
+  tab.value = 'open'
+}
 
 const shown = computed(() => {
   switch (tab.value) {
     case 'queue': return claimable.value
     case 'done': return doneTasks.value
-    default: return openTasks.value
+    default: return focus.value ? openTasks.value.filter(task => taskHeat(task, now.value) === focus.value) : openTasks.value
   }
+})
+
+const emptyCopy = computed(() => {
+  if (tab.value === 'queue') return { icon: HandIcon, title: 'Queue is clear', description: 'No unclaimed work in your department right now.' }
+  if (tab.value === 'done') return { icon: ClipboardCheckIcon, title: 'Nothing finished yet', description: 'Tasks you finish or that get verified appear here.' }
+  if (focus.value === 'late') return { icon: ClockAlertIcon, title: 'Nothing late', description: 'None of your open tasks is late right now.' }
+  if (focus.value === 'soon') return { icon: ClockIcon, title: 'Nothing due soon', description: 'None of your open tasks is due in the next half hour.' }
+  return { icon: ClipboardCheckIcon, title: 'Nothing open', description: 'Work assigned to you, or that you claim, shows up here.' }
 })
 
 async function load() {
@@ -104,25 +133,52 @@ onMounted(load)
   <div class="space-y-4">
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
-        <h2 class="text-lg font-bold tracking-tight">
+        <h2 class="text-xl font-bold tracking-tight">
           {{ session.displayName.value ? `Hi, ${session.displayName.value.split(' ')[0]}` : 'My work' }}
         </h2>
-        <p class="text-xs text-muted-foreground">Your tasks at {{ session.activeHotel.value?.name ?? 'this property' }}.</p>
+        <p class="text-sm text-muted-foreground">Your tasks at {{ session.activeHotel.value?.name ?? 'this property' }}.</p>
       </div>
       <div class="flex items-center gap-1">
-        <Button size="icon" variant="ghost" class="relative" aria-label="Offers" @click="navigateTo('/offers')">
-          <InboxIcon class="h-4 w-4" />
+        <Button size="icon" variant="ghost" class="relative" aria-label="Offers" title="Offers" @click="navigateTo('/offers')">
+          <InboxIcon class="size-5" />
           <span
             v-if="offerCount > 0"
-            class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-bold text-primary-foreground"
+            class="absolute right-0 top-0 flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-xs font-bold text-primary-foreground"
           >
             {{ offerCount }}
           </span>
         </Button>
-        <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-          <RefreshCwIcon class="h-4 w-4" :class="isLoading ? 'animate-spin' : ''" />
+        <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" title="Refresh" @click="load">
+          <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
         </Button>
       </div>
+    </div>
+
+    <!-- The traffic light, counted: red and amber open tasks, as chips that
+         narrow the list. Absent when everything is calm. -->
+    <div v-if="lateCount || soonCount" class="flex flex-wrap gap-2" aria-label="What needs you">
+      <button
+        v-if="lateCount"
+        type="button"
+        class="flex min-h-11 items-center gap-2 rounded-full border px-4 text-sm font-bold transition-shadow focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+        :class="[HEAT_TONE.late.band, focus === 'late' ? 'ring-[3px] ring-destructive/30' : '']"
+        :aria-pressed="focus === 'late'"
+        @click="toggleFocus('late')"
+      >
+        <ClockAlertIcon class="size-5" aria-hidden="true" />
+        {{ lateCount }} {{ lateCount === 1 ? 'needs' : 'need' }} you now
+      </button>
+      <button
+        v-if="soonCount"
+        type="button"
+        class="flex min-h-11 items-center gap-2 rounded-full border px-4 text-sm font-bold transition-shadow focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+        :class="[HEAT_TONE.soon.band, focus === 'soon' ? 'ring-[3px] ring-warning/30' : '']"
+        :aria-pressed="focus === 'soon'"
+        @click="toggleFocus('soon')"
+      >
+        <ClockIcon class="size-5" aria-hidden="true" />
+        {{ soonCount }} due soon
+      </button>
     </div>
 
     <!-- Offers demand an answer — the sender is waiting on it. A badge on an
@@ -130,22 +186,28 @@ onMounted(load)
     <NuxtLink
       v-if="offerCount > 0"
       to="/offers"
-      class="flex min-h-11 items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-3.5 py-3 transition-colors active:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="flex min-h-12 items-center gap-3 rounded-xl border border-primary/30 bg-primary-tint/60 px-4 py-3 transition-colors active:bg-primary-tint focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
     >
-      <InboxIcon class="h-4 w-4 shrink-0 text-primary" />
-      <span class="min-w-0 flex-1 text-sm font-medium text-foreground">
+      <InboxIcon class="size-5 shrink-0 text-primary-tint-foreground" aria-hidden="true" />
+      <span class="min-w-0 flex-1 text-sm font-semibold text-foreground">
         {{ offerCount === 1 ? 'A colleague wants to hand you a task' : `${offerCount} colleagues want to hand you tasks` }}
       </span>
-      <span class="flex shrink-0 items-center gap-0.5 text-xs font-semibold text-primary">
-        Review <ChevronRightIcon class="h-3.5 w-3.5" />
+      <span class="flex shrink-0 items-center gap-0.5 text-sm font-bold text-primary-tint-foreground">
+        Review <ChevronRightIcon class="size-4" aria-hidden="true" />
       </span>
     </NuxtLink>
 
     <Tabs v-model="tab">
       <TabsList class="grid w-full grid-cols-3">
-        <TabsTrigger value="open">Open ({{ openTasks.length }})</TabsTrigger>
-        <TabsTrigger value="queue">To claim ({{ claimable.length }})</TabsTrigger>
-        <TabsTrigger value="done">Done ({{ doneTasks.length }})</TabsTrigger>
+        <TabsTrigger value="open" class="min-h-11 px-2">
+          <PlayIcon aria-hidden="true" /> Open ({{ openTasks.length }})
+        </TabsTrigger>
+        <TabsTrigger value="queue" class="min-h-11 px-2">
+          <HandIcon aria-hidden="true" /> To claim ({{ claimable.length }})
+        </TabsTrigger>
+        <TabsTrigger value="done" class="min-h-11 px-2">
+          <CheckIcon aria-hidden="true" /> Done ({{ doneTasks.length }})
+        </TabsTrigger>
       </TabsList>
     </Tabs>
 
@@ -155,20 +217,18 @@ onMounted(load)
     </Alert>
 
     <div v-if="isLoading && !mine.length && !queue.length" class="space-y-3">
-      <Skeleton v-for="n in 3" :key="n" class="h-32 w-full rounded-xl" />
+      <Skeleton v-for="n in 3" :key="n" class="h-36 w-full rounded-2xl" />
     </div>
 
     <template v-else>
       <EmptyState
         v-if="shown.length === 0"
-        :icon="tab === 'queue' ? HandIcon : ClipboardCheckIcon"
-        :title="tab === 'open' ? 'Nothing open' : tab === 'queue' ? 'Queue is clear' : 'Nothing finished yet'"
-        :description="tab === 'open'
-          ? 'Work assigned to you, or that you claim, shows up here.'
-          : tab === 'queue'
-            ? 'No unclaimed work in your department right now.'
-            : 'Tasks you finish or that get verified appear here.'"
-      />
+        :icon="emptyCopy.icon"
+        :title="emptyCopy.title"
+        :description="emptyCopy.description"
+      >
+        <Button v-if="focus && tab === 'open'" variant="secondary" class="min-h-11" @click="focus = null">Show every open task</Button>
+      </EmptyState>
 
       <div v-else class="space-y-3">
         <div v-for="task in shown" :key="task.id" class="space-y-2">
@@ -178,13 +238,12 @@ onMounted(load)
           <Button
             v-if="tab === 'queue' && canClaimCard(task)"
             variant="secondary"
-            size="sm"
             class="min-h-11 w-full"
             :disabled="claimingId === task.id"
             :aria-busy="claimingId === task.id"
             @click="claim(task)"
           >
-            <HandIcon class="h-4 w-4" />
+            <HandIcon class="size-5" />
             {{ claimingId === task.id ? 'Claiming…' : claimLabel(task) }}
           </Button>
         </div>

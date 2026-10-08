@@ -14,6 +14,9 @@ interface Tab { to: string, label: string, icon: unknown, match: (path: string) 
  * density. The action sits dead centre between the two pairs, where either
  * thumb reaches it. Profile is not a tab: it is a settings screen, not a work
  * surface, and lives as an icon button in the top bar beside the theme toggle.
+ *
+ * The active tab wears a tinted pill behind its icon, not just a colour
+ * change: a shape reads at a glance where a hue alone does not.
  */
 const tabs: Tab[] = [
   { to: '/', label: 'My work', icon: ClipboardListIcon, match: path => path === '/' },
@@ -38,25 +41,31 @@ const createActive = computed(() => route.path === '/tasks/new')
         v-for="tab in leftTabs"
         :key="tab.to"
         :to="tab.to"
-        class="flex min-h-11 flex-1 flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="tab.match(route.path) ? 'text-primary' : 'text-muted-foreground active:text-foreground'"
+        class="flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+        :class="tab.match(route.path) ? 'text-primary-tint-foreground' : 'text-muted-foreground active:text-foreground'"
         :aria-current="tab.match(route.path) ? 'page' : undefined"
       >
-        <component :is="tab.icon" class="h-5 w-5" />
+        <span
+          class="flex h-8 w-14 items-center justify-center rounded-full transition-colors"
+          :class="tab.match(route.path) ? 'bg-primary-tint' : ''"
+        >
+          <component :is="tab.icon" class="size-6" aria-hidden="true" />
+        </span>
         <span>{{ tab.label }}</span>
       </NuxtLink>
 
       <NuxtLink
         v-if="canCreateTask"
         to="/tasks/new"
-        class="flex shrink-0 flex-col items-center justify-center rounded-full px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        class="flex shrink-0 flex-col items-center justify-center rounded-full px-3 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
         aria-label="New task"
+        title="New task"
       >
         <span
-          class="-mt-5 flex h-12 w-12 items-center justify-center rounded-full border-4 border-background shadow-lg transition-colors"
+          class="-mt-6 flex size-14 items-center justify-center rounded-full border-4 border-background shadow-lg transition-colors"
           :class="createActive ? 'bg-primary-hover text-primary-foreground' : 'bg-primary text-primary-foreground active:bg-primary-active'"
         >
-          <PlusIcon class="h-6 w-6" />
+          <PlusIcon class="size-7" aria-hidden="true" />
         </span>
       </NuxtLink>
 
@@ -64,11 +73,16 @@ const createActive = computed(() => route.path === '/tasks/new')
         v-for="tab in rightTabs"
         :key="tab.to"
         :to="tab.to"
-        class="flex min-h-11 flex-1 flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="tab.match(route.path) ? 'text-primary' : 'text-muted-foreground active:text-foreground'"
+        class="flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+        :class="tab.match(route.path) ? 'text-primary-tint-foreground' : 'text-muted-foreground active:text-foreground'"
         :aria-current="tab.match(route.path) ? 'page' : undefined"
       >
-        <component :is="tab.icon" class="h-5 w-5" />
+        <span
+          class="flex h-8 w-14 items-center justify-center rounded-full transition-colors"
+          :class="tab.match(route.path) ? 'bg-primary-tint' : ''"
+        >
+          <component :is="tab.icon" class="size-6" aria-hidden="true" />
+        </span>
         <span>{{ tab.label }}</span>
       </NuxtLink>
     </div>

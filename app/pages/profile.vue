@@ -34,16 +34,16 @@ async function logout() {
         <p class="truncate text-lg font-bold leading-tight">{{ name }}</p>
         <p class="truncate text-sm text-muted-foreground">{{ session.email.value }}</p>
         <div class="mt-1 flex flex-wrap items-center gap-1.5">
-          <Badge variant="secondary" class="text-[10px]">{{ caps.roleLabel.value }}</Badge>
-          <Badge v-if="caps.canAssign.value" variant="outline" class="text-[10px]">Can assign</Badge>
+          <Badge variant="secondary" class="text-xs">{{ caps.roleLabel.value }}</Badge>
+          <Badge v-if="caps.canAssign.value" variant="outline" class="text-xs">Can assign</Badge>
         </div>
       </div>
     </div>
 
     <Card>
       <CardHeader class="pb-2">
-        <CardTitle class="flex items-center gap-2 text-sm">
-          <Building2Icon class="h-4 w-4" /> Your properties
+        <CardTitle class="flex items-center gap-2 text-base">
+          <Building2Icon class="size-5" /> Your properties
         </CardTitle>
       </CardHeader>
       <CardContent class="space-y-1.5">
@@ -51,14 +51,14 @@ async function logout() {
           v-for="property in properties"
           :key="property.id"
           type="button"
-          class="flex min-h-11 w-full items-center gap-3 rounded-lg border px-3 py-3 text-left text-sm active:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          class="flex min-h-14 w-full items-center gap-3 rounded-xl border px-4 py-3 text-left text-base active:bg-accent focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
           :class="property.id === session.hotelId.value ? 'border-primary/40 bg-primary/5' : 'bg-card'"
           @click="session.setHotelId(property.id)"
         >
           <span class="min-w-0 flex-1">
             <span class="block truncate font-medium">{{ property.name }}</span>
           </span>
-          <CheckIcon v-if="property.id === session.hotelId.value" class="h-4 w-4 shrink-0 text-primary" />
+          <CheckIcon v-if="property.id === session.hotelId.value" class="size-5 shrink-0 text-primary" aria-hidden="true" />
         </button>
         <p v-if="properties.length === 0" class="px-1 py-2 text-sm text-muted-foreground">No property assignments.</p>
         <!-- Said once, here: a phone left on another zone still reads the corridor clock. -->
@@ -72,21 +72,21 @@ async function logout() {
     <NuxtLink
       v-if="caps.canCreateTask.value"
       to="/recurring"
-      class="flex min-h-11 items-center gap-3 rounded-xl border bg-card px-3.5 py-3 transition-colors active:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="flex min-h-14 items-center gap-3 rounded-2xl border bg-card px-4 py-3 shadow-sm transition-colors active:bg-accent focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
     >
-      <RepeatIcon class="h-4 w-4 shrink-0 text-primary" />
+      <RepeatIcon class="size-5 shrink-0 text-primary-tint-foreground" aria-hidden="true" />
       <span class="min-w-0 flex-1">
-        <span class="block text-sm font-medium">Repeats</span>
-        <span class="block text-xs text-muted-foreground">Tasks you set to repeat on a schedule.</span>
+        <span class="block text-base font-semibold">Repeats</span>
+        <span class="block text-sm text-muted-foreground">Tasks you set to repeat on a schedule.</span>
       </span>
-      <ChevronRightIcon class="h-4 w-4 shrink-0 text-muted-foreground/50" />
+      <ChevronRightIcon class="size-5 shrink-0 text-muted-foreground/50" aria-hidden="true" />
     </NuxtLink>
 
     <Card>
       <CardContent class="flex flex-wrap items-center justify-between gap-3 pt-6">
         <div>
-          <p class="text-sm font-medium">Appearance</p>
-          <p class="text-xs text-muted-foreground">Follow your device, or pin light or dark.</p>
+          <p class="text-base font-semibold">Appearance</p>
+          <p class="text-sm text-muted-foreground">Follow your device, or pin light or dark.</p>
         </div>
         <ThemeModeSelect />
       </CardContent>
@@ -94,7 +94,7 @@ async function logout() {
 
     <div class="space-y-2">
       <Button variant="secondary" tone="destructive" class="min-h-11 w-full" @click="logout">
-        <LogOutIcon class="h-4 w-4" /> Sign out
+        <LogOutIcon class="size-5" aria-hidden="true" /> Sign out
       </Button>
       <!-- Signing out clears the selected property too. That is deliberate on a
            shared device, and surprising enough to warrant saying. -->

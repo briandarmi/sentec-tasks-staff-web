@@ -78,10 +78,10 @@ async function remove(userId: string) {
 <template>
   <Card v-if="helpers.length || canManage">
     <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <UsersRoundIcon class="h-4 w-4" /> Helpers
+      <CardTitle class="flex items-center gap-2 text-base">
+        <UsersRoundIcon class="size-5" /> Helpers
       </CardTitle>
-      <CardDescription class="text-xs">
+      <CardDescription class="text-sm">
         Helpers can attach proof and submit the work — the task still belongs to its assignee.
       </CardDescription>
     </CardHeader>
@@ -101,14 +101,13 @@ async function remove(userId: string) {
           class="flex min-h-11 max-w-full items-center gap-2 rounded-full border bg-card py-1 pl-1 pr-2"
         >
           <Avatar class="h-7 w-7 shrink-0">
-            <AvatarFallback class="bg-primary/10 text-[10px] font-semibold text-primary">
+            <AvatarFallback class="bg-primary/10 text-xs font-semibold text-primary">
               {{ initials(helper.staffName) }}
             </AvatarFallback>
           </Avatar>
           <span class="min-w-0 truncate text-sm font-medium">{{ displayName(helper.staffName) }}</span>
           <Button
             v-if="canManage || canLeave(helper.staffId)"
-            size="sm"
             variant="secondary"
             class="-mr-1 h-9 rounded-full text-muted-foreground hover:text-destructive"
             :disabled="Boolean(removingUserId)"

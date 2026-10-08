@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { FilterXIcon, LayersIcon, LayoutListIcon, RefreshCwIcon, SearchIcon } from '@lucide/vue'
+import type { Component } from 'vue'
+import { ClockAlertIcon, FilterXIcon, HandIcon, LayersIcon, LayoutListIcon, RefreshCwIcon, SearchIcon, UserRoundIcon, UsersIcon } from '@lucide/vue'
 import { useTasksApi, type TaskQuery } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
@@ -8,6 +9,7 @@ import { useSourceApps } from '~/composables/useSourceApps'
 import { useNow } from '~/composables/useNow'
 import type { TaskListItem } from '~/utils/clientFakeApi'
 import { groupIntoLanes } from '~/utils/source-lanes'
+import { STATUS_SIGNAL, compareByHeat } from '~/utils/task-signals'
 
 definePageMeta({ title: 'Tasks' })
 
@@ -111,9 +113,9 @@ function refreshCounts() {
   if (caps.isLeader.value) void fetchCount('SUBMITTED', { status: 'SUBMITTED' })
 }
 
-function withCount(label: string, key?: string) {
+function countFor(key?: string): number | null {
   const n = key ? counts.value[key] : null
-  return typeof n === 'number' ? `${label} (${n})` : label
+  return typeof n === 'number' ? n : null
 }
 
 async function load() {
@@ -159,15 +161,24 @@ watch(search, (value) => {
   searchTimer = setTimeout(() => setFilter('q', value.trim()), 250)
 })
 
+const now = useNow()
+
+/**
+ * The loaded rows, hottest first. The server orders by creation; on a phone
+ * the red cards are what the reader came for, so they float to the top of
+ * whatever page is loaded (a display order, never a filter).
+ */
 const shownTasks = computed(() => {
   const query = search.value.trim().toLowerCase()
-  if (!query) return tasks.value
-  return tasks.value.filter(t =>
-    t.title.toLowerCase().includes(query)
-    || (t.roomNumber ?? '').toLowerCase().includes(query)
-    || (t.description ?? '').toLowerCase().includes(query)
-    || t.id.startsWith(query),
-  )
+  const rows = !query
+    ? tasks.value
+    : tasks.value.filter(t =>
+        t.title.toLowerCase().includes(query)
+        || (t.roomNumber ?? '').toLowerCase().includes(query)
+        || (t.description ?? '').toLowerCase().includes(query)
+        || t.id.startsWith(query),
+      )
+  return [...rows].sort((a, b) => compareByHeat(a, b, now.value))
 })
 
 /**
@@ -178,22 +189,22 @@ const shownTasks = computed(() => {
  */
 const groupBySource = ref(false)
 const canGroupBySource = computed(() => sourceApps.status.value !== 'failed')
-const now = useNow()
 const lanes = computed(() => groupIntoLanes(shownTasks.value, sourceApps.byCode.value, now.value))
 
 // One watcher drives loading: any server-filter change reloads from page one.
 watch(() => [route.query.status, route.query.scope], load, { immediate: true })
 
-interface Chip { value: string, label: string, countKey?: string }
+interface Chip { value: string, label: string, icon: Component, countKey?: string }
 
+/** Each status chip wears the same icon as its pill, so the two always match. */
 const STATUS_TABS: Chip[] = [
-  { value: '', label: 'All' },
-  { value: 'NEW', label: 'New' },
-  { value: 'IN_PROGRESS', label: 'Active' },
+  { value: '', label: 'All', icon: LayoutListIcon },
+  { value: 'NEW', label: STATUS_SIGNAL.NEW.label, icon: STATUS_SIGNAL.NEW.icon },
+  { value: 'IN_PROGRESS', label: STATUS_SIGNAL.IN_PROGRESS.label, icon: STATUS_SIGNAL.IN_PROGRESS.icon },
   // Leaders read this as their review queue; staff as "waiting on review".
-  { value: 'SUBMITTED', label: 'In review', countKey: 'SUBMITTED' },
-  { value: 'FINISHED', label: 'Finished' },
-  { value: 'VERIFIED', label: 'Verified' },
+  { value: 'SUBMITTED', label: STATUS_SIGNAL.SUBMITTED.label, icon: STATUS_SIGNAL.SUBMITTED.icon, countKey: 'SUBMITTED' },
+  { value: 'FINISHED', label: STATUS_SIGNAL.FINISHED.label, icon: STATUS_SIGNAL.FINISHED.icon },
+  { value: 'VERIFIED', label: STATUS_SIGNAL.VERIFIED.label, icon: STATUS_SIGNAL.VERIFIED.icon },
 ]
 
 /**
@@ -206,11 +217,13 @@ const scopeDescription = computed(() => {
 })
 
 const SCOPE_TABS: Chip[] = [
-  { value: 'unclaimed', label: 'To claim' },
-  { value: 'mine', label: 'Mine', countKey: 'mine' },
-  { value: 'helping', label: 'Helping', countKey: 'helping' },
-  { value: 'late-response', label: 'Late response' },
-  { value: 'breached', label: 'Breached' },
+  { value: 'unclaimed', label: 'To claim', icon: HandIcon },
+  { value: 'mine', label: 'Mine', icon: UserRoundIcon, countKey: 'mine' },
+  { value: 'helping', label: 'Helping', icon: UsersIcon, countKey: 'helping' },
+  // The two SLA clocks, by their plain names: "Picked up late" is a missed
+  // response target, "Late" a missed resolution target.
+  { value: 'late-response', label: 'Picked up late', icon: ClockAlertIcon },
+  { value: 'breached', label: 'Late', icon: ClockAlertIcon },
 ]
 </script>
 
@@ -218,67 +231,65 @@ const SCOPE_TABS: Chip[] = [
   <div class="space-y-4">
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
-        <h2 class="text-lg font-bold tracking-tight">Tasks</h2>
-        <p class="text-xs text-muted-foreground">
+        <h2 class="text-xl font-bold tracking-tight">Tasks</h2>
+        <p class="text-sm text-muted-foreground">
           {{ totalCount }} {{ totalCount === 1 ? 'task' : 'tasks' }} you can see here.
         </p>
-        <details class="text-xs text-muted-foreground">
-          <summary class="min-h-6 cursor-pointer select-none font-medium text-primary">What shows here</summary>
+        <details class="text-sm text-muted-foreground">
+          <summary class="min-h-8 cursor-pointer select-none font-semibold text-primary-tint-foreground">What shows here</summary>
           <p class="mt-1 leading-relaxed">{{ scopeDescription }}</p>
         </details>
       </div>
-      <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-        <RefreshCwIcon class="h-4 w-4" :class="isLoading ? 'animate-spin' : ''" />
+      <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" title="Refresh" @click="load">
+        <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
       </Button>
     </div>
 
     <div class="relative">
-      <SearchIcon class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-      <Input v-model="search" placeholder="Filter the loaded tasks…" class="pl-9" />
+      <SearchIcon class="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+      <Input v-model="search" placeholder="Search room or title" aria-label="Search the loaded tasks" class="h-12 rounded-xl pl-11 text-base" />
     </div>
 
     <!-- Status + scope chips; horizontally scrollable so they never wrap. -->
     <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-      <button
+      <FilterChip
         v-for="tab in STATUS_TABS"
         :key="tab.value"
-        type="button"
-        class="min-h-9 shrink-0 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="status === tab.value ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+        :active="status === tab.value"
+        :aria-pressed="status === tab.value"
+        :icon="tab.icon"
+        :label="tab.label"
+        :count="countFor(tab.countKey)"
         @click="setFilter('status', tab.value)"
-      >
-        {{ withCount(tab.label, tab.countKey) }}
-      </button>
+      />
       <span class="w-px shrink-0 self-stretch bg-border" aria-hidden="true" />
-      <button
+      <FilterChip
         v-for="s in SCOPE_TABS"
         :key="s.value"
-        type="button"
-        class="min-h-9 shrink-0 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="scope === s.value ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+        :active="scope === s.value"
+        :aria-pressed="scope === s.value"
+        :icon="s.icon"
+        :label="s.label"
+        :count="countFor(s.countKey)"
         @click="setFilter('scope', scope === s.value ? '' : s.value)"
-      >
-        {{ withCount(s.label, s.countKey) }}
-      </button>
+      />
     </div>
 
     <div v-if="canGroupBySource || hasFilters" class="flex items-center justify-between gap-2">
       <!-- A switch, not a chip: it rearranges the rows below, it does not
            narrow them, so it lives outside the filter strip. -->
-      <button
+      <FilterChip
         v-if="canGroupBySource"
-        type="button"
         role="switch"
         :aria-checked="groupBySource"
-        class="flex min-h-9 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="groupBySource ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+        :active="groupBySource"
+        :icon="LayersIcon"
+        label="Group by source"
         @click="groupBySource = !groupBySource"
-      >
-        <LayersIcon class="h-3.5 w-3.5" /> Group by source
-      </button>
+      />
       <span v-else />
-      <Button v-if="hasFilters" variant="secondary" size="sm" @click="clearFilters">
-        <FilterXIcon class="h-4 w-4" /> Clear filters
+      <Button v-if="hasFilters" variant="secondary" class="min-h-11" @click="clearFilters">
+        <FilterXIcon class="size-5" /> Clear filters
       </Button>
     </div>
 
@@ -288,7 +299,7 @@ const SCOPE_TABS: Chip[] = [
     </Alert>
 
     <div v-if="isLoading && tasks.length === 0" class="space-y-3">
-      <Skeleton v-for="n in 4" :key="n" class="h-32 w-full rounded-xl" />
+      <Skeleton v-for="n in 4" :key="n" class="h-36 w-full rounded-2xl" />
     </div>
 
     <EmptyState
@@ -297,7 +308,9 @@ const SCOPE_TABS: Chip[] = [
       title="No tasks match"
       :description="hasFilters ? 'Try clearing a filter or a different search.' : caps.isLeader.value ? 'Nothing to show at this property yet. Project tasks live in their projects.' : 'Nothing you can see at this property right now: your claimed work, your department\'s and the property\'s unclaimed tasks, your team pools, steps handed to you, and your projects\' tasks (those show in the project).'"
     >
-      <Button v-if="hasFilters" variant="secondary" size="sm" @click="clearFilters">Clear filters</Button>
+      <Button v-if="hasFilters" variant="secondary" class="min-h-11" @click="clearFilters">
+        <FilterXIcon class="size-5" /> Clear filters
+      </Button>
     </EmptyState>
 
     <template v-else>
@@ -306,15 +319,15 @@ const SCOPE_TABS: Chip[] = [
            data, not a theme token; the Other lane has none. -->
       <div v-if="groupBySource" class="space-y-5">
         <section v-for="lane in lanes" :key="lane.key" class="space-y-2">
-          <h3 class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <h3 class="flex items-center gap-2 text-sm font-bold text-muted-foreground">
             <span
-              class="h-2.5 w-2.5 shrink-0 rounded-sm"
+              class="size-3 shrink-0 rounded-sm"
               :class="lane.color ? '' : 'bg-muted-foreground/40'"
               :style="lane.color ? { backgroundColor: lane.color } : undefined"
               aria-hidden="true"
             />
             {{ lane.label }}
-            <span class="rounded-full bg-muted px-1.5 tabular-nums">{{ lane.tasks.length }}</span>
+            <span class="rounded-full bg-muted px-2 text-xs tabular-nums">{{ lane.tasks.length }}</span>
           </h3>
           <div class="space-y-3">
             <TaskCard v-for="task in lane.tasks" :key="task.id" :task="task" />
@@ -329,13 +342,13 @@ const SCOPE_TABS: Chip[] = [
       <Button
         v-if="nextCursor"
         variant="secondary"
-        class="w-full"
+        class="min-h-12 w-full"
         :disabled="isLoadingMore"
         @click="loadMore"
       >
         {{ isLoadingMore ? 'Loading…' : `Load more (${tasks.length} of ${totalCount})` }}
       </Button>
-      <p v-else-if="tasks.length >= PAGE_SIZE" class="pb-2 text-center text-xs text-muted-foreground">
+      <p v-else-if="tasks.length >= PAGE_SIZE" class="pb-2 text-center text-sm text-muted-foreground">
         That's all {{ totalCount }}.
       </p>
     </template>

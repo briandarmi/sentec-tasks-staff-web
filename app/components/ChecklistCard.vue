@@ -232,18 +232,18 @@ async function addSteps() {
     <CardHeader class="pb-2">
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0">
-          <CardTitle class="flex items-center gap-2 text-sm">
-            <ListChecksIcon class="h-4 w-4" /> Checklist
+          <CardTitle class="flex items-center gap-2 text-base">
+            <ListChecksIcon class="size-5" /> Checklist
             <span v-if="items.length" class="text-xs font-medium tabular-nums text-muted-foreground">{{ progress.done }} of {{ progress.total }} done</span>
           </CardTitle>
-          <CardDescription class="text-xs">
+          <CardDescription class="text-sm">
             <template v-if="access.closed">The task is closed, so the steps are as they were left.</template>
             <template v-else-if="readOnly">You can see the steps; the assignee, a helper or a leader ticks them off.</template>
             <template v-else-if="!access.canManage">Tick off what you have done. Steps handed to you are yours to tick and annotate.</template>
             <template v-else>Tick steps off, hand one to a colleague, or add what the item's own list missed.</template>
           </CardDescription>
         </div>
-        <Button v-if="access.canManage" size="sm" variant="secondary" type="button" class="shrink-0" @click="addOpen = true">
+        <Button v-if="access.canManage" variant="secondary" type="button" class="shrink-0" @click="addOpen = true">
           <PlusIcon class="h-4 w-4" /> Add
         </Button>
       </div>
@@ -275,7 +275,7 @@ async function addSteps() {
             <span class="min-w-0 flex-1">
               <span class="block text-sm leading-snug" :class="item.isDone ? 'text-muted-foreground line-through decoration-muted-foreground/60' : 'text-foreground'">{{ item.label }}</span>
               <!-- Meta line: who did it, who holds it, the note — only what is set. -->
-              <span class="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+              <span class="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                 <span v-if="item.isDone && item.doneAt">
                   Done<template v-if="whoIs(item.doneBy)"> by {{ whoIs(item.doneBy) }}</template> · {{ formatDateTime(item.doneAt) }}
                 </span>
@@ -291,7 +291,7 @@ async function addSteps() {
             size="icon"
             variant="ghost"
             type="button"
-            class="mt-0.5 h-9 w-9 shrink-0 text-muted-foreground"
+            class="mt-0.5 size-11 shrink-0 text-muted-foreground"
             :aria-label="`Options for ${item.label}`"
             @click="openStep(item)"
           >
@@ -322,8 +322,8 @@ async function addSteps() {
             <Label for="step-note">Note</Label>
             <Textarea id="step-note" v-model="noteDraft" rows="3" :maxlength="NOTE_MAX" class="resize-none" placeholder="What was found, what is left…" />
             <div class="flex items-center justify-between gap-2">
-              <span class="text-[11px] tabular-nums text-muted-foreground">{{ noteDraft.length }} / {{ NOTE_MAX }}</span>
-              <Button size="sm" :disabled="!noteChanged || Boolean(stepBusy)" :aria-busy="stepBusy === 'note'" @click="saveNote">
+              <span class="text-xs tabular-nums text-muted-foreground">{{ noteDraft.length }} / {{ NOTE_MAX }}</span>
+              <Button :disabled="!noteChanged || Boolean(stepBusy)" :aria-busy="stepBusy === 'note'" @click="saveNote">
                 {{ stepBusy === 'note' ? 'Saving…' : noteDraft.trim() ? 'Save note' : 'Clear note' }}
               </Button>
             </div>

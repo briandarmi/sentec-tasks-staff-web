@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowLeftIcon, FolderKanbanIcon, LockIcon, PlusIcon, RepeatIcon, Trash2Icon, WandSparklesIcon } from '@lucide/vue'
+import { ArrowLeftIcon, CircleDashedIcon, FolderKanbanIcon, LockIcon, MinusIcon, PlusIcon, RepeatIcon, Trash2Icon, UserRoundIcon, UsersIcon, WandSparklesIcon } from '@lucide/vue'
 import { useTasksApi, type StaffCreateTaskPayload, type TaskPreview } from '~/composables/useTasksApi'
 import { useCaps } from '~/composables/useCaps'
 import { useSession } from '~/composables/useSession'
@@ -9,6 +9,7 @@ import type { Category, CatalogItem, HotelDepartment, Location, LocationType, Pr
 import { draftToRecurrence, emptyRecurrenceDraft } from '~/utils/recurrence'
 import type { RecurrenceDraft } from '~/utils/recurrence'
 import { TASK_PRIORITIES, formatDateTime, priorityMeta } from '~/utils/task-ui'
+import { HEAT_TONE, prioritySignal } from '~/utils/task-signals'
 
 definePageMeta({ title: 'New task' })
 
@@ -191,6 +192,23 @@ watch(selectedItem, (item) => {
   // it is yours, even back on the same value.
   if (!priorityTouched.value) priority.value = item?.defaultPriority ?? 'NORMAL'
 })
+
+/**
+ * The picker wears the same flag and tint the card will: amber for High, red
+ * for Urgent, grey for Low, Sentinel Blue for the default. So the colour a
+ * task gets is chosen by seeing it, not by reading about it afterwards.
+ */
+function priorityIcon(option: TaskPriority) {
+  return prioritySignal(option)?.icon ?? MinusIcon
+}
+
+function priorityClass(option: TaskPriority) {
+  if (priority.value !== option) return 'border-border bg-card text-muted-foreground active:bg-accent'
+  const signal = prioritySignal(option)
+  return signal ? `border-transparent ${HEAT_TONE[signal.heat].chip}` : 'border-primary/40 bg-primary-tint text-primary-tint-foreground'
+}
+
+const ASSIGNEE_ICON = { UNASSIGNED: CircleDashedIcon, STAFF: UserRoundIcon, TEAM: UsersIcon } as const
 
 function pickPriority(value: TaskPriority) {
   priority.value = value
@@ -433,10 +451,10 @@ onMounted(load)
   <div class="space-y-4">
     <button
       type="button"
-      class="flex min-h-11 items-center gap-1 rounded text-sm font-medium text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
       @click="router.back()"
     >
-      <ArrowLeftIcon class="h-4 w-4" /> Back
+      <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
     </button>
 
     <EmptyState
@@ -448,8 +466,8 @@ onMounted(load)
 
     <template v-else>
       <div>
-        <h2 class="text-lg font-bold tracking-tight">New task</h2>
-        <p class="text-xs text-muted-foreground">Routing, SLA, priority and requester resolve automatically — the preview below shows the outcome before you commit.</p>
+        <h2 class="text-xl font-bold tracking-tight">New task</h2>
+        <p class="text-sm text-muted-foreground">Routing, deadlines, priority and requester are worked out for you — the preview below shows the outcome before you commit.</p>
       </div>
 
       <!-- Raised from a project: the task belongs to it from the start and
@@ -466,7 +484,7 @@ onMounted(load)
         <AlertTitle>Couldn't create the task</AlertTitle>
         <AlertDescription class="space-y-2">
           <p>{{ errorMessage }}</p>
-          <Button v-if="isLoading === false && items.length === 0" size="sm" variant="secondary" @click="load">Retry</Button>
+          <Button v-if="isLoading === false && items.length === 0" variant="secondary" @click="load">Retry</Button>
         </AlertDescription>
       </Alert>
 
@@ -524,7 +542,7 @@ onMounted(load)
           <div class="flex items-center justify-between">
             <Label :for="freeTextLocation ? 'room-number' : undefined">Location</Label>
             <!-- Named for what it will do next, not for its current state. -->
-            <button type="button" class="rounded text-xs font-medium text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="toggleFreeText">
+            <button type="button" class="min-h-8 rounded text-sm font-semibold text-primary-tint-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint" @click="toggleFreeText">
               {{ freeTextLocation ? 'Choose from the location list instead' : 'Not in the list? Type it in' }}
             </button>
           </div>
@@ -574,17 +592,18 @@ onMounted(load)
 
         <div class="space-y-2">
           <Label>Priority</Label>
-          <div role="radiogroup" aria-label="Priority" class="grid grid-cols-4 gap-1.5">
+          <div role="radiogroup" aria-label="Priority" class="grid grid-cols-4 gap-2">
             <button
               v-for="option in TASK_PRIORITIES"
               :key="option"
               type="button"
               role="radio"
               :aria-checked="priority === option"
-              class="min-h-10 rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              :class="priority === option ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+              class="flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl border px-1 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+              :class="priorityClass(option)"
               @click="pickPriority(option)"
             >
+              <component :is="priorityIcon(option)" class="size-5" aria-hidden="true" />
               {{ priorityMeta(option).label }}
             </button>
           </div>
@@ -595,17 +614,18 @@ onMounted(load)
 
         <div class="space-y-2">
           <Label>Assign to</Label>
-          <div role="radiogroup" aria-label="Assign to" class="grid grid-cols-3 gap-1.5">
+          <div role="radiogroup" aria-label="Assign to" class="grid grid-cols-3 gap-2">
             <button
               v-for="option in ([['UNASSIGNED', 'Unassigned'], ['STAFF', caps.role.value === 'staff' ? 'Me' : 'Staff'], ['TEAM', 'Team']] as const)"
               :key="option[0]"
               type="button"
               role="radio"
               :aria-checked="assigneeKind === option[0]"
-              class="min-h-10 rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              :class="assigneeKind === option[0] ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+              class="flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl border px-1 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+              :class="assigneeKind === option[0] ? 'border-primary/40 bg-primary-tint text-primary-tint-foreground' : 'border-border bg-card text-muted-foreground active:bg-accent'"
               @click="pickAssigneeKind(option[0])"
             >
+              <component :is="ASSIGNEE_ICON[option[0]]" class="size-5" aria-hidden="true" />
               {{ option[1] }}
             </button>
           </div>
@@ -623,7 +643,7 @@ onMounted(load)
               <AlertTitle>Couldn't load teams</AlertTitle>
               <AlertDescription class="space-y-2">
                 <p>{{ teamsError }}</p>
-                <Button size="sm" variant="secondary" @click="loadTeams">Retry</Button>
+                <Button variant="secondary" @click="loadTeams">Retry</Button>
               </AlertDescription>
             </Alert>
             <Select v-else v-model="assigneeTeamId">
@@ -661,7 +681,7 @@ onMounted(load)
           <button
             v-if="!showSchedule"
             type="button"
-            class="rounded text-xs font-medium text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="min-h-11 rounded text-sm font-semibold text-primary-tint-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
             @click="showSchedule = true"
           >
             Schedule for later
@@ -669,15 +689,15 @@ onMounted(load)
           <template v-else>
             <div class="flex items-center justify-between">
               <Label for="start-from">Start from</Label>
-              <button type="button" class="rounded text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="showSchedule = false; activationDate = ''; dueAt = ''">
+              <button type="button" class="min-h-8 rounded text-sm font-semibold text-muted-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint" @click="showSchedule = false; activationDate = ''; dueAt = ''">
                 Start now instead
               </button>
             </div>
             <Input id="start-from" v-model="activationDate" type="datetime-local" class="min-h-11" />
-            <p class="text-xs text-muted-foreground">SLA clocks run from the scheduled start, not from creation.</p>
+            <p class="text-xs text-muted-foreground">The deadlines count from the scheduled start, not from now.</p>
             <Label for="due-at">Due (optional)</Label>
             <Input id="due-at" v-model="dueAt" type="datetime-local" class="min-h-11" />
-            <p class="text-xs text-muted-foreground">A hard due date on top of the SLA — it can't be before the start.</p>
+            <p class="text-xs text-muted-foreground">A hard due date on top of the deadlines — it can't be before the start.</p>
           </template>
         </div>
 
@@ -687,7 +707,7 @@ onMounted(load)
               <p class="text-sm font-semibold text-foreground">Extra checklist steps</p>
               <p class="text-xs text-muted-foreground">The item's own checklist is added automatically — list only what you're adding.</p>
             </div>
-            <Button size="sm" variant="secondary" type="button" @click="addChecklistStep">
+            <Button variant="secondary" type="button" @click="addChecklistStep">
               <PlusIcon class="h-4 w-4" /> Add
             </Button>
           </div>
@@ -742,11 +762,11 @@ onMounted(load)
                   <dd class="font-medium">{{ preview.task.requesterName ?? 'No guest matched' }}</dd>
                 </div>
                 <div class="flex justify-between gap-2">
-                  <dt class="text-muted-foreground">Respond by</dt>
+                  <dt class="text-muted-foreground">Pick up by</dt>
                   <dd class="font-medium tabular-nums">{{ formatAbsolute(preview.task.responseDueAt) }}</dd>
                 </div>
                 <div class="flex justify-between gap-2">
-                  <dt class="text-muted-foreground">Resolve by</dt>
+                  <dt class="text-muted-foreground">Finish by</dt>
                   <dd class="font-medium tabular-nums">{{ formatAbsolute(preview.task.resolutionDueAt) }}</dd>
                 </div>
                 <!-- Preview-only: the API names the policy the task would get
@@ -771,7 +791,7 @@ onMounted(load)
           </CardContent>
         </Card>
 
-        <Button type="submit" class="min-h-11 w-full" :disabled="!canSubmit">
+        <Button type="submit" class="min-h-12 w-full" :disabled="!canSubmit">
           {{ isSubmitting ? 'Creating…' : repeat ? 'Create and repeat' : projectId ? 'Create in project' : 'Create task' }}
         </Button>
       </form>

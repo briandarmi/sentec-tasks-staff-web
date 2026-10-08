@@ -52,7 +52,7 @@ const preview = computed(() => {
           type="button"
           role="radio"
           :aria-checked="modelValue.kind === kind"
-          class="min-h-10 rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          class="min-h-11 rounded-lg border text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
           :class="modelValue.kind === kind ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
           @click="patch({ kind: kind as RecurrenceKind })"
         >
@@ -69,7 +69,7 @@ const preview = computed(() => {
           :key="day"
           type="button"
           :aria-pressed="modelValue.weekdays.includes(day)"
-          class="min-h-10 rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          class="min-h-11 rounded-lg border text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
           :class="modelValue.weekdays.includes(day) ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
           @click="toggleWeekday(day)"
         >

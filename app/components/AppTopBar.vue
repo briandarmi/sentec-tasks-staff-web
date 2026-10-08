@@ -34,7 +34,7 @@ const profileActive = computed(() => route.path === '/profile')
       <button
         v-if="activeProperty"
         type="button"
-        class="flex max-w-full items-center gap-1 rounded text-[11px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        class="flex max-w-full items-center gap-1 rounded text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="canSwitch ? 'active:text-foreground' : 'cursor-default'"
         :disabled="!canSwitch"
         @click="canSwitch && (switcherOpen = true)"

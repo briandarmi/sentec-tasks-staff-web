@@ -112,10 +112,10 @@ async function remove(attachment: TaskAttachment) {
 <template>
   <Card>
     <CardHeader class="flex-row items-center justify-between gap-2 pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <PaperclipIcon class="h-4 w-4" /> Attachments
+      <CardTitle class="flex items-center gap-2 text-base">
+        <PaperclipIcon class="size-5" /> Attachments
       </CardTitle>
-      <Button variant="secondary" size="sm" :disabled="isAttaching" @click="attachOpen = true">Link URL</Button>
+      <Button variant="secondary" :disabled="isAttaching" @click="attachOpen = true">Link URL</Button>
     </CardHeader>
     <CardContent class="space-y-2">
       <Alert v-if="errorMessage" variant="destructive">
@@ -144,9 +144,8 @@ async function remove(attachment: TaskAttachment) {
         <span v-else class="min-w-0 flex-1 truncate text-muted-foreground">
           {{ attachmentLabel(attachment) }} · preview unavailable
         </span>
-        <Badge variant="secondary" class="shrink-0 text-[10px]">{{ attachment.filetype }}</Badge>
+        <Badge variant="secondary" class="shrink-0 text-xs">{{ attachment.filetype }}</Badge>
         <Button
-          size="sm"
           variant="secondary"
           class="shrink-0 text-muted-foreground hover:text-destructive"
           :disabled="Boolean(removingId)"

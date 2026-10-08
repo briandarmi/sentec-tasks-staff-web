@@ -32,8 +32,8 @@ onMounted(async () => {
 <template>
   <Card v-if="entries.length">
     <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <PuzzleIcon class="h-4 w-4" /> From connected apps
+      <CardTitle class="flex items-center gap-2 text-base">
+        <PuzzleIcon class="size-5" /> From connected apps
       </CardTitle>
     </CardHeader>
     <CardContent class="space-y-2 text-sm">

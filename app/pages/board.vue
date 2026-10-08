@@ -3,13 +3,16 @@ import { computed, onMounted, ref } from 'vue'
 import { HandIcon, RefreshCwIcon, SquareKanbanIcon } from '@lucide/vue'
 import { useTasksApi } from '~/composables/useTasksApi'
 import { useCaps } from '~/composables/useCaps'
+import { useNow } from '~/composables/useNow'
 import type { Board, BoardColumn, TaskListItem } from '~/utils/clientFakeApi'
-import { isClaimable, statusMeta } from '~/utils/task-ui'
+import { isClaimable } from '~/utils/task-ui'
+import { compareByHeat, statusSignal } from '~/utils/task-signals'
 
 definePageMeta({ title: 'Board' })
 
 const api = useTasksApi()
 const caps = useCaps()
+const now = useNow()
 
 const board = ref<(Board & { columns: BoardColumn[] }) | null>(null)
 const tasks = ref<TaskListItem[]>([])
@@ -30,7 +33,12 @@ const countByColumn = computed(() => {
   return counts
 })
 
-const activeTasks = computed(() => tasks.value.filter(task => task.columnId === activeColumnId.value))
+/** The column's cards, hottest first: the red ones are why someone opened the board. */
+const activeTasks = computed(() =>
+  tasks.value
+    .filter(task => task.columnId === activeColumnId.value)
+    .sort((a, b) => compareByHeat(a, b, now.value)),
+)
 
 /**
  * Claimable straight off the card: nothing personal holds it — unassigned, or
@@ -111,14 +119,14 @@ onMounted(load)
   <div class="space-y-4">
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
-        <h2 class="text-lg font-bold tracking-tight">Board</h2>
-        <p class="text-xs text-muted-foreground">
+        <h2 class="text-xl font-bold tracking-tight">Board</h2>
+        <p class="text-sm text-muted-foreground">
           Live workflow for this property. Project tasks are on their project's board, not here.
           <template v-if="totalCount > tasks.length"> Showing {{ tasks.length }} of {{ totalCount }}.</template>
         </p>
       </div>
-      <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-        <RefreshCwIcon class="h-4 w-4" :class="isLoading ? 'animate-spin' : ''" />
+      <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" title="Refresh" @click="load">
+        <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
       </Button>
     </div>
 
@@ -128,8 +136,8 @@ onMounted(load)
     </Alert>
 
     <div v-if="isLoading && !board" class="space-y-3">
-      <Skeleton class="h-9 w-full rounded-lg" />
-      <Skeleton v-for="n in 3" :key="n" class="h-32 w-full rounded-xl" />
+      <Skeleton class="h-11 w-full rounded-full" />
+      <Skeleton v-for="n in 3" :key="n" class="h-36 w-full rounded-2xl" />
     </div>
 
     <EmptyState
@@ -142,19 +150,19 @@ onMounted(load)
     <template v-else>
       <!-- One column at a time on a phone: a horizontal kanban is unusable at
            this width, so the columns become a scrollable selector instead. -->
-      <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-        <button
+      <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1" role="tablist" aria-label="Board columns">
+        <FilterChip
           v-for="column in columns"
           :key="column.id"
-          type="button"
-          class="flex min-h-9 shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          :class="column.id === activeColumnId ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+          role="tab"
+          :aria-selected="column.id === activeColumnId"
+          :active="column.id === activeColumnId"
+          :icon="column.status ? statusSignal(column.status).icon : undefined"
+          :dot="column.status ? undefined : 'bg-muted-foreground/40'"
+          :label="column.name"
+          :count="countByColumn.get(column.id) ?? 0"
           @click="activeColumnId = column.id"
-        >
-          <span class="h-2 w-2 rounded-full" :class="column.status ? statusMeta(column.status).dot : 'bg-muted-foreground/40'" />
-          {{ column.name }}
-          <span class="rounded-full bg-background/70 px-1.5 tabular-nums">{{ countByColumn.get(column.id) ?? 0 }}</span>
-        </button>
+        />
       </div>
 
       <div v-if="activeTasks.length" class="space-y-3">
@@ -163,18 +171,17 @@ onMounted(load)
           <Button
             v-if="canClaimCard(task)"
             variant="secondary"
-            size="sm"
             class="min-h-11 w-full"
             :disabled="claimingId === task.id"
             :aria-busy="claimingId === task.id"
             @click="claim(task)"
           >
-            <HandIcon class="h-4 w-4" />
+            <HandIcon class="size-5" />
             {{ claimingId === task.id ? 'Claiming…' : claimLabel(task) }}
           </Button>
         </div>
       </div>
-      <p v-else class="select-none py-12 text-center text-sm text-muted-foreground/60">Nothing in this column</p>
+      <EmptyState v-else bare title="Nothing in this column" description="Tasks move here as the work moves along." />
     </template>
   </div>
 </template>

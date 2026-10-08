@@ -37,7 +37,7 @@ const options = computed(() =>
       type="button"
       role="radio"
       :aria-checked="option.value === preference"
-      class="flex min-h-9 items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors"
+      class="flex min-h-11 items-center gap-1.5 rounded-md px-3 text-sm font-semibold transition-colors"
       :class="
         option.value === preference
           ? 'bg-primary text-primary-foreground'
@@ -45,7 +45,7 @@ const options = computed(() =>
       "
       @click="setPreference(option.value)"
     >
-      <component :is="option.icon" class="h-3.5 w-3.5" />
+      <component :is="option.icon" class="size-4" aria-hidden="true" />
       {{ option.label }}
     </button>
   </div>

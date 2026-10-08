@@ -10,7 +10,6 @@ import {
   RepeatIcon,
   RotateCcwIcon,
   SendIcon,
-  SirenIcon,
   UserRoundIcon,
   UserRoundPlusIcon,
 } from '@lucide/vue'
@@ -18,9 +17,10 @@ import { useTasksApi } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
 import { useSourceApps } from '~/composables/useSourceApps'
+import { useNow } from '~/composables/useNow'
 import type { BoardColumn, ProjectLevel, TaskDetail } from '~/utils/clientFakeApi'
-import { displayName, formatDateTime, initials, isClaimable, priorityMeta, relativeTime, taskRef } from '~/utils/task-ui'
-import { levelLabel } from '~/utils/escalation-ui'
+import { displayName, formatDateTime, initials, isClaimable, relativeTime, taskRef } from '~/utils/task-ui'
+import { CLOCK_WORDS, taskHeat, taskSignals } from '~/utils/task-signals'
 
 definePageMeta({ title: 'Task' })
 
@@ -30,9 +30,14 @@ const api = useTasksApi()
 const session = useSession()
 const caps = useCaps()
 const sourceApps = useSourceApps()
+const now = useNow()
 
 const id = computed(() => String(route.params.id))
 const task = ref<TaskDetail | null>(null)
+/** The traffic light and its reasons: the banner at the top, the chips in the header. */
+const heat = computed(() => (task.value ? taskHeat(task.value, now.value) : 'none'))
+const signals = computed(() => (task.value ? taskSignals(task.value, now.value) : []))
+const reasons = computed(() => signals.value.filter(signal => signal.kind === 'escalation' || signal.kind === 'priority'))
 const columns = ref<BoardColumn[]>([])
 const isLoading = ref(false)
 const errorMessage = ref('')
@@ -260,10 +265,10 @@ onMounted(load)
   <div class="space-y-4">
     <button
       type="button"
-      class="flex min-h-11 items-center gap-1 rounded text-sm font-medium text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
       @click="router.back()"
     >
-      <ArrowLeftIcon class="h-4 w-4" /> Back
+      <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
     </button>
 
     <Alert v-if="errorMessage" variant="destructive">
@@ -272,56 +277,54 @@ onMounted(load)
     </Alert>
 
     <div v-if="isLoading && !task" class="space-y-3">
-      <Skeleton class="h-36 w-full rounded-xl" />
-      <Skeleton class="h-24 w-full rounded-xl" />
-      <Skeleton class="h-48 w-full rounded-xl" />
+      <Skeleton class="h-36 w-full rounded-2xl" />
+      <Skeleton class="h-24 w-full rounded-2xl" />
+      <Skeleton class="h-48 w-full rounded-2xl" />
     </div>
 
     <template v-else-if="task">
+      <!-- The traffic light, spelled out, before anything else. -->
+      <HeatBanner :heat="heat" :signals="signals" />
+
       <Card>
         <CardHeader class="gap-2">
           <!-- Same scan order as the cards: where, then how urgent, then what.
                The room is the thing someone mid-corridor looks for first. -->
           <div class="flex items-start justify-between gap-2">
-            <p v-if="task.roomNumber" class="flex items-center gap-1.5 text-2xl font-bold tabular-nums tracking-tight text-foreground">
-              <MapPinIcon class="h-5 w-5 text-muted-foreground" />
+            <p v-if="task.roomNumber" class="flex items-center gap-1.5 text-3xl font-bold tabular-nums tracking-tight text-foreground">
+              <MapPinIcon class="size-6 text-muted-foreground" aria-hidden="true" />
               {{ task.roomNumber }}
             </p>
-            <p v-else class="text-sm font-medium text-muted-foreground">{{ task.locationTypeName ?? 'No room' }}</p>
+            <p v-else class="flex items-center gap-1.5 text-base font-semibold text-muted-foreground">
+              <MapPinIcon class="size-5" aria-hidden="true" />
+              {{ task.locationTypeName ?? 'No room' }}
+            </p>
             <div class="ml-auto shrink-0">
-              <SlaBadge :task="task" :status="task.status" show-countdown />
+              <SlaBadge :task="task" />
             </div>
           </div>
-          <CardTitle class="text-lg leading-snug">{{ task.title }}</CardTitle>
+          <CardTitle class="text-xl leading-snug">{{ task.title }}</CardTitle>
           <!-- The request itself is what the person walking there needs first —
                it lives with the title, not buried under the metadata rows. -->
-          <p v-if="task.description" class="text-sm leading-relaxed text-foreground/85">{{ task.description }}</p>
+          <p v-if="task.description" class="text-base leading-relaxed text-foreground/85">{{ task.description }}</p>
           <div class="flex flex-wrap items-center gap-1.5">
+            <!-- Why the banner is the colour it is, then the lifecycle status. -->
+            <SignalChip
+              v-for="signal in reasons"
+              :key="signal.kind"
+              :heat="signal.heat"
+              :icon="signal.icon"
+              :label="signal.label"
+              :title="signal.kind === 'escalation' && task.escalatedAt ? `${signal.detail} Escalated ${relativeTime(task.escalatedAt)}.` : signal.detail"
+            />
             <StatusPill :status="task.status" />
-            <span
-              v-if="task.priority !== 'NORMAL'"
-              class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
-              :class="priorityMeta(task.priority).badge"
-            >
-              {{ priorityMeta(task.priority).label }}
-            </span>
-            <!-- The policy has stepped in at least once. The level is the
-                 highest step that fired, not a count — steps are independent. -->
-            <span
-              v-if="task.escalationLevel > 0"
-              class="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] font-semibold text-destructive"
-              :title="`escalated ${relativeTime(task.escalatedAt)}`"
-            >
-              <SirenIcon class="h-3 w-3" aria-hidden="true" />
-              Escalated · {{ levelLabel(task.escalationLevel) }}
-            </span>
             <!-- Only when the task came from elsewhere: a Butler request has a
                  guest waiting on the other end. The dot is the registry's
                  colour — data, not a theme token. -->
-            <Badge v-if="sourceBadge" variant="outline" class="gap-1 text-muted-foreground">
+            <Badge v-if="sourceBadge" variant="outline" class="min-h-7 gap-1.5 text-muted-foreground">
               <span
                 v-if="sourceBadge.color"
-                class="h-1.5 w-1.5 rounded-full"
+                class="size-2 rounded-full"
                 :style="{ backgroundColor: sourceBadge.color }"
                 aria-hidden="true"
               />
@@ -336,19 +339,19 @@ onMounted(load)
           <NuxtLink
             v-if="task.project"
             :to="`/projects/${task.project.id}`"
-            class="inline-flex min-h-9 max-w-full items-center gap-1.5 self-start rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary transition-colors active:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="inline-flex min-h-11 max-w-full items-center gap-1.5 self-start rounded-full border border-primary/30 bg-primary-tint/60 px-4 py-1 text-sm font-semibold text-primary-tint-foreground transition-colors active:bg-primary-tint focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
           >
-            <FolderKanbanIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <FolderKanbanIcon class="size-4 shrink-0" aria-hidden="true" />
             <span class="truncate">Project · {{ task.project.name }}</span>
           </NuxtLink>
         </CardHeader>
         <CardContent class="flex flex-wrap gap-1.5">
           <!-- A department the hotel has since retired still owns its old
                tasks; say so rather than show a name nobody can pick any more. -->
-          <Badge v-if="task.department" variant="outline">{{ task.department.name }}{{ task.department.isActive === false ? ' (inactive)' : '' }}</Badge>
-          <Badge v-if="task.itemName && task.itemName !== task.title" variant="outline">{{ task.itemName }}</Badge>
-          <Badge v-if="task.quantity && task.quantity > 1" variant="outline">×{{ task.quantity }}</Badge>
-          <Badge v-if="task.categoryName" variant="outline">{{ task.categoryName }}</Badge>
+          <Badge v-if="task.department" variant="outline" class="min-h-7">{{ task.department.name }}{{ task.department.isActive === false ? ' (inactive)' : '' }}</Badge>
+          <Badge v-if="task.itemName && task.itemName !== task.title" variant="outline" class="min-h-7">{{ task.itemName }}</Badge>
+          <Badge v-if="task.quantity && task.quantity > 1" variant="outline" class="min-h-7 tabular-nums">×{{ task.quantity }}</Badge>
+          <Badge v-if="task.categoryName" variant="outline" class="min-h-7">{{ task.categoryName }}</Badge>
         </CardContent>
       </Card>
 
@@ -359,7 +362,7 @@ onMounted(load)
         <AlertTitle>That worked, but the view may be stale</AlertTitle>
         <AlertDescription class="space-y-2">
           <p>{{ refreshError }}</p>
-          <Button size="sm" variant="secondary" @click="refresh">Refresh</Button>
+          <Button variant="secondary" @click="refresh">Refresh</Button>
         </AlertDescription>
       </Alert>
 
@@ -370,7 +373,7 @@ onMounted(load)
         <AlertTitle>This task repeats</AlertTitle>
         <AlertDescription class="space-y-2">
           <p>This is the first run. The next ones are made on the schedule you set.</p>
-          <Button size="sm" variant="secondary" @click="navigateTo('/recurring')">Manage repeats</Button>
+          <Button variant="secondary" @click="navigateTo('/recurring')">Manage repeats</Button>
         </AlertDescription>
       </Alert>
 
@@ -378,7 +381,7 @@ onMounted(load)
            names the pool it is taking from. -->
       <div class="flex flex-wrap gap-2">
         <Button v-if="canClaim" class="min-h-11 flex-1" :disabled="acting" @click="claim">
-          <HandIcon class="h-4 w-4" /> {{ claimLabel }}
+          <HandIcon class="size-5" aria-hidden="true" /> {{ claimLabel }}
         </Button>
         <Button
           v-if="canAssign"
@@ -387,7 +390,7 @@ onMounted(load)
           :disabled="acting"
           @click="assignOpen = true"
         >
-          <UserRoundPlusIcon class="h-4 w-4" />
+          <UserRoundPlusIcon class="size-5" aria-hidden="true" />
           {{ assignment?.kind === 'STAFF' ? 'Reassign' : 'Assign' }}
         </Button>
         <Button
@@ -397,7 +400,7 @@ onMounted(load)
           :disabled="acting"
           @click="moveOpen = true"
         >
-          <ArrowRightLeftIcon class="h-4 w-4" /> Move
+          <ArrowRightLeftIcon class="size-5" aria-hidden="true" /> Move
         </Button>
         <Button
           v-if="canReturn"
@@ -407,7 +410,7 @@ onMounted(load)
           :aria-expanded="returnOpen"
           @click="returnOpen = true"
         >
-          <RotateCcwIcon class="h-4 w-4" /> Return to pool
+          <RotateCcwIcon class="size-5" aria-hidden="true" /> Return to pool
         </Button>
       </div>
 
@@ -431,12 +434,12 @@ onMounted(load)
       <Card>
         <CardContent class="space-y-3 pt-6 text-sm">
           <div class="flex items-center gap-2">
-            <UserRoundIcon class="h-4 w-4 shrink-0 text-muted-foreground" />
+            <UserRoundIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
             <span class="text-muted-foreground">Assignee</span>
             <span class="ml-auto flex min-w-0 items-center gap-2 font-medium">
               <template v-if="assignment?.kind === 'STAFF'">
-                <Avatar class="h-5 w-5">
-                  <AvatarFallback class="bg-primary/10 text-[9px] font-semibold text-primary">{{ initials(assignment.staffName) }}</AvatarFallback>
+                <Avatar class="size-6">
+                  <AvatarFallback class="bg-primary-tint text-xs font-bold text-primary-tint-foreground">{{ initials(assignment.staffName) }}</AvatarFallback>
                 </Avatar>
                 <span class="truncate">{{ displayName(assignment.staffName) }}</span>
                 <span v-if="isMine" class="text-xs text-muted-foreground">(you)</span>
@@ -464,25 +467,25 @@ onMounted(load)
           </div>
           <div v-if="task.sla" class="flex items-center gap-2">
             <span class="h-4 w-4" />
-            <span class="text-muted-foreground">SLA</span>
+            <span class="text-muted-foreground">Deadlines</span>
             <span class="ml-auto font-medium">{{ task.sla.name }}</span>
           </div>
           <!-- The countdown badge says how long; these say WHEN — what someone
                planning the next hour actually reasons in. -->
           <div v-if="task.responseDueAt" class="flex items-center gap-2">
             <span class="h-4 w-4" />
-            <span class="text-muted-foreground">Respond by</span>
+            <span class="text-muted-foreground">{{ CLOCK_WORDS.response }}</span>
             <span
               class="ml-auto font-medium tabular-nums"
-              :class="task.responseSlaStatus === 'BREACHED' ? 'text-destructive' : ''"
+              :class="task.responseSlaStatus === 'BREACHED' ? 'font-bold text-danger-tint-foreground' : ''"
             >{{ formatAbsolute(task.responseDueAt) }}</span>
           </div>
           <div v-if="task.resolutionDueAt" class="flex items-center gap-2">
             <span class="h-4 w-4" />
-            <span class="text-muted-foreground">Resolve by</span>
+            <span class="text-muted-foreground">{{ CLOCK_WORDS.resolution }}</span>
             <span
               class="ml-auto font-medium tabular-nums"
-              :class="task.resolutionSlaStatus === 'BREACHED' ? 'text-destructive' : ''"
+              :class="task.resolutionSlaStatus === 'BREACHED' ? 'font-bold text-danger-tint-foreground' : ''"
             >{{ formatAbsolute(task.resolutionDueAt) }}</span>
           </div>
           <div v-if="task.dueAt" class="flex items-center gap-2">
@@ -518,7 +521,7 @@ onMounted(load)
       <TimeAttributionCard :key="task.updatedAt" :task-id="task.id" />
 
       <Card>
-        <CardHeader class="pb-2"><CardTitle class="text-sm">Activity</CardTitle></CardHeader>
+        <CardHeader class="pb-2"><CardTitle class="text-base">Activity</CardTitle></CardHeader>
         <CardContent class="space-y-4">
           <!-- The same history twice, on purpose: the strip answers "how is
                this going against the clock" at a glance, the list below says
@@ -531,17 +534,17 @@ onMounted(load)
               v-model="comment"
               placeholder="Add a comment…"
               rows="1"
-              class="min-h-11 resize-none"
+              class="min-h-11 resize-none text-base"
               @keydown.enter.exact.prevent="sendComment"
             />
             <Button
               size="icon"
-              class="min-h-11 min-w-11"
               :disabled="acting || !comment.trim()"
               aria-label="Send comment"
+              title="Send comment"
               @click="sendComment"
             >
-              <SendIcon class="h-4 w-4" />
+              <SendIcon class="size-5" aria-hidden="true" />
             </Button>
           </div>
           <p v-else class="text-xs text-muted-foreground">Project viewers can follow this task but not comment on it.</p>

@@ -43,8 +43,8 @@ const proofPhotos = computed(() => (props.task.attachments ?? []).filter(a => a.
  */
 const verdict = computed(() => {
   switch (props.task.resolutionSlaStatus) {
-    case 'ON_TIME': return { label: 'on time', cls: 'text-success' }
-    case 'BREACHED': return { label: 'late', cls: 'text-destructive' }
+    case 'ON_TIME': return { label: 'on time', cls: 'text-success-tint-foreground' }
+    case 'BREACHED': return { label: 'late', cls: 'text-danger-tint-foreground' }
     default: return null
   }
 })
@@ -123,12 +123,12 @@ async function sendBack() {
 <template>
   <Card v-if="visible" class="border-primary/30">
     <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <CheckCheckIcon class="h-4 w-4" /> Review submission
+      <CardTitle class="flex items-center gap-2 text-base">
+        <CheckCheckIcon class="size-5" /> Review submission
       </CardTitle>
       <!-- The sign-off line: who, when (clock time — reviewers reason in shift
            time, not "3h ago"), and the verdict the clock already reached. -->
-      <CardDescription class="text-xs">
+      <CardDescription class="text-sm">
         Submitted by {{ submitterName }}<template v-if="task.submittedAt"> · {{ formatClockTime(task.submittedAt) }}</template><span
           v-if="verdict"
           class="font-semibold"

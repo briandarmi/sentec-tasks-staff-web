@@ -24,7 +24,8 @@ import { useCaps } from '~/composables/useCaps'
 import type { AssignableStaff, Board, BoardColumn, Project, ProjectMember, TaskListItem } from '~/utils/clientFakeApi'
 import { formatLocalDate } from '~/utils/recurrence'
 import { projectLevelLabel, projectRights, projectStatusMeta } from '~/utils/project-ui'
-import { displayName, formatDateTime, initials, statusMeta } from '~/utils/task-ui'
+import { displayName, formatDateTime, initials } from '~/utils/task-ui'
+import { statusSignal } from '~/utils/task-signals'
 
 definePageMeta({ title: 'Project' })
 
@@ -481,10 +482,10 @@ onMounted(load)
               <span class="h-1.5 w-1.5 rounded-full" :class="status.dot" />
               {{ status.label }}
             </span>
-            <Badge v-if="project.late" variant="destructive" class="text-[10px]">Late</Badge>
-            <Badge v-if="project.needsManager" variant="outline" class="border-warning/50 text-[10px] text-warning-tint-foreground">Needs manager</Badge>
-            <Badge v-if="project.myLevel" variant="secondary" class="text-[10px]">You · {{ projectLevelLabel(project.myLevel) }}</Badge>
-            <Badge v-else-if="caps.isAdmin.value" variant="secondary" class="text-[10px]">You · Admin, not a member</Badge>
+            <Badge v-if="project.late" variant="destructive" class="text-xs">Late</Badge>
+            <Badge v-if="project.needsManager" variant="outline" class="border-warning/50 text-xs text-warning-tint-foreground">Needs manager</Badge>
+            <Badge v-if="project.myLevel" variant="secondary" class="text-xs">You · {{ projectLevelLabel(project.myLevel) }}</Badge>
+            <Badge v-else-if="caps.isAdmin.value" variant="secondary" class="text-xs">You · Admin, not a member</Badge>
           </div>
         </CardHeader>
         <CardContent class="space-y-3 text-sm">
@@ -504,7 +505,7 @@ onMounted(load)
             <span class="ml-auto flex min-w-0 items-center gap-2 font-medium">
               <template v-if="manager">
                 <Avatar class="h-5 w-5">
-                  <AvatarFallback class="bg-primary/10 text-[9px] font-semibold text-primary">{{ initials(manager.name) }}</AvatarFallback>
+                  <AvatarFallback class="bg-primary/10 text-xs font-semibold text-primary">{{ initials(manager.name) }}</AvatarFallback>
                 </Avatar>
                 <span class="truncate">{{ displayName(manager.name) }}</span>
                 <span v-if="manager.staffId === session.userId.value" class="text-xs text-muted-foreground">(you)</span>
@@ -574,19 +575,19 @@ onMounted(load)
           description="Boards are provisioned per property. The Tasks tab still lists everything."
         />
         <template v-else>
-          <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-            <button
+          <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1" role="tablist" aria-label="Board columns">
+            <FilterChip
               v-for="column in columns"
               :key="column.id"
-              type="button"
-              class="flex min-h-9 shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              :class="column.id === activeColumnId ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+              role="tab"
+              :aria-selected="column.id === activeColumnId"
+              :active="column.id === activeColumnId"
+              :icon="column.status ? statusSignal(column.status).icon : undefined"
+              :dot="column.status ? undefined : 'bg-muted-foreground/40'"
+              :label="column.name"
+              :count="countByColumn.get(column.id) ?? 0"
               @click="activeColumnId = column.id"
-            >
-              <span class="h-2 w-2 rounded-full" :class="column.status ? statusMeta(column.status).dot : 'bg-muted-foreground/40'" />
-              {{ column.name }}
-              <span class="rounded-full bg-background/70 px-1.5 tabular-nums">{{ countByColumn.get(column.id) ?? 0 }}</span>
-            </button>
+            />
           </div>
           <div v-if="columnTasks.length" class="space-y-3">
             <div v-for="task in columnTasks" :key="task.id" class="space-y-2">
@@ -594,7 +595,6 @@ onMounted(load)
               <Button
                 v-if="canMoveCard(task)"
                 variant="secondary"
-                size="sm"
                 class="min-h-11 w-full"
                 :disabled="acting"
                 @click="movingTask = task"
@@ -628,7 +628,6 @@ onMounted(load)
             <TaskCard :task="task" :mine="task.assignment?.kind === 'STAFF' && task.assignment.staffId === session.userId.value" />
             <div v-if="rights.manages" class="flex justify-end">
               <Button
-                size="sm"
                 variant="secondary"
                 class="h-9 text-muted-foreground hover:text-destructive"
                 :disabled="Boolean(removingTaskId)"
@@ -656,7 +655,7 @@ onMounted(load)
             <AlertTitle>Couldn't load the team</AlertTitle>
             <AlertDescription class="space-y-2">
               <p>{{ peopleError }}</p>
-              <Button size="sm" variant="secondary" @click="peopleLoaded = false; loadPeople()">Retry</Button>
+              <Button variant="secondary" @click="peopleLoaded = false; loadPeople()">Retry</Button>
             </AlertDescription>
           </Alert>
           <div v-else class="flex items-end gap-2">
@@ -691,21 +690,21 @@ onMounted(load)
             class="flex min-h-11 items-center gap-3 rounded-lg border bg-card px-3 py-2"
           >
             <Avatar class="h-8 w-8 shrink-0">
-              <AvatarFallback class="bg-primary/10 text-[10px] font-semibold text-primary">{{ initials(member.name) }}</AvatarFallback>
+              <AvatarFallback class="bg-primary/10 text-xs font-semibold text-primary">{{ initials(member.name) }}</AvatarFallback>
             </Avatar>
             <span class="min-w-0 flex-1">
               <span class="block truncate text-sm font-medium">
                 {{ displayName(member.name) }}
                 <span v-if="member.staffId === session.userId.value" class="text-xs font-normal text-muted-foreground">(you)</span>
               </span>
-              <span class="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+              <span class="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                 <span>{{ projectLevelLabel(member.level) }}</span>
                 <span v-if="member.source === 'AUTO'" class="rounded-full bg-muted px-1.5 font-medium">auto</span>
                 <span>· since {{ formatDateTime(member.addedAt) }}</span>
               </span>
             </span>
             <template v-if="rights.canEditMembers">
-              <span v-if="member.level === 'MANAGER'" class="shrink-0 text-[11px] text-muted-foreground">Use Hand over</span>
+              <span v-if="member.level === 'MANAGER'" class="shrink-0 text-xs text-muted-foreground">Use Hand over</span>
               <template v-else>
                 <Select :model-value="member.level" :disabled="Boolean(memberBusyId)" @update:model-value="value => setLevel(member, value as Level)">
                   <SelectTrigger class="h-9 w-26 shrink-0" :aria-label="`Level for ${displayName(member.name)}`">
@@ -717,7 +716,6 @@ onMounted(load)
                   </SelectContent>
                 </Select>
                 <Button
-                  size="sm"
                   variant="secondary"
                   class="h-9 shrink-0 text-muted-foreground hover:text-destructive"
                   :disabled="Boolean(memberBusyId)"
@@ -869,7 +867,7 @@ onMounted(load)
               <span class="min-w-0 flex-1">
                 <span class="block truncate text-sm font-medium">{{ task.title }}</span>
                 <span class="block truncate text-xs text-muted-foreground">
-                  {{ task.roomNumber ?? task.locationTypeName ?? 'No room' }} · {{ statusMeta(task.status).label }}<template v-if="task.department"> · {{ task.department.name }}</template>
+                  {{ task.roomNumber ?? task.locationTypeName ?? 'No room' }} · {{ statusSignal(task.status).label }}<template v-if="task.department"> · {{ task.department.name }}</template>
                 </span>
               </span>
               <span v-if="addingTaskId === task.id" class="text-xs text-muted-foreground">Adding…</span>

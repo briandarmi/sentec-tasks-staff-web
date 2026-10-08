@@ -74,10 +74,10 @@ onMounted(load)
 <template>
   <Card v-if="task.escalationPolicyId">
     <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <SirenIcon class="h-4 w-4" /> Escalation
+      <CardTitle class="flex items-center gap-2 text-base">
+        <SirenIcon class="size-5" /> Escalation
       </CardTitle>
-      <CardDescription class="text-xs">
+      <CardDescription class="text-sm">
         <template v-if="task.escalationLevel > 0">Steps the policy applied to this task.</template>
         <template v-else>Not escalated yet — the policy watches this task's deadlines.</template>
       </CardDescription>
@@ -98,10 +98,10 @@ onMounted(load)
           <li v-for="record in records" :key="record.stepId" class="space-y-1">
             <div class="flex items-baseline justify-between gap-2">
               <p class="flex min-w-0 flex-wrap items-center gap-1.5">
-                <Badge variant="destructive" class="text-[10px]">{{ levelLabel(record.level) }}</Badge>
+                <Badge variant="destructive" class="text-xs">{{ levelLabel(record.level) }}</Badge>
                 <span class="truncate text-xs font-medium text-foreground">{{ triggerLabel(record.trigger.kind, record.trigger.value) }}</span>
               </p>
-              <span class="shrink-0 text-[11px] text-muted-foreground" :title="formatDateTime(record.appliedAt)">{{ relativeTime(record.appliedAt) }}</span>
+              <span class="shrink-0 text-xs text-muted-foreground" :title="formatDateTime(record.appliedAt)">{{ relativeTime(record.appliedAt) }}</span>
             </div>
             <ul class="space-y-0.5 pl-0.5 text-xs">
               <li v-for="(applied, index) in record.applied" :key="`a${index}`" class="text-foreground">

@@ -102,10 +102,10 @@ async function submit() {
 <template>
   <Card v-if="visible">
     <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <ClipboardCheckIcon class="h-4 w-4" /> Submit work
+      <CardTitle class="flex items-center gap-2 text-base">
+        <ClipboardCheckIcon class="size-5" /> Submit work
       </CardTitle>
-      <CardDescription class="text-xs">
+      <CardDescription class="text-sm">
         A team leader reviews the submission before it counts as finished.
       </CardDescription>
     </CardHeader>
@@ -118,11 +118,11 @@ async function submit() {
       <!-- The gates say what stands between here and Submitted, before the tap. -->
       <div v-if="minPhotos > 0" class="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
         <span class="text-muted-foreground">Proof photos</span>
-        <span class="font-semibold tabular-nums" :class="photoGateMet ? 'text-success' : 'text-destructive'">
+        <span class="font-semibold tabular-nums" :class="photoGateMet ? 'text-success-tint-foreground' : 'text-danger-tint-foreground'">
           {{ photoCount }} of {{ minPhotos }}
         </span>
       </div>
-      <p v-if="needsNote && !noteGateMet" role="alert" class="text-xs font-medium text-destructive">
+      <p v-if="needsNote && !noteGateMet" role="alert" class="text-sm font-semibold text-danger-tint-foreground">
         A completion note is required for this task.
       </p>
 

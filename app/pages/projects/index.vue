@@ -142,34 +142,32 @@ async function create() {
   <div class="space-y-4">
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
-        <h2 class="text-lg font-bold tracking-tight">Projects</h2>
-        <p class="text-xs text-muted-foreground">
+        <h2 class="text-xl font-bold tracking-tight">Projects</h2>
+        <p class="text-sm text-muted-foreground">
           {{ caps.isAdmin.value ? 'Every project at this property.' : 'The projects you are part of.' }}
           Their tasks live here, not on the hotel board.
         </p>
       </div>
       <div class="flex items-center gap-1">
-        <Button v-if="caps.canCreateProject.value" size="sm" @click="openCreate">
+        <Button v-if="caps.canCreateProject.value" @click="openCreate">
           <PlusIcon class="h-4 w-4" /> New
         </Button>
         <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-          <RefreshCwIcon class="h-4 w-4" :class="isLoading ? 'animate-spin' : ''" />
+          <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
         </Button>
       </div>
     </div>
 
     <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-      <button
+      <FilterChip
         v-for="option in PROJECT_STATUSES"
         :key="option"
-        type="button"
-        class="flex min-h-9 shrink-0 items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="status === option ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
+        :active="status === option"
+        :aria-pressed="status === option"
+        :icon="projectStatusMeta(option).icon"
+        :label="projectStatusMeta(option).label"
         @click="setStatus(option)"
-      >
-        <span class="h-2 w-2 rounded-full" :class="projectStatusMeta(option).dot" />
-        {{ projectStatusMeta(option).label }}
-      </button>
+      />
     </div>
 
     <Alert v-if="errorMessage" variant="destructive">
@@ -178,7 +176,7 @@ async function create() {
     </Alert>
 
     <div v-if="isLoading && projects.length === 0" class="space-y-3">
-      <Skeleton v-for="n in 3" :key="n" class="h-36 w-full rounded-xl" />
+      <Skeleton v-for="n in 3" :key="n" class="h-40 w-full rounded-2xl" />
     </div>
 
     <EmptyState
@@ -187,7 +185,7 @@ async function create() {
       :title="emptyCopy.title"
       :description="emptyCopy.description"
     >
-      <Button v-if="caps.canCreateProject.value && status === 'ACTIVE'" size="sm" @click="openCreate">
+      <Button v-if="caps.canCreateProject.value && status === 'ACTIVE'" @click="openCreate">
         <PlusIcon class="h-4 w-4" /> New project
       </Button>
     </EmptyState>
@@ -261,8 +259,8 @@ async function create() {
               <ul v-if="draftMembers.length" class="space-y-1">
                 <li v-for="member in draftMembers" :key="member.staffId" class="flex min-h-11 items-center gap-2 rounded-lg border bg-card px-3 py-1.5 text-sm">
                   <span class="min-w-0 flex-1 truncate font-medium">{{ member.name }}</span>
-                  <Badge variant="secondary" class="text-[10px]">{{ member.level === 'MEMBER' ? 'Member' : 'Viewer' }}</Badge>
-                  <Button type="button" size="icon" variant="ghost" class="h-9 w-9 text-muted-foreground hover:text-destructive" :aria-label="`Remove ${member.name}`" @click="removeDraftMember(member.staffId)">
+                  <Badge variant="secondary" class="text-xs">{{ member.level === 'MEMBER' ? 'Member' : 'Viewer' }}</Badge>
+                  <Button type="button" size="icon" variant="ghost" class="size-11 text-muted-foreground hover:text-destructive" :aria-label="`Remove ${member.name}`" @click="removeDraftMember(member.staffId)">
                     <Trash2Icon class="h-4 w-4" />
                   </Button>
                 </li>

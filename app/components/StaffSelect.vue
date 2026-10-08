@@ -80,7 +80,7 @@ onMounted(load)
       <AlertTitle>Couldn't load the team</AlertTitle>
       <AlertDescription class="space-y-2">
         <p>{{ errorMessage }}</p>
-        <Button size="sm" variant="secondary" @click="load">Retry</Button>
+        <Button variant="secondary" @click="load">Retry</Button>
       </AlertDescription>
     </Alert>
     <template v-else>

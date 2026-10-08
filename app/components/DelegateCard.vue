@@ -71,10 +71,10 @@ async function cancel() {
 <template>
   <Card v-if="visible">
     <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <SendIcon class="h-4 w-4" /> Delegate
+      <CardTitle class="flex items-center gap-2 text-base">
+        <SendIcon class="size-5" /> Delegate
       </CardTitle>
-      <CardDescription class="text-xs">
+      <CardDescription class="text-sm">
         Offer this task to a colleague — it moves only if they accept.
       </CardDescription>
     </CardHeader>
@@ -89,7 +89,6 @@ async function cancel() {
           Offered to <span class="font-semibold">{{ displayName(pending.toStaffName) }}</span>
         </span>
         <Button
-          size="sm"
           variant="secondary"
           class="shrink-0 text-muted-foreground hover:text-destructive"
           :disabled="isCancelling"

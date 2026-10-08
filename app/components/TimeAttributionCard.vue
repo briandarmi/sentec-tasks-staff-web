@@ -50,10 +50,10 @@ onMounted(load)
 <template>
   <Card>
     <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-sm">
-        <TimerIcon class="h-4 w-4" /> Who held it
+      <CardTitle class="flex items-center gap-2 text-base">
+        <TimerIcon class="size-5" /> Who held it
       </CardTitle>
-      <CardDescription class="text-xs">
+      <CardDescription class="text-sm">
         Open-hours minutes, from activation {{ stillOpen ? 'so far' : 'to submission' }}.
       </CardDescription>
     </CardHeader>

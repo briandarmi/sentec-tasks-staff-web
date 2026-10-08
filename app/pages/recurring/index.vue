@@ -155,21 +155,21 @@ onMounted(load)
   <div class="space-y-4">
     <button
       type="button"
-      class="flex min-h-11 items-center gap-1 rounded text-sm font-medium text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
       @click="router.back()"
     >
-      <ArrowLeftIcon class="h-4 w-4" /> Back
+      <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
     </button>
 
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
-        <h2 class="text-lg font-bold tracking-tight">Repeats</h2>
-        <p class="text-xs text-muted-foreground">
+        <h2 class="text-xl font-bold tracking-tight">Repeats</h2>
+        <p class="text-sm text-muted-foreground">
           Tasks you set to repeat. Each run makes a fresh task on the schedule{{ tenant?.timezone ? `, in ${tenant.timezone} time` : '' }}.
         </p>
       </div>
       <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-        <RefreshCwIcon class="h-4 w-4" :class="isLoading ? 'animate-spin' : ''" />
+        <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
       </Button>
     </div>
 
@@ -188,7 +188,7 @@ onMounted(load)
       title="Nothing repeats yet"
       :description="caps.canCreateTask.value ? 'Turn on Repeat when raising a task and it shows up here.' : 'Repeating tasks need the create-task permission at this property.'"
     >
-      <Button v-if="caps.canCreateTask.value" size="sm" @click="navigateTo('/tasks/new')">New task</Button>
+      <Button v-if="caps.canCreateTask.value" @click="navigateTo('/tasks/new')">New task</Button>
     </EmptyState>
 
     <div v-else class="space-y-3">
@@ -196,7 +196,7 @@ onMounted(load)
         <CardHeader class="gap-1.5 pb-2">
           <div class="flex items-start justify-between gap-2">
             <CardTitle class="text-base leading-snug">{{ template.name }}</CardTitle>
-            <Badge :variant="template.isActive ? 'secondary' : 'outline'" class="shrink-0 text-[10px]">{{ template.isActive ? 'Active' : 'Paused' }}</Badge>
+            <Badge :variant="template.isActive ? 'secondary' : 'outline'" class="shrink-0 text-xs">{{ template.isActive ? 'Active' : 'Paused' }}</Badge>
           </div>
           <p class="flex items-center gap-1.5 text-sm font-medium text-foreground/85">
             <RepeatIcon class="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -309,7 +309,7 @@ onMounted(load)
                 type="button"
                 role="radio"
                 :aria-checked="editPriority === option"
-                class="min-h-10 rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                class="min-h-11 rounded-lg border text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
                 :class="editPriority === option ? 'border-primary/40 bg-primary/10 text-primary' : 'bg-card text-muted-foreground active:bg-accent'"
                 @click="editPriority = editPriority === option ? '' : option"
               >

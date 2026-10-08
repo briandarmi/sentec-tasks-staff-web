@@ -1,10 +1,16 @@
+import type { Component } from 'vue'
+import { BanIcon, CheckCheckIcon, PlayIcon } from '@lucide/vue'
 import type { ProjectLevel, ProjectStatus } from '~/utils/clientFakeApi'
 
 // Presentation for projects (feat/projects). Same token discipline as
-// task-ui: semantic classes only, so light and dark both resolve.
+// task-ui: semantic classes only, so light and dark both resolve — and the
+// same rule as task-signals: lifecycle status never borrows the traffic
+// light, so a cancelled project is grey, not red. "Late" is the one red
+// thing a project card carries.
 
 export interface ProjectStatusMeta {
   label: string
+  icon: Component
   dot: string
   badge: string
 }
@@ -12,9 +18,9 @@ export interface ProjectStatusMeta {
 export const PROJECT_STATUSES: ProjectStatus[] = ['ACTIVE', 'COMPLETED', 'CANCELLED']
 
 export const PROJECT_STATUS_META: Record<ProjectStatus, ProjectStatusMeta> = {
-  ACTIVE: { label: 'Active', dot: 'bg-primary', badge: 'bg-primary/10 text-primary' },
-  COMPLETED: { label: 'Completed', dot: 'bg-success', badge: 'bg-success/15 text-success' },
-  CANCELLED: { label: 'Cancelled', dot: 'bg-destructive', badge: 'bg-destructive/10 text-destructive' },
+  ACTIVE: { label: 'Active', icon: PlayIcon, dot: 'bg-primary', badge: 'bg-primary-tint text-primary-tint-foreground' },
+  COMPLETED: { label: 'Completed', icon: CheckCheckIcon, dot: 'bg-success', badge: 'bg-success-tint text-success-tint-foreground' },
+  CANCELLED: { label: 'Cancelled', icon: BanIcon, dot: 'bg-muted-foreground/40', badge: 'bg-neutral-tint text-neutral-tint-foreground' },
 }
 
 export function projectStatusMeta(status: ProjectStatus): ProjectStatusMeta {
