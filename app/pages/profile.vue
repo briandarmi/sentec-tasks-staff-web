@@ -93,7 +93,7 @@ async function logout() {
     </Card>
 
     <div class="space-y-2">
-      <Button variant="outline" class="min-h-11 w-full text-destructive" @click="logout">
+      <Button variant="secondary" tone="destructive" class="min-h-11 w-full" @click="logout">
         <LogOutIcon class="h-4 w-4" /> Sign out
       </Button>
       <!-- Signing out clears the selected property too. That is deliberate on a

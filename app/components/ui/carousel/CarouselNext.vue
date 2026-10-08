@@ -11,7 +11,7 @@ const props = withDefaults(defineProps<{
   size?: ButtonVariants["size"]
 }
 & WithClassAsProps>(), {
-  variant: "outline",
+  variant: "secondary",
   size: "icon",
 })
 

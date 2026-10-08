@@ -359,7 +359,7 @@ onMounted(load)
         <AlertTitle>That worked, but the view may be stale</AlertTitle>
         <AlertDescription class="space-y-2">
           <p>{{ refreshError }}</p>
-          <Button size="sm" variant="outline" @click="refresh">Refresh</Button>
+          <Button size="sm" variant="secondary" @click="refresh">Refresh</Button>
         </AlertDescription>
       </Alert>
 
@@ -370,7 +370,7 @@ onMounted(load)
         <AlertTitle>This task repeats</AlertTitle>
         <AlertDescription class="space-y-2">
           <p>This is the first run. The next ones are made on the schedule you set.</p>
-          <Button size="sm" variant="outline" @click="navigateTo('/recurring')">Manage repeats</Button>
+          <Button size="sm" variant="secondary" @click="navigateTo('/recurring')">Manage repeats</Button>
         </AlertDescription>
       </Alert>
 
@@ -383,7 +383,7 @@ onMounted(load)
         <Button
           v-if="canAssign"
           class="min-h-11 flex-1"
-          :variant="canClaim ? 'outline' : 'default'"
+          :variant="canClaim ? 'secondary' : 'default'"
           :disabled="acting"
           @click="assignOpen = true"
         >
@@ -393,7 +393,7 @@ onMounted(load)
         <Button
           v-if="canMove"
           class="min-h-11 flex-1"
-          :variant="canClaim || canAssign ? 'outline' : 'default'"
+          :variant="canClaim || canAssign ? 'secondary' : 'default'"
           :disabled="acting"
           @click="moveOpen = true"
         >
@@ -401,7 +401,7 @@ onMounted(load)
         </Button>
         <Button
           v-if="canReturn"
-          variant="outline"
+          variant="secondary"
           class="min-h-11 flex-1"
           :disabled="acting"
           :aria-expanded="returnOpen"
@@ -586,7 +586,7 @@ onMounted(load)
           </div>
 
           <DialogFooter>
-            <Button variant="outline" :disabled="isReturning" @click="returnOpen = false">Cancel</Button>
+            <Button variant="secondary" :disabled="isReturning" @click="returnOpen = false">Cancel</Button>
             <Button :disabled="!returnReason.trim() || isReturning" :aria-busy="isReturning" @click="returnToPool">
               {{ isReturning ? 'Returning…' : 'Return task' }}
             </Button>

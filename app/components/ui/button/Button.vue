@@ -9,6 +9,8 @@ import { buttonVariants } from "."
 interface Props extends PrimitiveProps {
   variant?: ButtonVariants["variant"]
   size?: ButtonVariants["size"]
+  /** Colour carried by an unfilled variant (secondary, tertiary, ghost). */
+  tone?: ButtonVariants["tone"]
   class?: HTMLAttributes["class"]
 }
 
@@ -22,9 +24,10 @@ const props = withDefaults(defineProps<Props>(), {
     data-slot="button"
     :data-variant="variant"
     :data-size="size"
+    :data-tone="tone"
     :as="as"
     :as-child="asChild"
-    :class="cn(buttonVariants({ variant, size }), props.class)"
+    :class="cn(buttonVariants({ variant, size, tone }), props.class)"
   >
     <slot />
   </Primitive>

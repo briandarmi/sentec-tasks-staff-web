@@ -74,6 +74,14 @@
     --color-info: var(--info);
     --color-info-tint: var(--info-tint);
     --color-info-tint-foreground: var(--info-tint-foreground);
+    --color-primary-tint-hover: var(--primary-tint-hover);
+    --color-primary-tint-active: var(--primary-tint-active);
+    --color-success-tint-hover: var(--success-tint-hover);
+    --color-success-tint-active: var(--success-tint-active);
+    --color-warning-tint-hover: var(--warning-tint-hover);
+    --color-warning-tint-active: var(--warning-tint-active);
+    --color-danger-tint-hover: var(--danger-tint-hover);
+    --color-danger-tint-active: var(--danger-tint-active);
     --color-destructive-hover: var(--destructive-hover);
     --color-destructive-active: var(--destructive-active);
     --color-success-hover: var(--success-hover);
@@ -82,6 +90,33 @@
     --color-secondary-active: var(--secondary-active);
     --color-warning-hover: var(--warning-hover);
     --color-warning-active: var(--warning-active);
+    /* Sentec product hues (the :root block further down), as utilities:
+       bg-product-btl, text-product-btl, border-product-btl and the -dark glyph
+       hue. For icons and accent bars only — see the palette's note. */
+    --color-product-pms: var(--product-pms);
+    --color-product-pms-dark: var(--product-pms-dark);
+    --color-product-pos: var(--product-pos);
+    --color-product-pos-dark: var(--product-pos-dark);
+    --color-product-fin: var(--product-fin);
+    --color-product-fin-dark: var(--product-fin-dark);
+    --color-product-sbe: var(--product-sbe);
+    --color-product-sbe-dark: var(--product-sbe-dark);
+    --color-product-ems: var(--product-ems);
+    --color-product-ems-dark: var(--product-ems-dark);
+    --color-product-bqt: var(--product-bqt);
+    --color-product-bqt-dark: var(--product-bqt-dark);
+    --color-product-crm: var(--product-crm);
+    --color-product-crm-dark: var(--product-crm-dark);
+    --color-product-xd: var(--product-xd);
+    --color-product-xd-dark: var(--product-xd-dark);
+    --color-product-sri: var(--product-sri);
+    --color-product-sri-dark: var(--product-sri-dark);
+    --color-product-sam: var(--product-sam);
+    --color-product-sam-dark: var(--product-sam-dark);
+    --color-product-btl: var(--product-btl);
+    --color-product-btl-dark: var(--product-btl-dark);
+    --color-product-sls: var(--product-sls);
+    --color-product-sls-dark: var(--product-sls-dark);
     /* tokens/effects.css --ease-standard. Also inferred, not GSM-sourced. */
     --ease-ds: cubic-bezier(.2, .8, .2, 1);
     --shadow-ds-sm: var(--ds-shadow-sm);
@@ -151,6 +186,117 @@
     --st-success-700: #157952;
     --st-warning-700: #8a5a10;
     --st-danger-700: #b02525;
+}
+
+/* ── Sentec product palette ────────────────────────────────────────────────
+   Verbatim from the Sentinel Tech Design System (`tokens/product-colors.css`),
+   which mirrors github.com/SentinelTech-com/sentec-product-icons. One hue per
+   product in the Sentec suite, with its light-tile gradient, the glyph colour
+   over that tile, and the neon glyph and 2px border of the dark tile, whose
+   ground is the Sentinel Grey scale (design system values of 2026-10-08).
+
+   The rule that travels with it: a product hue reaches the product icon and
+   its accent bar ONLY. Headings, links and buttons stay Sentinel Blue — so
+   nothing here is mapped onto --primary or any other shadcn token. The marks
+   themselves are drawn by `ProductIcon.vue` from `utils/sentec-products.ts`;
+   these tokens exist for the places that need the hue as CSS (an accent bar,
+   a chip) and for the `*-product-<code>` utilities registered in @theme above.
+   ──────────────────────────────────────────────────────────────────────────── */
+:root {
+    --product-tile-radius: 16px;
+    /* The dark tile's ground is the Sentinel Grey scale, grey-800 down to
+       grey-900 — the design system writes the second as its --surface-dark
+       alias, which is the same grey. */
+    --product-tile-ink-from: var(--st-grey-800);
+    --product-tile-ink-to: var(--st-grey-900);
+    --product-code-ink: #101A24;
+
+    /* Sentec PMS — core */
+    --product-pms: #0A6DE0;
+    --product-pms-gradient: linear-gradient(180deg, #3486e5 0%, #0A6DE0 100%);
+    --product-pms-on-tile: #FFFFFF;
+    --product-pms-dark: #4CC2FF;
+    --product-pms-dark-border: #355a6f;
+
+    /* Sentec POS — core */
+    --product-pos: #D9491A;
+    --product-pos-gradient: linear-gradient(180deg, #df6841 0%, #D9491A 100%);
+    --product-pos-on-tile: #FFFFFF;
+    --product-pos-dark: #FF8A3D;
+    --product-pos-dark-border: #6b4935;
+
+    /* Sentec Finance — core */
+    --product-fin: #00875A;
+    --product-fin-gradient: linear-gradient(180deg, #2b9b76 0%, #00875A 100%);
+    --product-fin-on-tile: #FFFFFF;
+    --product-fin-dark: #2FE0A0;
+    --product-fin-dark-border: #2c6352;
+
+    /* Sentec Booking Engine — core */
+    --product-sbe: #7B2BE8;
+    --product-sbe-gradient: linear-gradient(180deg, #914fec 0%, #7B2BE8 100%);
+    --product-sbe-on-tile: #FFFFFF;
+    --product-sbe-dark: #C084FF;
+    --product-sbe-dark-border: #58476f;
+
+    /* Sentec EMS — core. Ink glyph: yellow cannot hold white. */
+    --product-ems: #FFD016;
+    --product-ems-gradient: linear-gradient(180deg, #ffd52d 0%, #FFD016 100%);
+    --product-ems-on-tile: #101A24;
+    --product-ems-dark: #FFE04D;
+    --product-ems-dark-border: #6b6339;
+
+    /* Sentec Banqueting — support */
+    --product-bqt: #5566DC;
+    --product-bqt-gradient: linear-gradient(180deg, #7280e2 0%, #5566DC 100%);
+    --product-bqt-on-tile: #FFFFFF;
+    --product-bqt-dark: #A9B6FF;
+    --product-bqt-dark-border: #51566f;
+
+    /* Sentec CRM — support */
+    --product-crm: #D01E7D;
+    --product-crm-gradient: linear-gradient(180deg, #d84493 0%, #D01E7D 100%);
+    --product-crm-on-tile: #FFFFFF;
+    --product-crm-dark: #FF5FB0;
+    --product-crm-dark-border: #6b3c57;
+
+    /* Sentec XD — support. Deliberately unsaturated: it sits above the
+       products, not beside them. */
+    --product-xd: #12304A;
+    --product-xd-gradient: linear-gradient(180deg, #3a5369 0%, #12304A 100%);
+    --product-xd-on-tile: #FFFFFF;
+    --product-xd-dark: #9FB6CC;
+    --product-xd-dark-border: #4e5660;
+
+    /* Sentec Reputation Intelligence — upcoming */
+    --product-sri: #7A2E9E;
+    --product-sri-gradient: linear-gradient(180deg, #9152ae 0%, #7A2E9E 100%);
+    --product-sri-on-tile: #FFFFFF;
+    --product-sri-dark: #C98BFF;
+    --product-sri-dark-border: #5a496f;
+
+    /* Sentec Asset Management — upcoming */
+    --product-sam: #4F8A14;
+    --product-sam-gradient: linear-gradient(180deg, #6d9e3c 0%, #4F8A14 100%);
+    --product-sam-on-tile: #FFFFFF;
+    --product-sam-dark: #9FE05A;
+    --product-sam-dark-border: #4e633d;
+
+    /* Sentec Butler Service — upcoming. The Butler consoles' product. */
+    --product-btl: #B0234F;
+    --product-btl-gradient: linear-gradient(180deg, #bd486d 0%, #B0234F 100%);
+    --product-btl-on-tile: #FFFFFF;
+    --product-btl-dark: #FF7A96;
+    --product-btl-dark-border: #6b444f;
+
+    /* Sentec Loyalty System — upcoming. The only metallic tile; the design
+       system's base token is the gradient's deep end (#a77704) while its
+       roster lists the mid gold (#E2A106) as the hue — both kept as given. */
+    --product-sls: #a77704;
+    --product-sls-gradient: linear-gradient(135deg, #f1d287 0%, #e5ac24 38%, #E2A106 62%, #a77704 100%);
+    --product-sls-on-tile: #101A24;
+    --product-sls-dark: #FFC94D;
+    --product-sls-dark-border: #6b5c39;
 }
 
 :root {
@@ -229,6 +375,19 @@
     --info: var(--st-blue-500);
     --info-tint: var(--primary-tint);
     --info-tint-foreground: var(--primary-tint-foreground);
+    /* Hover and press for the TINTED buttons (Button `secondary` and its
+       tones, 2026-10-08): the tint pulled a step toward its own hue, so the
+       button deepens in colour rather than greying. Defined once, in :root
+       only, for the same reason as --info-tint above — var() resolves at use,
+       so in dark mode the formula runs on the dark tints automatically. */
+    --primary-tint-hover: color-mix(in oklab, var(--primary-tint) 85%, var(--primary));
+    --primary-tint-active: color-mix(in oklab, var(--primary-tint) 72%, var(--primary));
+    --success-tint-hover: color-mix(in oklab, var(--success-tint) 85%, var(--success));
+    --success-tint-active: color-mix(in oklab, var(--success-tint) 72%, var(--success));
+    --warning-tint-hover: color-mix(in oklab, var(--warning-tint) 85%, var(--warning));
+    --warning-tint-active: color-mix(in oklab, var(--warning-tint) 72%, var(--warning));
+    --danger-tint-hover: color-mix(in oklab, var(--danger-tint) 85%, var(--destructive));
+    --danger-tint-active: color-mix(in oklab, var(--danger-tint) 72%, var(--destructive));
     /* Interaction states for the remaining filled buttons, following the design
        system kit's rule: hover and press DARKEN the fill. shadcn's stock
        opacity-blend hover (a /90 modifier) blends toward the PAGE behind

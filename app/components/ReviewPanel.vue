@@ -171,10 +171,11 @@ async function sendBack() {
           {{ isApproving ? 'Approving…' : 'Approve' }}
         </Button>
         <!-- The one action here that is not the happy path reads that way:
-             destructive outline, never a second primary. -->
+             destructive-tinted secondary, never a second primary. -->
         <Button
-          variant="outline"
-          class="min-h-11 flex-1 border-destructive/40 text-destructive hover:text-destructive"
+          variant="secondary"
+          tone="destructive"
+          class="min-h-11 flex-1"
           :disabled="isApproving"
           :aria-expanded="showChangesForm"
           @click="showChangesForm = !showChangesForm"
@@ -187,7 +188,7 @@ async function sendBack() {
         <Label for="review-note">What needs to change?</Label>
         <Textarea id="review-note" v-model="changesNote" rows="2" maxlength="1000" class="resize-none" />
         <Button
-          variant="outline"
+          variant="secondary"
           class="min-h-11 w-full"
           :disabled="!changesNote.trim() || isSending || isApproving"
           :aria-busy="isSending"

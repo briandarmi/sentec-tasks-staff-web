@@ -240,7 +240,7 @@ onMounted(load)
           <div class="flex flex-wrap gap-2">
             <Button
               v-if="template.recurrence"
-              variant="outline"
+              variant="secondary"
               class="min-h-11 flex-1"
               :disabled="Boolean(busyId)"
               :aria-busy="busyId === template.id"
@@ -249,7 +249,7 @@ onMounted(load)
               <component :is="template.isActive ? PauseIcon : PlayIcon" class="h-4 w-4" />
               {{ template.isActive ? 'Pause' : 'Resume' }}
             </Button>
-            <Button variant="outline" class="min-h-11 flex-1" :disabled="Boolean(busyId)" @click="openEdit(template)">
+            <Button variant="secondary" class="min-h-11 flex-1" :disabled="Boolean(busyId)" @click="openEdit(template)">
               <PencilIcon class="h-4 w-4" /> Edit
             </Button>
             <Button variant="ghost" class="min-h-11 text-muted-foreground hover:text-destructive" :disabled="Boolean(busyId)" :aria-label="`Archive ${template.name}`" @click="archiving = template">
@@ -331,7 +331,7 @@ onMounted(load)
           <RecurrenceEditor v-model="editRecurrence" :timezone="tenant?.timezone" id-prefix="rt" />
 
           <DialogFooter>
-            <Button type="button" variant="outline" :disabled="isSaving" @click="editing = null">Cancel</Button>
+            <Button type="button" variant="secondary" :disabled="isSaving" @click="editing = null">Cancel</Button>
             <Button type="submit" class="min-h-11" :disabled="!canSaveEdit" :aria-busy="isSaving">{{ isSaving ? 'Saving…' : 'Save' }}</Button>
           </DialogFooter>
         </form>

@@ -109,7 +109,7 @@ async function remove(userId: string) {
           <Button
             v-if="canManage || canLeave(helper.staffId)"
             size="sm"
-            variant="ghost"
+            variant="secondary"
             class="-mr-1 h-9 rounded-full text-muted-foreground hover:text-destructive"
             :disabled="Boolean(removingUserId)"
             :aria-busy="removingUserId === helper.staffId"

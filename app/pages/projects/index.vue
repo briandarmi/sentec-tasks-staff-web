@@ -256,7 +256,7 @@ async function create() {
                     <SelectItem value="VIEWER">Viewer</SelectItem>
                   </SelectContent>
                 </Select>
-                <Button type="button" variant="outline" :disabled="!memberPick" @click="addDraftMember">Add</Button>
+                <Button type="button" variant="secondary" :disabled="!memberPick" @click="addDraftMember">Add</Button>
               </div>
               <ul v-if="draftMembers.length" class="space-y-1">
                 <li v-for="member in draftMembers" :key="member.staffId" class="flex min-h-11 items-center gap-2 rounded-lg border bg-card px-3 py-1.5 text-sm">
@@ -272,7 +272,7 @@ async function create() {
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" :disabled="isCreating" @click="createOpen = false">Cancel</Button>
+            <Button type="button" variant="secondary" :disabled="isCreating" @click="createOpen = false">Cancel</Button>
             <Button type="submit" class="min-h-11" :disabled="!canCreate" :aria-busy="isCreating">
               {{ isCreating ? 'Creating…' : 'Create project' }}
             </Button>

@@ -2,13 +2,15 @@
 import { ref } from 'vue'
 import { CircleCheckIcon, InfoIcon, OctagonXIcon, PencilIcon, PlusIcon, TrashIcon, TriangleAlertIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
+import { APP_PRODUCT } from '~/utils/app-product'
+import { SENTEC_PRODUCTS } from '~/utils/sentec-products'
 
 /**
  * Sentinel Tech Design System — living reference.
  *
  * Follows the design system project's own running order: brand, then colour,
  * then the copy and type rules, then the component groups (core, feedback,
- * forms, navigation, overlay), then the layout scales and the remaining type
+ * forms, navigation, overlay, product), then the layout scales and the remaining type
  * specimens.
  *
  * Renders no data and touches no session — the route is deliberately public.
@@ -25,6 +27,23 @@ function toggleDark() {
 
 /* ── Brand ─────────────────────────────────────────────────────────────── */
 const iconMarkSizes = [16, 24, 32, 48, 64]
+
+/* The Sentec suite's product icons, and this console's place in it. */
+const coreProducts = SENTEC_PRODUCTS.filter(p => p.tier === 'core')
+const appProduct = APP_PRODUCT ? (SENTEC_PRODUCTS.find(p => p.code === APP_PRODUCT) ?? null) : null
+/** The product the component specimens use: this console's own, or PMS as the design system's card does. */
+const demoProduct = APP_PRODUCT ?? 'PMS'
+/** The tile sizes the icon set names, largest first. */
+const productSizes = [64, 40, 34, 24]
+/** The size rules from the icon set's README: the mark changes shape at 20px, and again below it. */
+const productSizeRules = [
+  { size: '64px', mark: 'Tile + pictogram', use: 'Hero, app launcher' },
+  { size: '40px', mark: 'Tile + pictogram', use: 'Product grid' },
+  { size: '34px', mark: 'Tile + pictogram', use: 'Card, list row, nav' },
+  { size: '24px', mark: 'Tile + pictogram', use: 'Dense table' },
+  { size: '20px', mark: 'Tile + three-letter code', use: 'Not shipped yet — the code is set in Geist, which this system does not carry' },
+  { size: 'Under 20px', mark: 'Sentinel shield in the product hue', use: "The icon set's favicon rule. Not followed here: the consoles use the tile" },
+]
 
 const namingRules = [
   { context: 'The company, corporate brand, GSM identity', use: 'Sentinel Tech', domain: 'sentineltech.com' },
@@ -152,7 +171,9 @@ const spacing = [
 ]
 
 /* ── Component state ───────────────────────────────────────────────────── */
-const buttonVariants = ['default', 'secondary', 'outline', 'tertiary', 'ghost', 'destructive', 'success', 'warning', 'link'] as const
+const buttonVariants = ['default', 'secondary', 'field', 'tertiary', 'ghost', 'destructive', 'success', 'warning', 'link'] as const
+/** What an unfilled button (secondary, tertiary, ghost) carries as its colour. */
+const buttonTones = ['primary', 'neutral', 'destructive', 'success', 'warning'] as const
 const badgeVariants = ['default', 'secondary', 'success', 'warning', 'destructive', 'outline'] as const
 const alertVariants = [
   { variant: 'default', icon: InfoIcon, title: 'A group grant covers every property in the group', body: 'Anyone you add here can read and change work at all of them.' },
@@ -182,7 +203,7 @@ const switches = ref({ a: true, b: false })
             Brand foundations and the component kit, as built in this console
           </p>
         </div>
-        <Button variant="outline" size="sm" @click="toggleDark">
+        <Button variant="secondary" size="sm" @click="toggleDark">
           {{ dark ? 'Light' : 'Dark' }}
         </Button>
       </header>
@@ -300,6 +321,101 @@ const switches = ref({ a: true, b: false })
             the icon mark is a separate asset: the same shield artwork on a square
             viewBox trimmed to the shield's own bounding box, so it fills the space
             it is given.
+          </AlertDescription>
+        </Alert>
+      </section>
+
+      <section class="flex flex-col gap-4">
+        <h3 class="font-heading text-xl font-bold">Product Icons — Sentec suite</h3>
+        <p class="text-muted-foreground text-sm">
+          Twelve products, one hue each, in two tiles: the light tile on the deepened
+          product hue, and the dark tile on the Sentinel Grey ground with a neon glyph
+          and a per-product border. Imported into the design system from the
+          <code class="text-xs">sentec-product-icons</code> set. A product hue reaches
+          the icon and its accent bar only — headings, links and buttons stay Sentinel
+          Blue — and a glyph is never recoloured outside its own two values. EMS and
+          SLS carry an ink glyph because yellow cannot hold white; XD is deliberately
+          unsaturated because it sits above the products, not beside them. These
+          consoles follow the theme: the light tile on a light page, the dark tile on
+          a dark one.
+        </p>
+
+        <h4 class="text-muted-foreground text-sm font-semibold">Light tile — deepened hue, white or ink glyph</h4>
+        <div class="border-border grid grid-cols-4 gap-x-4 gap-y-5 rounded-xl border bg-white p-6 sm:grid-cols-6">
+          <div v-for="p in SENTEC_PRODUCTS" :key="p.slug" class="flex flex-col items-center gap-2">
+            <ProductIcon :product="p.code" mode="light" :size="48" :label="p.name" />
+            <span class="text-xs font-semibold tracking-wider text-[#63666F]">{{ p.code }}</span>
+          </div>
+        </div>
+
+        <h4 class="text-muted-foreground text-sm font-semibold">Dark tile — Sentinel Grey ground, neon glyph</h4>
+        <div class="grid grid-cols-4 gap-x-4 gap-y-5 rounded-xl p-6 sm:grid-cols-6" style="background:#2B2D31">
+          <div v-for="p in SENTEC_PRODUCTS" :key="p.slug" class="flex flex-col items-center gap-2">
+            <ProductIcon :product="p.code" mode="dark" :size="48" :label="p.name" />
+            <span class="text-xs font-semibold tracking-wider text-[#DCDEE1]">{{ p.code }}</span>
+          </div>
+        </div>
+
+        <h4 class="text-muted-foreground text-sm font-semibold">Sizes, and where the mark changes shape</h4>
+        <div class="overflow-x-auto">
+          <table class="w-full min-w-[34rem] border-collapse text-left">
+            <thead>
+              <tr class="border-border text-muted-foreground border-b text-xs">
+                <th class="py-2 pr-4 font-semibold">Size</th>
+                <th class="py-2 pr-4 font-semibold">Mark</th>
+                <th class="py-2 font-semibold">Where</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in productSizeRules" :key="r.size" class="border-border border-b text-sm last:border-0">
+                <td class="py-3 pr-4 font-semibold">{{ r.size }}</td>
+                <td class="py-3 pr-4">{{ r.mark }}</td>
+                <td class="text-muted-foreground py-3">{{ r.use }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <template v-if="appProduct">
+          <h4 class="text-muted-foreground text-sm font-semibold">This console — {{ appProduct.name }}</h4>
+          <p class="text-muted-foreground text-sm">
+            <code class="text-xs">{{ appProduct.code }}</code>, tier “{{ appProduct.tier }}”, hue
+            <code class="text-xs">{{ appProduct.light }}</code> with
+            <code class="text-xs">{{ appProduct.dark }}</code> as the dark-tile glyph.
+            <code class="text-xs">AppLogo</code> renders the tile at every size the chrome
+            uses and switches to the dark tile with the theme. The favicon is the light
+            tile, cut at 16, 32 and 48 — a console decision over the icon set's under-20px
+            shield rule.
+          </p>
+          <div class="border-border bg-card flex flex-wrap items-end gap-8 rounded-xl border p-10">
+            <div v-for="px in productSizes" :key="px" class="flex flex-col items-center gap-2">
+              <ProductIcon :product="appProduct.code" :size="px" />
+              <span class="text-muted-foreground text-xs">{{ px }}px</span>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <ProductIcon :product="appProduct.code" :size="16" />
+              <span class="text-muted-foreground text-xs">16px favicon</span>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <span class="inline-flex" :style="{ color: appProduct.light }">
+                <ProductIcon :product="appProduct.code" variant="glyph" :size="28" />
+              </span>
+              <span class="text-muted-foreground text-xs">glyph</span>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <ProductIcon :product="appProduct.code" variant="mono" :size="28" />
+              <span class="text-muted-foreground text-xs">mono</span>
+            </div>
+          </div>
+        </template>
+        <Alert v-else variant="neutral">
+          <InfoIcon />
+          <AlertTitle>This console has no product icon yet</AlertTitle>
+          <AlertDescription>
+            Sentec Tasks is not in the suite's roster, so there is no hue or glyph to
+            wear. Until it is added, the console carries the SENTINEL TECH icon mark in
+            Sentinel Blue — the company mark, not a product mark. Setting the code in
+            <code class="text-xs">utils/app-product.ts</code> switches it over.
           </AlertDescription>
         </Alert>
       </section>
@@ -559,13 +675,13 @@ const switches = ref({ a: true, b: false })
             <div class="flex flex-wrap items-center gap-3">
               <Tooltip>
                 <TooltipTrigger as-child>
-                  <Button variant="outline">Hover me</Button>
+                  <Button variant="secondary">Hover me</Button>
                 </TooltipTrigger>
                 <TooltipContent>Assigned 10 AM</TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger as-child>
-                  <Button variant="outline" size="icon" aria-label="Edit">
+                  <Button variant="secondary" size="icon" aria-label="Edit">
                     <PencilIcon />
                   </Button>
                 </TooltipTrigger>
@@ -595,7 +711,22 @@ const switches = ref({ a: true, b: false })
         <div class="flex flex-col gap-3">
           <h4 class="text-muted-foreground text-sm font-semibold">Button</h4>
           <div class="flex flex-wrap items-center gap-3">
-            <Button v-for="v in buttonVariants" :key="v" :variant="v">{{ v }}</Button>
+            <template v-for="v in buttonVariants" :key="v">
+              <Button v-if="v === 'ghost'" variant="ghost" size="icon" aria-label="ghost"><PencilIcon /></Button>
+              <Button v-else :variant="v">{{ v }}</Button>
+            </template>
+          </div>
+          <p class="text-muted-foreground text-xs">
+            Secondary follows its tone — the tint under that tone's darkened text, the
+            same pairs Badge and Alert use. Tertiary and ghost read the tone too; ghost
+            is drawn as an icon button because that is the only place it is used.
+          </p>
+          <div class="flex flex-wrap items-center gap-3">
+            <Button v-for="t in buttonTones" :key="t" variant="secondary" :tone="t">{{ t }}</Button>
+          </div>
+          <div class="flex flex-wrap items-center gap-3">
+            <Button v-for="t in buttonTones" :key="t" variant="tertiary" :tone="t">{{ t }}</Button>
+            <Button v-for="t in buttonTones" :key="`ghost-${t}`" variant="ghost" :tone="t" size="icon" :aria-label="t"><PencilIcon /></Button>
           </div>
           <div class="flex flex-wrap items-center gap-3">
             <Button size="sm">Small</Button>
@@ -603,17 +734,37 @@ const switches = ref({ a: true, b: false })
             <Button size="lg">Large</Button>
             <Button disabled>Disabled</Button>
           </div>
+          <Alert variant="neutral">
+            <InfoIcon />
+            <AlertTitle>No outlined action buttons</AlertTitle>
+            <AlertDescription>
+              The kit's bordered white button was retired from these consoles on
+              2026-10-08: at rest it reads like a field or a card, not something to
+              press. Secondary actions, cancels and icon buttons use
+              <code class="text-xs">secondary</code>, which is tonal: its background is
+              the tint of the colour the action carries — Sentinel Blue unless
+              <code class="text-xs">tone</code> names destructive, success or warning —
+              and it deepens toward that hue on hover rather than greying. Plain grey is
+              <code class="text-xs">tone="neutral"</code>, for an action with no colour
+              of its own. <code class="text-xs">ghost</code> is for icon-only buttons; a
+              ghost action with a text label reads as plain text, so text actions are
+              <code class="text-xs">secondary</code> too. The one bordered variant left is
+              <code class="text-xs">field</code>,
+              styled like a select trigger, for combobox and date-picker triggers only —
+              those are inputs, and should look like the inputs beside them.
+            </AlertDescription>
+          </Alert>
         </div>
 
         <div class="flex flex-col gap-3">
           <h4 class="text-muted-foreground text-sm font-semibold">Icon button</h4>
           <div class="flex flex-wrap items-center gap-3">
             <Button size="icon" aria-label="Add"><PlusIcon /></Button>
-            <Button size="icon" variant="outline" aria-label="Edit"><PencilIcon /></Button>
+            <Button size="icon" variant="secondary" aria-label="Edit"><PencilIcon /></Button>
             <Button size="icon" variant="ghost" aria-label="Edit"><PencilIcon /></Button>
             <Button size="icon" variant="destructive" aria-label="Delete"><TrashIcon /></Button>
-            <Button size="icon-sm" variant="outline" aria-label="Add"><PlusIcon /></Button>
-            <Button size="icon-lg" variant="outline" aria-label="Add"><PlusIcon /></Button>
+            <Button size="icon-sm" variant="secondary" aria-label="Add"><PlusIcon /></Button>
+            <Button size="icon-lg" variant="secondary" aria-label="Add"><PlusIcon /></Button>
           </div>
           <p class="text-muted-foreground text-xs">
             An icon button is Button at an icon size. Every one carries an aria-label —
@@ -709,7 +860,7 @@ const switches = ref({ a: true, b: false })
         <div>
           <Dialog v-model:open="dialogOpen">
             <DialogTrigger as-child>
-              <Button variant="outline">Open dialog</Button>
+              <Button variant="secondary">Open dialog</Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
@@ -722,11 +873,46 @@ const switches = ref({ a: true, b: false })
                 Body content sits between the two rules.
               </p>
               <DialogFooter>
-                <Button variant="outline" @click="dialogOpen = false">Cancel</Button>
+                <Button variant="secondary" @click="dialogOpen = false">Cancel</Button>
                 <Button @click="dialogOpen = false">Close task</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
+        </div>
+      </section>
+
+      <section class="flex flex-col gap-4">
+        <h3 class="font-heading text-xl font-bold">Product — ProductIcon</h3>
+        <p class="text-muted-foreground text-sm">
+          The kit's product mark, rendering the Sentec suite above by slug, code or
+          name: a tile with the pictogram, the glyph alone in the current colour, or
+          the glyph in the flat hue for print. Tiles follow the theme by default, which
+          the kit's light-only component cannot do; <code class="text-xs">mode</code>
+          pins one. Toggle the theme above to watch the unpinned tiles switch.
+        </p>
+        <div class="flex flex-col gap-5">
+          <div class="flex flex-col gap-2">
+            <h4 class="text-muted-foreground text-sm font-semibold">Sizes — 64 · 40 · 34 · 24</h4>
+            <div class="flex items-end gap-3.5">
+              <ProductIcon v-for="px in productSizes" :key="px" :product="demoProduct" :size="px" />
+            </div>
+          </div>
+          <div class="flex flex-col gap-2">
+            <h4 class="text-muted-foreground text-sm font-semibold">Light tiles — core products</h4>
+            <div class="flex flex-wrap gap-3">
+              <ProductIcon v-for="p in coreProducts" :key="p.slug" :product="p.code" mode="light" :size="40" :label="p.name" />
+            </div>
+          </div>
+          <div class="flex flex-col gap-2 rounded-xl px-5 py-4" style="background:#2B2D31">
+            <h4 class="text-sm font-semibold text-[#C3C5CA]">Dark tiles · glyph in currentColor · mono</h4>
+            <div class="flex flex-wrap items-center gap-3">
+              <ProductIcon v-for="p in coreProducts" :key="p.slug" :product="p.code" mode="dark" :size="40" :label="p.name" />
+              <span class="text-product-pms-dark inline-flex">
+                <ProductIcon product="PMS" variant="glyph" :size="28" />
+              </span>
+              <ProductIcon product="SLS" variant="mono" :size="28" />
+            </div>
+          </div>
         </div>
       </section>
 

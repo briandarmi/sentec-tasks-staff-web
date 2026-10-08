@@ -177,7 +177,7 @@ onMounted(load)
                here on the queue where the work actually gets picked up. -->
           <Button
             v-if="tab === 'queue' && canClaimCard(task)"
-            variant="outline"
+            variant="secondary"
             size="sm"
             class="min-h-11 w-full"
             :disabled="claimingId === task.id"

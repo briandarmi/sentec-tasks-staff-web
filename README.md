@@ -124,6 +124,15 @@ ships. A change to any file above belongs in both apps in the same change, and
 `pnpm check:shared` fails when the copies differ (it skips when the sibling
 repo is not checked out, so a standalone clone still builds).
 
+Since 2026-10-08 the check also covers the brand layer, which is identical
+across all four Sentec consoles, not only this pair: `app/assets/css/tailwind.css`,
+the brand marks (`SentinelTechLogo.vue`, `SentinelTechIcon.vue`,
+`ProductIcon.vue`, `AppLogo.vue`), `app/utils/sentec-products.ts` and
+`app/pages/design-system.vue`. The one per-app brand fact,
+`app/utils/app-product.ts`, is deliberately not checked — it is `null` here
+because Sentec Tasks has no entry in the design system's product roster yet,
+so the app wears the Sentinel Tech icon mark in Sentinel Blue.
+
 ## Screens
 
 | Route         | What it is                                                      |

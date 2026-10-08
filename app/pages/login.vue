@@ -203,7 +203,7 @@ async function followApiLink(url: string) {
           <AlertDescription>{{ endedNotice.message }}</AlertDescription>
         </Alert>
 
-        <Button class="min-h-11 w-full" variant="outline" type="button" :disabled="Boolean(busy)" @click="continueWithGoogle">
+        <Button class="min-h-11 w-full" variant="secondary" type="button" :disabled="Boolean(busy)" @click="continueWithGoogle">
           <svg class="size-4" viewBox="0 0 48 48" aria-hidden="true">
             <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
             <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
@@ -256,7 +256,7 @@ async function followApiLink(url: string) {
             </Button>
           </div>
 
-          <Button variant="ghost" size="sm" class="w-full" type="button" @click="linkRequestedFor = ''">
+          <Button variant="secondary" size="sm" class="w-full" type="button" @click="linkRequestedFor = ''">
             Use a different address
           </Button>
         </div>
@@ -302,7 +302,7 @@ async function followApiLink(url: string) {
             <p class="text-center text-xs text-muted-foreground">
               Passwords are being phased out. The emailed link and Google work for every active account.
             </p>
-            <Button variant="ghost" size="sm" class="w-full" type="button" @click="showPassword = false">
+            <Button variant="secondary" size="sm" class="w-full" type="button" @click="showPassword = false">
               <MailIcon class="size-3.5" />
               Email me a sign-in link instead
             </Button>
@@ -312,7 +312,7 @@ async function followApiLink(url: string) {
               <MailIcon class="size-4" />
               {{ busy === 'link' ? 'Sending…' : 'Email me a sign-in link' }}
             </Button>
-            <Button variant="ghost" size="sm" class="w-full" type="button" @click="showPassword = true">
+            <Button variant="secondary" size="sm" class="w-full" type="button" @click="showPassword = true">
               <KeyRoundIcon class="size-3.5" />
               Use a password instead
             </Button>
@@ -339,7 +339,7 @@ async function followApiLink(url: string) {
                 v-for="demo in group.logins"
                 :key="demo.email"
                 type="button"
-                variant="outline"
+                variant="secondary"
                 size="sm"
                 class="justify-start text-xs"
                 @click="autofill(demo.email, demo.password)"
@@ -368,7 +368,7 @@ async function followApiLink(url: string) {
             v-for="identity in googleConsent?.identities ?? []"
             :key="identity.email"
             type="button"
-            variant="ghost"
+            variant="secondary"
             class="h-auto w-full justify-start px-2 py-2 text-left"
             @click="chooseGoogleIdentity(identity)"
           >
@@ -382,7 +382,7 @@ async function followApiLink(url: string) {
           </Button>
         </div>
         <DialogFooter>
-          <Button variant="outline" type="button" @click="chooseGoogleIdentity('cancel')">Cancel</Button>
+          <Button variant="secondary" type="button" @click="chooseGoogleIdentity('cancel')">Cancel</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

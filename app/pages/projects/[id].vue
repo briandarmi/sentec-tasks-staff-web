@@ -538,17 +538,17 @@ onMounted(load)
       </Alert>
 
       <div v-if="rights.manages" class="flex flex-wrap gap-2">
-        <Button variant="outline" class="min-h-11 flex-1" :disabled="acting" @click="openEdit">
+        <Button variant="secondary" class="min-h-11 flex-1" :disabled="acting" @click="openEdit">
           <PencilIcon class="h-4 w-4" /> Edit
         </Button>
         <template v-if="isActive">
           <Button class="min-h-11 flex-1" :disabled="acting" @click="completeOpen = true">
             <CheckCircle2Icon class="h-4 w-4" /> Complete
           </Button>
-          <Button variant="outline" class="min-h-11 flex-1" :disabled="acting || handOverCandidates.length === 0" @click="handOverOpen = true">
+          <Button variant="secondary" class="min-h-11 flex-1" :disabled="acting || handOverCandidates.length === 0" @click="handOverOpen = true">
             <ArrowLeftRightIcon class="h-4 w-4" /> Hand over
           </Button>
-          <Button variant="outline" class="min-h-11 flex-1 text-destructive" :disabled="acting" @click="cancelOpen = true">
+          <Button variant="secondary" tone="destructive" class="min-h-11 flex-1" :disabled="acting" @click="cancelOpen = true">
             <XCircleIcon class="h-4 w-4" /> Cancel
           </Button>
         </template>
@@ -593,7 +593,7 @@ onMounted(load)
               <TaskCard :task="task" :mine="task.assignment?.kind === 'STAFF' && task.assignment.staffId === session.userId.value" />
               <Button
                 v-if="canMoveCard(task)"
-                variant="outline"
+                variant="secondary"
                 size="sm"
                 class="min-h-11 w-full"
                 :disabled="acting"
@@ -613,7 +613,7 @@ onMounted(load)
           <Button v-if="rights.canCreateTask" class="min-h-11 flex-1" @click="navigateTo({ path: '/tasks/new', query: { projectId: id } })">
             <PlusIcon class="h-4 w-4" /> New task
           </Button>
-          <Button v-if="rights.manages && isActive" variant="outline" class="min-h-11 flex-1" @click="openAddTask">
+          <Button v-if="rights.manages && isActive" variant="secondary" class="min-h-11 flex-1" @click="openAddTask">
             <LayoutListIcon class="h-4 w-4" /> Add existing task
           </Button>
         </div>
@@ -629,7 +629,7 @@ onMounted(load)
             <div v-if="rights.manages" class="flex justify-end">
               <Button
                 size="sm"
-                variant="ghost"
+                variant="secondary"
                 class="h-9 text-muted-foreground hover:text-destructive"
                 :disabled="Boolean(removingTaskId)"
                 :aria-busy="removingTaskId === task.id"
@@ -656,7 +656,7 @@ onMounted(load)
             <AlertTitle>Couldn't load the team</AlertTitle>
             <AlertDescription class="space-y-2">
               <p>{{ peopleError }}</p>
-              <Button size="sm" variant="outline" @click="peopleLoaded = false; loadPeople()">Retry</Button>
+              <Button size="sm" variant="secondary" @click="peopleLoaded = false; loadPeople()">Retry</Button>
             </AlertDescription>
           </Alert>
           <div v-else class="flex items-end gap-2">
@@ -718,7 +718,7 @@ onMounted(load)
                 </Select>
                 <Button
                   size="sm"
-                  variant="ghost"
+                  variant="secondary"
                   class="h-9 shrink-0 text-muted-foreground hover:text-destructive"
                   :disabled="Boolean(memberBusyId)"
                   :aria-busy="memberBusyId === member.staffId"
@@ -773,7 +773,7 @@ onMounted(load)
             </div>
             <p v-if="editStart && editEnd && editEnd < editStart" class="text-xs text-destructive">The end date is before the start date.</p>
             <DialogFooter>
-              <Button type="button" variant="outline" :disabled="isSaving" @click="editOpen = false">Cancel</Button>
+              <Button type="button" variant="secondary" :disabled="isSaving" @click="editOpen = false">Cancel</Button>
               <Button type="submit" :disabled="!canSaveEdit" :aria-busy="isSaving">{{ isSaving ? 'Saving…' : 'Save' }}</Button>
             </DialogFooter>
           </form>
@@ -833,7 +833,7 @@ onMounted(load)
             </Select>
           </div>
           <DialogFooter>
-            <Button variant="outline" :disabled="isHandingOver" @click="handOverOpen = false">Cancel</Button>
+            <Button variant="secondary" :disabled="isHandingOver" @click="handOverOpen = false">Cancel</Button>
             <Button :disabled="!handOverTo || isHandingOver" :aria-busy="isHandingOver" @click="handOver">{{ isHandingOver ? 'Handing over…' : 'Hand over' }}</Button>
           </DialogFooter>
         </DialogContent>
@@ -876,7 +876,7 @@ onMounted(load)
             </button>
           </div>
           <DialogFooter>
-            <Button variant="outline" :disabled="Boolean(addingTaskId)" @click="addTaskOpen = false">Close</Button>
+            <Button variant="secondary" :disabled="Boolean(addingTaskId)" @click="addTaskOpen = false">Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -277,7 +277,7 @@ const SCOPE_TABS: Chip[] = [
         <LayersIcon class="h-3.5 w-3.5" /> Group by source
       </button>
       <span v-else />
-      <Button v-if="hasFilters" variant="outline" size="sm" @click="clearFilters">
+      <Button v-if="hasFilters" variant="secondary" size="sm" @click="clearFilters">
         <FilterXIcon class="h-4 w-4" /> Clear filters
       </Button>
     </div>
@@ -297,7 +297,7 @@ const SCOPE_TABS: Chip[] = [
       title="No tasks match"
       :description="hasFilters ? 'Try clearing a filter or a different search.' : caps.isLeader.value ? 'Nothing to show at this property yet. Project tasks live in their projects.' : 'Nothing you can see at this property right now: your claimed work, your department\'s and the property\'s unclaimed tasks, your team pools, steps handed to you, and your projects\' tasks (those show in the project).'"
     >
-      <Button v-if="hasFilters" variant="outline" size="sm" @click="clearFilters">Clear filters</Button>
+      <Button v-if="hasFilters" variant="secondary" size="sm" @click="clearFilters">Clear filters</Button>
     </EmptyState>
 
     <template v-else>
@@ -328,7 +328,7 @@ const SCOPE_TABS: Chip[] = [
 
       <Button
         v-if="nextCursor"
-        variant="outline"
+        variant="secondary"
         class="w-full"
         :disabled="isLoadingMore"
         @click="loadMore"

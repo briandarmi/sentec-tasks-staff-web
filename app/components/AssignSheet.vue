@@ -142,7 +142,7 @@ function choose(member: AssignableStaff) {
 
       <DrawerFooter>
         <DrawerClose as-child>
-          <Button variant="outline" class="w-full">Cancel</Button>
+          <Button variant="secondary" class="w-full">Cancel</Button>
         </DrawerClose>
       </DrawerFooter>
     </DrawerContent>

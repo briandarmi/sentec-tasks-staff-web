@@ -104,7 +104,7 @@ onMounted(load)
       <AlertTitle>Could not load offers</AlertTitle>
       <AlertDescription class="space-y-2">
         <p>{{ loadError }}</p>
-        <Button size="sm" variant="outline" @click="load">Retry</Button>
+        <Button size="sm" variant="secondary" @click="load">Retry</Button>
       </AlertDescription>
     </Alert>
 
@@ -143,7 +143,7 @@ onMounted(load)
               {{ acceptingId === offer.id ? 'Accepting…' : 'Accept' }}
             </Button>
             <Button
-              variant="outline"
+              variant="secondary"
               class="min-h-11 flex-1"
               :disabled="Boolean(acceptingId || decliningId)"
               :aria-busy="decliningId === offer.id"

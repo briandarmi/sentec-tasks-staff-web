@@ -90,7 +90,7 @@ async function cancel() {
         </span>
         <Button
           size="sm"
-          variant="ghost"
+          variant="secondary"
           class="shrink-0 text-muted-foreground hover:text-destructive"
           :disabled="isCancelling"
           :aria-busy="isCancelling"
@@ -109,7 +109,7 @@ async function cancel() {
           :aria-label="`Staff member to offer ${task.title} to`"
         />
         <Textarea v-model="note" rows="2" maxlength="500" class="resize-none" placeholder="Note (optional)" />
-        <Button variant="outline" class="min-h-11 w-full" :disabled="!toUserId || isSending" :aria-busy="isSending" @click="send">
+        <Button variant="secondary" class="min-h-11 w-full" :disabled="!toUserId || isSending" :aria-busy="isSending" @click="send">
           {{ isSending ? 'Sending…' : 'Send offer' }}
         </Button>
       </template>

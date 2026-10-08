@@ -33,6 +33,15 @@ const SHARED = [
   'tests/api-fidelity.spec.ts',
   'tests/sign-in.spec.ts',
   'tests/session-cookie.spec.ts',
+  // Brand layer — identical across all four Sentec consoles, not only this pair.
+  // The one per-app brand fact, app/utils/app-product.ts, is deliberately not here.
+  'app/assets/css/tailwind.css',
+  'app/components/AppLogo.vue',
+  'app/components/ProductIcon.vue',
+  'app/components/SentinelTechIcon.vue',
+  'app/components/SentinelTechLogo.vue',
+  'app/pages/design-system.vue',
+  'app/utils/sentec-products.ts',
 ]
 
 if (!existsSync(sibling)) {

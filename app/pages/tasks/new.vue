@@ -466,7 +466,7 @@ onMounted(load)
         <AlertTitle>Couldn't create the task</AlertTitle>
         <AlertDescription class="space-y-2">
           <p>{{ errorMessage }}</p>
-          <Button v-if="isLoading === false && items.length === 0" size="sm" variant="outline" @click="load">Retry</Button>
+          <Button v-if="isLoading === false && items.length === 0" size="sm" variant="secondary" @click="load">Retry</Button>
         </AlertDescription>
       </Alert>
 
@@ -623,7 +623,7 @@ onMounted(load)
               <AlertTitle>Couldn't load teams</AlertTitle>
               <AlertDescription class="space-y-2">
                 <p>{{ teamsError }}</p>
-                <Button size="sm" variant="outline" @click="loadTeams">Retry</Button>
+                <Button size="sm" variant="secondary" @click="loadTeams">Retry</Button>
               </AlertDescription>
             </Alert>
             <Select v-else v-model="assigneeTeamId">
@@ -687,7 +687,7 @@ onMounted(load)
               <p class="text-sm font-semibold text-foreground">Extra checklist steps</p>
               <p class="text-xs text-muted-foreground">The item's own checklist is added automatically — list only what you're adding.</p>
             </div>
-            <Button size="sm" variant="outline" type="button" @click="addChecklistStep">
+            <Button size="sm" variant="secondary" type="button" @click="addChecklistStep">
               <PlusIcon class="h-4 w-4" /> Add
             </Button>
           </div>

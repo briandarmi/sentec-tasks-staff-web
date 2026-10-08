@@ -38,6 +38,24 @@ export { default as Button } from "./Button.vue"
  * on white and has no fill to darken on hover. shadcn's own `ghost` is a
  * different role (a neutral subtle button, used here for icon buttons) and
  * keeps its neutral treatment.
+ *
+ * There is no `outline` variant. The kit's bordered white button (its
+ * "secondary") was retired from these consoles on 2026-10-08: at rest it reads
+ * like a field or a card rather than something to press, so secondary actions,
+ * cancels and icon buttons use `secondary` — a filled neutral that darkens on
+ * hover — instead. `field` keeps the bordered look for the one place it is
+ * right: combobox and date-picker triggers, which ARE inputs and should match
+ * the select trigger beside them. It is never an action.
+ *
+ * `secondary` is TONAL (2026-10-08): its background follows the colour the
+ * action carries, not a flat grey. By default that is the primary — Sentinel
+ * Blue's tint under blue-700 — and `tone="destructive" | "success" |
+ * "warning"` swaps in that tone's tint-and-text pair, the same pairs Badge,
+ * Alert and Toast use. `tone="neutral"` is the plain grey for an action with no
+ * colour of its own. Hover and press pull the tint toward its hue
+ * (--*-tint-hover / --*-tint-active) so a tinted button deepens rather than
+ * greys. `tertiary` and `ghost` read `tone` too, so a destructive text action
+ * no longer needs a `text-destructive` class.
  */
 export const buttonVariants = cva(
   "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-lg font-semibold outline-none transition-[background-color,border-color,color,box-shadow,scale] duration-[120ms] ease-ds active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50 disabled:active:scale-100 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 focus-visible:border-ring focus-visible:ring-primary-tint focus-visible:ring-[3px] aria-invalid:border-destructive aria-invalid:ring-danger-tint",
@@ -48,10 +66,15 @@ export const buttonVariants = cva(
           "bg-primary text-primary-foreground hover:bg-primary-hover active:bg-primary-active",
         destructive:
           "bg-destructive text-white hover:bg-destructive-hover active:bg-destructive-active focus-visible:ring-danger-tint",
-        outline:
-          "border border-[var(--st-grey-300)] bg-background text-foreground shadow-ds-sm hover:bg-muted active:bg-accent dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
+        /* Not an action: the bordered, select-like trigger for comboboxes and
+           date pickers. The old `outline` action button was retired on
+           2026-10-08 — see the note above. */
+        field:
+          "border border-input bg-transparent font-normal text-foreground hover:bg-muted active:bg-accent dark:bg-input/30 dark:hover:bg-input/50",
+        /* Tonal: the tint of its tone under that tone's darkened text, Sentinel
+           Blue unless `tone` says otherwise. The plain grey is `tone="neutral"`. */
         secondary:
-          "bg-secondary text-secondary-foreground hover:bg-secondary-hover active:bg-secondary-active",
+          "bg-primary-tint text-primary-tint-foreground hover:bg-primary-tint-hover active:bg-primary-tint-active",
         success:
           "bg-success text-success-foreground hover:bg-success-hover active:bg-success-active",
         warning:
@@ -70,10 +93,32 @@ export const buttonVariants = cva(
         "icon-sm": "size-9 p-0",
         "icon-lg": "size-12 p-0",
       },
+      /* The colour an unfilled button carries. Only `secondary`, `tertiary`
+         and `ghost` read it (below); the filled variants have a variant each. */
+      tone: {
+        primary: "",
+        neutral: "",
+        destructive: "",
+        success: "",
+        warning: "",
+      },
     },
+    compoundVariants: [
+      { variant: "secondary", tone: "neutral", class: "bg-secondary text-secondary-foreground hover:bg-secondary-hover active:bg-secondary-active" },
+      { variant: "secondary", tone: "destructive", class: "bg-danger-tint text-danger-tint-foreground hover:bg-danger-tint-hover active:bg-danger-tint-active focus-visible:ring-danger-tint" },
+      { variant: "secondary", tone: "success", class: "bg-success-tint text-success-tint-foreground hover:bg-success-tint-hover active:bg-success-tint-active" },
+      { variant: "secondary", tone: "warning", class: "bg-warning-tint text-warning-tint-foreground hover:bg-warning-tint-hover active:bg-warning-tint-active focus-visible:ring-warning-tint" },
+      { variant: "tertiary", tone: "destructive", class: "text-danger-tint-foreground hover:bg-danger-tint active:bg-danger-tint-hover" },
+      { variant: "tertiary", tone: "success", class: "text-success-tint-foreground hover:bg-success-tint active:bg-success-tint-hover" },
+      { variant: "tertiary", tone: "warning", class: "text-warning-tint-foreground hover:bg-warning-tint active:bg-warning-tint-hover" },
+      { variant: "ghost", tone: "destructive", class: "text-destructive hover:bg-danger-tint hover:text-danger-tint-foreground dark:hover:bg-danger-tint" },
+      { variant: "ghost", tone: "success", class: "text-success hover:bg-success-tint hover:text-success-tint-foreground dark:hover:bg-success-tint" },
+      { variant: "ghost", tone: "warning", class: "text-warning hover:bg-warning-tint hover:text-warning-tint-foreground dark:hover:bg-warning-tint" },
+    ],
     defaultVariants: {
       variant: "default",
       size: "default",
+      tone: "primary",
     },
   },
 )

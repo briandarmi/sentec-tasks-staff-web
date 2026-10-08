@@ -162,7 +162,7 @@ onMounted(load)
           <TaskCard :task="task" />
           <Button
             v-if="canClaimCard(task)"
-            variant="outline"
+            variant="secondary"
             size="sm"
             class="min-h-11 w-full"
             :disabled="claimingId === task.id"

@@ -115,7 +115,7 @@ async function remove(attachment: TaskAttachment) {
       <CardTitle class="flex items-center gap-2 text-sm">
         <PaperclipIcon class="h-4 w-4" /> Attachments
       </CardTitle>
-      <Button variant="outline" size="sm" :disabled="isAttaching" @click="attachOpen = true">Link URL</Button>
+      <Button variant="secondary" size="sm" :disabled="isAttaching" @click="attachOpen = true">Link URL</Button>
     </CardHeader>
     <CardContent class="space-y-2">
       <Alert v-if="errorMessage" variant="destructive">
@@ -147,7 +147,7 @@ async function remove(attachment: TaskAttachment) {
         <Badge variant="secondary" class="shrink-0 text-[10px]">{{ attachment.filetype }}</Badge>
         <Button
           size="sm"
-          variant="ghost"
+          variant="secondary"
           class="shrink-0 text-muted-foreground hover:text-destructive"
           :disabled="Boolean(removingId)"
           :aria-busy="removingId === attachment.id"

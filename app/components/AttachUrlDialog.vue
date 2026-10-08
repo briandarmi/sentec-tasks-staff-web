@@ -61,7 +61,7 @@ function submit() {
       </form>
 
       <DialogFooter>
-        <Button variant="outline" :disabled="busy" @click="emit('update:open', false)">Cancel</Button>
+        <Button variant="secondary" :disabled="busy" @click="emit('update:open', false)">Cancel</Button>
         <Button :disabled="busy || !url.trim()" @click="submit">
           {{ busy ? 'Attaching…' : 'Attach' }}
         </Button>

@@ -243,7 +243,7 @@ async function addSteps() {
             <template v-else>Tick steps off, hand one to a colleague, or add what the item's own list missed.</template>
           </CardDescription>
         </div>
-        <Button v-if="access.canManage" size="sm" variant="outline" type="button" class="shrink-0" @click="addOpen = true">
+        <Button v-if="access.canManage" size="sm" variant="secondary" type="button" class="shrink-0" @click="addOpen = true">
           <PlusIcon class="h-4 w-4" /> Add
         </Button>
       </div>
@@ -351,7 +351,7 @@ async function addSteps() {
                   </SelectContent>
                 </Select>
                 <Button
-                  variant="outline"
+                  variant="secondary"
                   :disabled="Boolean(stepBusy) || assigneeDraft === (openItem.assignedStaffId ?? '')"
                   :aria-busy="stepBusy === 'assign'"
                   @click="assign(assigneeDraft || null)"
@@ -365,7 +365,7 @@ async function addSteps() {
             </div>
 
             <Separator />
-            <Button variant="outline" class="min-h-11 w-full text-destructive" :disabled="Boolean(stepBusy)" :aria-busy="stepBusy === 'remove'" @click="remove">
+            <Button variant="secondary" tone="destructive" class="min-h-11 w-full" :disabled="Boolean(stepBusy)" :aria-busy="stepBusy === 'remove'" @click="remove">
               {{ stepBusy === 'remove' ? 'Removing…' : 'Remove this step' }}
             </Button>
           </template>
@@ -373,7 +373,7 @@ async function addSteps() {
 
         <DrawerFooter>
           <DrawerClose as-child>
-            <Button variant="ghost" class="w-full">Close</Button>
+            <Button variant="secondary" class="w-full">Close</Button>
           </DrawerClose>
         </DrawerFooter>
       </DrawerContent>
@@ -401,7 +401,7 @@ async function addSteps() {
         </div>
 
         <DialogFooter>
-          <Button variant="outline" :disabled="isAdding" @click="addOpen = false">Cancel</Button>
+          <Button variant="secondary" :disabled="isAdding" @click="addOpen = false">Cancel</Button>
           <Button :disabled="!addLabels.length || Boolean(addProblem) || isAdding" :aria-busy="isAdding" @click="addSteps">
             {{ isAdding ? 'Adding…' : 'Add steps' }}
           </Button>
