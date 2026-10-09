@@ -138,10 +138,10 @@ so the app wears the Sentinel Tech icon mark in Sentinel Blue.
 | Route         | What it is                                                      |
 | ------------- | --------------------------------------------------------------- |
 | `/`           | My work — assigned to me, plus my department's unclaimed queue   |
-| `/tasks`      | Full list; server-side filters live in the URL, paging is keyset; queue chips carry server totals; optional group-by-source lanes, most urgent lane first |
+| `/tasks`      | List and board in one (since 2026-10-09): two selects side by side — Status lists the property's columns (a pick is the API's `columnId` filter; every option carries a live total; plain statuses where no board exists) and Show narrows to To claim / Mine / Helping / Picked up late / Late with server totals. A Sort select orders the rows — most urgent first (default), highest priority, pick-up deadline, finish deadline, newest, oldest, by status, by room, or grouped by source app (one lane per originating app, most urgent lane first); the API's own orders drive the cursor, the rest apply over the loaded rows. Filters and the sort live in the URL, paging is keyset; one-tap Claim inside every card nobody personally holds, a tonal button tinted in the card's traffic-light colour |
 | `/tasks/[id]` | Detail: room-first header, project chip, claim (pool-aware), assign, return, delegate, helpers, checklist steps (tick / note / hand over / add / remove), submit / review (with the other pending reviews), move, "who held it" time split, comment, attach & upload |
 | `/tasks/new`  | Raise a task, with a live preview off the API's own resolver; start from a shared template; "Repeat" turns it into a recurring task; `?projectId=` raises it inside a project |
-| `/board`      | Board view of the property's columns (project tasks are not on it) |
+| `/board`      | Redirects to `/tasks` — the board merged into the list on 2026-10-09 |
 | `/projects`   | Projects I belong to (every project, for admins), one status at a time, with progress, late and needs-manager flags; leaders and admins open new ones |
 | `/projects/[id]` | One project: header and progress, edit / complete / cancel / reopen / hand over for the manager or an admin; Board (the property's columns, the project's cards), Tasks (new, add existing, remove) and Members (levels, auto-joined, add / remove) |
 | `/recurring`  | "Repeats": my recurring tasks — schedule, next and last run, pause / resume, edit, archive; the scheduler's `lastError` when it paused one |
@@ -453,9 +453,9 @@ it, all in `app/utils/task-signals.ts` (this app's own; the shared
 - **Red, amber and green mean one thing: how urgently a task needs a person.**
   Three things can raise it and each has its own icon, so the colour says how
   much and the icon says why: the running clock (`ClockAlert` once late,
-  amber inside the last 30 minutes), the priority flag (`Urgent` red, `High
-  priority` amber, `Low priority` grey, Normal carries no chip) and the
-  escalation siren (`Escalated`, `Escalated · level N`). A card's left edge
+  amber inside the last 30 minutes), the priority (a flame for `Urgent`, red; a
+  flag for `High priority`, amber; a down arrow for `Low priority`, grey;
+  Normal carries no chip) and the escalation siren (`Escalated`, `Escalated · level N`). A card's left edge
   is the hottest of them while the work runs (NEW, IN_PROGRESS, PENDING);
   submitted and closed work has no edge, only a stamped verdict chip
   (`Finished late`, `Picked up late`, `On time`). Lists sort hottest first,
@@ -466,8 +466,8 @@ it, all in `app/utils/task-signals.ts` (this app's own; the shared
   progress a play mark, In review an eye (the API's SUBMITTED, kept as the
   tooltip), On hold a pause, Finished a tick, Verified a double tick,
   Cancelled a ban sign — and Cancelled is grey, not red. The board columns,
-  the move sheet, the timeline nodes and the status filter chips all wear the
-  same icon as the pill. Projects follow the same rule (`project-ui.ts`).
+  the move sheet, the timeline nodes and the Status select's options all wear
+  the same icon as the pill. Projects follow the same rule (`project-ui.ts`).
 - **Plain words for the signals, product verbs for the actions.** The two
   SLA clocks are "Pick up by" and "Finish by" everywhere (`CLOCK_WORDS`);
   "SLA breached" is "Late"; the Tasks scope chips read "Picked up late" and
@@ -500,11 +500,12 @@ System stays untouched, per the standing decision:
   leaders `In review (2)`) from `limit=1` list calls read for `meta.total`;
   a failed count leaves the plain label. "To claim" is the remote's "Team pool"
   and stays a client-side view — the API has no unclaimed filter.
-- **Group by source** is a display toggle over the loaded rows (client state,
-  never in the URL): one lane per originating app, the lane holding a breached
-  task first, then due-soon, then the rest; unregistered codes fold into
-  "Other". It hides itself when the registry fetch failed. The pure grouping
-  lives in `app/utils/source-lanes.ts`, pinned by `tests/source-lanes.spec.ts`.
+- **Group by source** became one option of the Tasks page's Sort select on
+  2026-10-09 ("Grouped by source app", `sort=source` in the URL): one lane per
+  originating app, the lane holding a breached task first, then due-soon, then
+  the rest; unregistered codes fold into "Other". The option is withheld when
+  the registry fetch failed. The pure grouping lives in
+  `app/utils/source-lanes.ts`, pinned by `tests/source-lanes.spec.ts`.
 - **Review is a sign-off slip**: submitted at `HH:MM · on time / late` from the
   verdict stamped at submission, "Request changes" reads as the non-happy path,
   and up to three other SUBMITTED tasks are listed beneath as "Also pending"

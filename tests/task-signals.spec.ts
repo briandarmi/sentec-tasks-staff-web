@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { ArrowDownIcon, FlagIcon, FlameIcon } from '@lucide/vue'
 import {
   CLOCK_WORDS,
   HEAT_RANK,
@@ -140,10 +141,10 @@ describe('the clock in words', () => {
 })
 
 describe('priority and escalation', () => {
-  it('flags urgent red, high amber, low grey and normal not at all', () => {
-    expect(prioritySignal('URGENT')).toMatchObject({ heat: 'late', label: 'Urgent' })
-    expect(prioritySignal('HIGH')).toMatchObject({ heat: 'soon', label: 'High priority' })
-    expect(prioritySignal('LOW')).toMatchObject({ heat: 'none', label: 'Low priority' })
+  it('marks urgent red with a flame, high amber with a flag, low grey, and normal not at all', () => {
+    expect(prioritySignal('URGENT')).toMatchObject({ heat: 'late', label: 'Urgent', icon: FlameIcon })
+    expect(prioritySignal('HIGH')).toMatchObject({ heat: 'soon', label: 'High priority', icon: FlagIcon })
+    expect(prioritySignal('LOW')).toMatchObject({ heat: 'none', label: 'Low priority', icon: ArrowDownIcon })
     expect(prioritySignal('NORMAL')).toBeNull()
   })
 

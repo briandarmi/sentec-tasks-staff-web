@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Component } from 'vue'
-import { ClockAlertIcon, FilterXIcon, HandIcon, LayersIcon, LayoutListIcon, RefreshCwIcon, SearchIcon, UserRoundIcon, UsersIcon } from '@lucide/vue'
+import { AlarmClockIcon, CalendarArrowDownIcon, CalendarArrowUpIcon, ClockAlertIcon, DoorOpenIcon, FilterIcon, FilterXIcon, FlagIcon, FlameIcon, HandIcon, LayersIcon, LayoutListIcon, ListOrderedIcon, RefreshCwIcon, SearchIcon, TimerIcon, UserRoundIcon, UsersIcon } from '@lucide/vue'
 import { useTasksApi, type TaskQuery } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
 import { useSourceApps } from '~/composables/useSourceApps'
 import { useNow } from '~/composables/useNow'
-import type { TaskListItem } from '~/utils/clientFakeApi'
+import type { Board, BoardColumn, TaskListItem } from '~/utils/clientFakeApi'
 import { groupIntoLanes } from '~/utils/source-lanes'
-import { STATUS_SIGNAL, compareByHeat } from '~/utils/task-signals'
+import { isClaimable } from '~/utils/task-ui'
+import { SELECT_EMPTY, fromSelectValue, toSelectValue } from '~/utils/select-empty'
+import { PRIORITY_RANK, STATUS_SIGNAL, compareByHeat, statusSignal } from '~/utils/task-signals'
 
 definePageMeta({ title: 'Tasks' })
 
@@ -25,17 +27,83 @@ void sourceApps.ensureLoaded()
  * Filters live in the URL, not in component state — a filtered view is
  * shareable and survives a refresh or back-navigation from a task detail.
  *
- * Every chip maps to a REAL list parameter (status, assignedStaffId,
+ * Every chip maps to a REAL list parameter (columnId, status, assignedStaffId,
  * helping=1, responseSlaStatus/resolutionSlaStatus). The two exceptions are
  * labeled where they happen: "To claim" narrows the fetched page to pool rows
  * client-side (the API's staff auto-scope already returns own + unclaimed
  * work, but has no unclaimed-only parameter), and the search box filters the
  * loaded page only — the API has no free-text search. The queue chips also
  * carry the server's total for their filter (see `refreshCounts`).
+ *
+ * Since 2026-10-09 this page is the board as well: the property's columns are
+ * the Status select (`column=<id>`, the API's columnId filter, each option
+ * with a live total), so the one-column-at-a-time view the phone board
+ * offered is a pick here, with the search, the Show select, the Sort select,
+ * paging and the one-tap Claim kept. Selects rather than scrolling chip
+ * strips: every option is visible at once, nothing hides off the right edge.
+ * A property without a provisioned board falls back to plain statuses;
+ * `status=` in an incoming link still works either way.
+ *
+ * Sort is in the URL too (`sort=`), because most orders are the API's own
+ * (`sort`/`order`, which also drive the cursor) and a shared link should open
+ * the same way. The few the API cannot do — urgency, priority, room, and the
+ * grouping by source app — are applied over the loaded rows instead.
  */
 const search = ref(String(route.query.q ?? ''))
 const status = computed(() => String(route.query.status ?? ''))
 const scope = computed(() => String(route.query.scope ?? ''))
+const column = computed(() => String(route.query.column ?? ''))
+
+// ── sort ────────────────────────────────────────────────────────────────────
+
+type SortKey = 'urgency' | 'priority' | 'pickup' | 'finish' | 'newest' | 'oldest' | 'status' | 'room' | 'source'
+
+interface SortOption {
+  value: SortKey
+  label: string
+  icon: Component
+  /** The API's own order, which also drives the cursor paging. */
+  server?: Pick<TaskQuery, 'sort' | 'order'>
+  /** An order the API has no parameter for, applied over the loaded rows. */
+  client?: (a: TaskListItem, b: TaskListItem, nowMs: number) => number
+}
+
+/** Rooms in natural order (0710 before 1204, Floor 7 before Floor 12), no-room last, hottest first within a room. */
+const byRoom: SortOption['client'] = (a, b, nowMs) => {
+  const ra = a.roomNumber ?? ''
+  const rb = b.roomNumber ?? ''
+  if (!ra !== !rb) return ra ? -1 : 1
+  return ra.localeCompare(rb, undefined, { numeric: true, sensitivity: 'base' }) || compareByHeat(a, b, nowMs)
+}
+
+const byPriority: SortOption['client'] = (a, b, nowMs) => PRIORITY_RANK[b.priority] - PRIORITY_RANK[a.priority] || compareByHeat(a, b, nowMs)
+
+const SORTS: SortOption[] = [
+  { value: 'urgency', label: 'Most urgent first', icon: FlameIcon, client: compareByHeat },
+  { value: 'priority', label: 'Highest priority first', icon: FlagIcon, client: byPriority },
+  { value: 'pickup', label: 'Pick-up deadline', icon: AlarmClockIcon, server: { sort: 'responseDueAt', order: 'asc' } },
+  { value: 'finish', label: 'Finish deadline', icon: TimerIcon, server: { sort: 'resolutionDueAt', order: 'asc' } },
+  { value: 'newest', label: 'Newest first', icon: CalendarArrowDownIcon, server: { sort: 'createdAt', order: 'desc' } },
+  { value: 'oldest', label: 'Oldest first', icon: CalendarArrowUpIcon, server: { sort: 'createdAt', order: 'asc' } },
+  { value: 'status', label: 'By status', icon: ListOrderedIcon, server: { sort: 'status', order: 'asc' } },
+  { value: 'room', label: 'By room', icon: DoorOpenIcon, client: byRoom },
+  // One lane per originating app, the lane holding a fire on top; hottest first within a lane.
+  { value: 'source', label: 'Grouped by source app', icon: LayersIcon, client: compareByHeat },
+]
+
+const sortKey = computed<SortKey>(() => {
+  const value = String(route.query.sort ?? '')
+  return SORTS.some(option => option.value === value) ? value as SortKey : 'urgency'
+})
+const sort = computed(() => SORTS.find(option => option.value === sortKey.value)!)
+
+/**
+ * Grouping by source needs the registry's names; while it is unavailable the
+ * option is withheld and a `sort=source` link reads as the default order.
+ */
+const canGroupBySource = computed(() => sourceApps.status.value !== 'failed')
+const sortOptions = computed(() => SORTS.filter(option => option.value !== 'source' || canGroupBySource.value))
+const grouped = computed(() => sortKey.value === 'source' && canGroupBySource.value)
 
 const tasks = ref<TaskListItem[]>([])
 const totalCount = ref(0)
@@ -46,24 +114,71 @@ const errorMessage = ref('')
 
 const PAGE_SIZE = 20
 
-const hasFilters = computed(() => Boolean(status.value || scope.value || search.value.trim()))
+const hasFilters = computed(() => Boolean(status.value || scope.value || column.value || search.value.trim()))
 
-/** Write one filter into the URL, dropping the cursor so paging restarts. */
-function setFilter(key: string, value: string) {
+/** Write filters into the URL, dropping the cursor so paging restarts. */
+function setFilters(patch: Record<string, string>) {
   const query = { ...route.query }
-  if (value) query[key] = value
-  else delete query[key]
+  for (const [key, value] of Object.entries(patch)) {
+    if (value) query[key] = value
+    else delete query[key]
+  }
   router.replace({ query })
 }
 
+const setFilter = (key: string, value: string) => setFilters({ [key]: value })
+
+/** Filters go; the chosen order stays, it is a preference, not a narrowing. */
 function clearFilters() {
   search.value = ''
-  router.replace({ query: {} })
+  router.replace({ query: sortKey.value === 'urgency' ? {} : { sort: sortKey.value } })
+}
+
+// ── the board's columns ──────────────────────────────────────────────────────
+
+const board = ref<(Board & { columns: BoardColumn[] }) | null>(null)
+const columns = computed(() => (board.value?.columns ?? []).filter(c => !c.isRemoved))
+
+/** Loaded once. A property without a board is a real state, not an error: the strip just shows statuses. */
+async function loadBoard() {
+  try {
+    board.value = await api.getKanbanBoard()
+  }
+  catch {
+    board.value = null
+  }
+  refreshColumnCounts()
+}
+
+/** A column chip is lit by its id — or by the status an incoming link named. */
+function columnActive(col: BoardColumn) {
+  if (column.value) return column.value === col.id
+  return Boolean(status.value) && col.status === status.value
+}
+
+function pickColumn(col: BoardColumn | null) {
+  setFilters({ column: col?.id ?? '', status: '' })
+}
+
+/**
+ * The Status select's value: the chosen column, else the column an incoming
+ * `status=` link names; without a board, the status itself.
+ */
+const statusSelectValue = computed(() => {
+  if (columns.value.length) return column.value || (status.value ? columns.value.find(c => c.status === status.value)?.id ?? '' : '')
+  return status.value
+})
+
+function onStatusSelect(value: string) {
+  if (columns.value.length) pickColumn(columns.value.find(c => c.id === value) ?? null)
+  else setFilters({ status: value, column: '' })
 }
 
 function currentQuery(): TaskQuery {
-  const query: TaskQuery = { limit: PAGE_SIZE }
-  if (status.value) query.status = status.value as TaskQuery['status']
+  const query: TaskQuery = { limit: PAGE_SIZE, ...(sort.value.server ?? {}) }
+  // A column is the board's own filter; a status is the fallback, and what links from elsewhere use.
+  if (column.value) query.columnId = column.value
+  else if (status.value) query.status = status.value as TaskQuery['status']
   switch (scope.value) {
     case 'mine':
       query.assignedStaffId = session.userId.value ?? undefined
@@ -86,10 +201,11 @@ const clientNarrow = (rows: TaskListItem[]) =>
   scope.value === 'unclaimed' ? rows.filter(t => !t.assignment || t.assignment.kind !== 'STAFF') : rows
 
 /**
- * Server totals on the chips that people use as queues — "Mine", "Helping",
- * and for leaders "In review" — one `limit=1` list call each, read for
- * `meta.total` only. Fire-and-forget: a slow or failed count never delays the
- * list, the chip just shows its plain label until (or unless) the number lands.
+ * Server totals on the chips that people use as queues — every column,
+ * "Mine", "Helping", and for leaders "In review" — one `limit=1` list call
+ * each, read for `meta.total` only. Fire-and-forget: a slow or failed count
+ * never delays the list, the chip just shows its plain label until (or
+ * unless) the number lands.
  */
 const counts = ref<Record<string, number | null>>({})
 
@@ -103,6 +219,10 @@ async function fetchCount(key: string, query: TaskQuery) {
   }
 }
 
+function refreshColumnCounts() {
+  for (const col of columns.value) void fetchCount(`col:${col.id}`, { columnId: col.id })
+}
+
 function refreshCounts() {
   const userId = session.userId.value
   if (userId) {
@@ -111,6 +231,7 @@ function refreshCounts() {
   }
   // Leaders read "In review" as their own queue; for staff it is just a status.
   if (caps.isLeader.value) void fetchCount('SUBMITTED', { status: 'SUBMITTED' })
+  refreshColumnCounts()
 }
 
 function countFor(key?: string): number | null {
@@ -153,6 +274,40 @@ async function loadMore() {
   }
 }
 
+// ── claim straight off the card ─────────────────────────────────────────────
+
+const claimingId = ref('')
+
+/**
+ * Claimable straight off the card: nothing personal holds it — unassigned, or
+ * sitting in a pool (whose membership the server checks on the tap).
+ */
+function canClaimCard(task: TaskListItem) {
+  return caps.canWork.value && isClaimable(task.status) && task.assignment?.kind !== 'STAFF'
+}
+
+/**
+ * The one-handed path: see the queue, take the job, keep walking — without
+ * opening the task first. A 409 means somebody was faster; the reload makes
+ * the list stop lying either way.
+ */
+async function claim(task: TaskListItem) {
+  if (claimingId.value) return
+  claimingId.value = task.id
+  errorMessage.value = ''
+  try {
+    await api.claimTask(task.id)
+    await load()
+  }
+  catch (e) {
+    errorMessage.value = (e as Error).message
+    await load()
+  }
+  finally {
+    claimingId.value = ''
+  }
+}
+
 // The search box filters the LOADED rows — the API has no q parameter. Kept in
 // the URL anyway so a shared link carries it.
 let searchTimer: ReturnType<typeof setTimeout> | undefined
@@ -164,9 +319,10 @@ watch(search, (value) => {
 const now = useNow()
 
 /**
- * The loaded rows, hottest first. The server orders by creation; on a phone
- * the red cards are what the reader came for, so they float to the top of
- * whatever page is loaded (a display order, never a filter).
+ * The loaded rows in the chosen order. The API's own orders arrive sorted
+ * (and page in that order); the client-side ones — hottest first by default,
+ * so on a phone the red cards float to the top of whatever page is loaded —
+ * are applied here, over the rows the search left.
  */
 const shownTasks = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -178,25 +334,20 @@ const shownTasks = computed(() => {
         || (t.description ?? '').toLowerCase().includes(query)
         || t.id.startsWith(query),
       )
-  return [...rows].sort((a, b) => compareByHeat(a, b, now.value))
+  const compare = sort.value.client
+  return compare ? [...rows].sort((a, b) => compare(a, b, now.value)) : rows
 })
 
-/**
- * "Group by source" rearranges the loaded rows into one lane per originating
- * app, most urgent lane first — a display toggle, not a filter, so it stays
- * client state and never enters the URL. Hidden when the registry failed to
- * load: grouping without names would produce a single "Other" lane.
- */
-const groupBySource = ref(false)
-const canGroupBySource = computed(() => sourceApps.status.value !== 'failed')
+/** "Grouped by source app": the same rows, one lane per originating app, the lane holding a fire on top. */
 const lanes = computed(() => groupIntoLanes(shownTasks.value, sourceApps.byCode.value, now.value))
 
-// One watcher drives loading: any server-filter change reloads from page one.
-watch(() => [route.query.status, route.query.scope], load, { immediate: true })
+// One watcher drives loading: any server-side change — filter or order — reloads from page one.
+watch(() => [route.query.status, route.query.scope, route.query.column, route.query.sort], load, { immediate: true })
+void loadBoard()
 
 interface Chip { value: string, label: string, icon: Component, countKey?: string }
 
-/** Each status chip wears the same icon as its pill, so the two always match. */
+/** The fallback strip for a property without a board; each chip wears its pill's icon. */
 const STATUS_TABS: Chip[] = [
   { value: '', label: 'All', icon: LayoutListIcon },
   { value: 'NEW', label: STATUS_SIGNAL.NEW.label, icon: STATUS_SIGNAL.NEW.icon },
@@ -225,16 +376,19 @@ const SCOPE_TABS: Chip[] = [
   { value: 'late-response', label: 'Picked up late', icon: ClockAlertIcon },
   { value: 'breached', label: 'Late', icon: ClockAlertIcon },
 ]
+
+const activeColumnName = computed(() => columns.value.find(col => columnActive(col))?.name ?? '')
 </script>
 
 <template>
   <div class="space-y-4">
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
-        <h2 class="text-xl font-bold tracking-tight">Tasks</h2>
-        <p class="text-sm text-muted-foreground">
-          {{ totalCount }} {{ totalCount === 1 ? 'task' : 'tasks' }} you can see here.
-        </p>
+        <!-- The count is the heading: "32 Tasks" says what the subtitle used
+             to, in two words. Plain "Tasks" only until the first page lands. -->
+        <h2 class="text-xl font-bold tracking-tight">
+          {{ isLoading && tasks.length === 0 ? 'Tasks' : `${totalCount} ${totalCount === 1 ? 'Task' : 'Tasks'}` }}
+        </h2>
         <details class="text-sm text-muted-foreground">
           <summary class="min-h-8 cursor-pointer select-none font-semibold text-primary-tint-foreground">What shows here</summary>
           <p class="mt-1 leading-relaxed">{{ scopeDescription }}</p>
@@ -250,45 +404,77 @@ const SCOPE_TABS: Chip[] = [
       <Input v-model="search" placeholder="Search room or title" aria-label="Search the loaded tasks" class="h-12 rounded-xl pl-11 text-base" />
     </div>
 
-    <!-- Status + scope chips; horizontally scrollable so they never wrap. -->
-    <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-      <FilterChip
-        v-for="tab in STATUS_TABS"
-        :key="tab.value"
-        :active="status === tab.value"
-        :aria-pressed="status === tab.value"
-        :icon="tab.icon"
-        :label="tab.label"
-        :count="countFor(tab.countKey)"
-        @click="setFilter('status', tab.value)"
-      />
-      <span class="w-px shrink-0 self-stretch bg-border" aria-hidden="true" />
-      <FilterChip
-        v-for="s in SCOPE_TABS"
-        :key="s.value"
-        :active="scope === s.value"
-        :aria-pressed="scope === s.value"
-        :icon="s.icon"
-        :label="s.label"
-        :count="countFor(s.countKey)"
-        @click="setFilter('scope', scope === s.value ? '' : s.value)"
-      />
+    <!-- Two selects side by side: where the work stands (the board's columns,
+         each with its live total — or the plain statuses where the property
+         has no board) and whose it is / how its clocks stand. Every option in
+         view at once, nothing hiding off the right edge. -->
+    <div class="grid grid-cols-2 gap-2">
+      <div class="space-y-1">
+        <Label for="filter-status" class="text-xs font-semibold text-muted-foreground">Status</Label>
+        <Select :model-value="toSelectValue(statusSelectValue)" @update:model-value="value => onStatusSelect(fromSelectValue(value))">
+          <SelectTrigger id="filter-status" class="h-12 w-full rounded-xl">
+            <SelectValue placeholder="All" />
+          </SelectTrigger>
+          <SelectContent>
+            <template v-if="columns.length">
+              <SelectItem :value="SELECT_EMPTY">
+                <LayoutListIcon aria-hidden="true" /> All
+              </SelectItem>
+              <SelectItem v-for="col in columns" :key="col.id" :value="col.id">
+                <component :is="col.status ? statusSignal(col.status).icon : LayoutListIcon" aria-hidden="true" />
+                {{ col.name }}
+                <span v-if="countFor(`col:${col.id}`) !== null" class="tabular-nums text-muted-foreground">({{ countFor(`col:${col.id}`) }})</span>
+              </SelectItem>
+            </template>
+            <template v-else>
+              <SelectItem v-for="tab in STATUS_TABS" :key="tab.value" :value="toSelectValue(tab.value)">
+                <component :is="tab.icon" aria-hidden="true" />
+                {{ tab.label }}
+                <span v-if="countFor(tab.countKey) !== null" class="tabular-nums text-muted-foreground">({{ countFor(tab.countKey) }})</span>
+              </SelectItem>
+            </template>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div class="space-y-1">
+        <Label for="filter-scope" class="text-xs font-semibold text-muted-foreground">Show</Label>
+        <Select :model-value="toSelectValue(scope)" @update:model-value="value => setFilter('scope', fromSelectValue(value))">
+          <SelectTrigger id="filter-scope" class="h-12 w-full rounded-xl">
+            <SelectValue placeholder="Everything" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem :value="SELECT_EMPTY">
+              <FilterIcon aria-hidden="true" /> Everything
+            </SelectItem>
+            <SelectItem v-for="s in SCOPE_TABS" :key="s.value" :value="s.value">
+              <component :is="s.icon" aria-hidden="true" />
+              {{ s.label }}
+              <span v-if="countFor(s.countKey) !== null" class="tabular-nums text-muted-foreground">({{ countFor(s.countKey) }})</span>
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
     </div>
 
-    <div v-if="canGroupBySource || hasFilters" class="flex items-center justify-between gap-2">
-      <!-- A switch, not a chip: it rearranges the rows below, it does not
-           narrow them, so it lives outside the filter strip. -->
-      <FilterChip
-        v-if="canGroupBySource"
-        role="switch"
-        :aria-checked="groupBySource"
-        :active="groupBySource"
-        :icon="LayersIcon"
-        label="Group by source"
-        @click="groupBySource = !groupBySource"
-      />
-      <span v-else />
-      <Button v-if="hasFilters" variant="secondary" class="min-h-11" @click="clearFilters">
+    <!-- The order, as a select of its own: it rearranges the rows, it does
+         not narrow them, so it sits apart from the two filters above. -->
+    <div class="flex items-end gap-2">
+      <div class="min-w-0 flex-1 space-y-1">
+        <Label for="filter-sort" class="text-xs font-semibold text-muted-foreground">Sort</Label>
+        <Select :model-value="sortKey" @update:model-value="value => setFilter('sort', String(value ?? '') === 'urgency' ? '' : String(value ?? ''))">
+          <SelectTrigger id="filter-sort" class="h-12 w-full rounded-xl">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="option in sortOptions" :key="option.value" :value="option.value">
+              <component :is="option.icon" aria-hidden="true" />
+              {{ option.label }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <Button v-if="hasFilters" variant="secondary" class="h-12 shrink-0" @click="clearFilters">
         <FilterXIcon class="size-5" /> Clear filters
       </Button>
     </div>
@@ -305,8 +491,10 @@ const SCOPE_TABS: Chip[] = [
     <EmptyState
       v-else-if="shownTasks.length === 0"
       :icon="LayoutListIcon"
-      title="No tasks match"
-      :description="hasFilters ? 'Try clearing a filter or a different search.' : caps.isLeader.value ? 'Nothing to show at this property yet. Project tasks live in their projects.' : 'Nothing you can see at this property right now: your claimed work, your department\'s and the property\'s unclaimed tasks, your team pools, steps handed to you, and your projects\' tasks (those show in the project).'"
+      :title="activeColumnName ? `Nothing in ${activeColumnName}` : 'No tasks match'"
+      :description="activeColumnName && !scope && !search.trim()
+        ? 'Tasks move here as the work moves along.'
+        : hasFilters ? 'Try clearing a filter or a different search.' : caps.isLeader.value ? 'Nothing to show at this property yet. Project tasks live in their projects.' : 'Nothing you can see at this property right now: your claimed work, your department\'s and the property\'s unclaimed tasks, your team pools, steps handed to you, and your projects\' tasks (those show in the project).'"
     >
       <Button v-if="hasFilters" variant="secondary" class="min-h-11" @click="clearFilters">
         <FilterXIcon class="size-5" /> Clear filters
@@ -317,7 +505,7 @@ const SCOPE_TABS: Chip[] = [
       <!-- Lanes: the same cards, re-partitioned by originating app with the
            lane holding a fire on top. The square is the registry's colour —
            data, not a theme token; the Other lane has none. -->
-      <div v-if="groupBySource" class="space-y-5">
+      <div v-if="grouped" class="space-y-5">
         <section v-for="lane in lanes" :key="lane.key" class="space-y-2">
           <h3 class="flex items-center gap-2 text-sm font-bold text-muted-foreground">
             <span
@@ -330,13 +518,29 @@ const SCOPE_TABS: Chip[] = [
             <span class="rounded-full bg-muted px-2 text-xs tabular-nums">{{ lane.tasks.length }}</span>
           </h3>
           <div class="space-y-3">
-            <TaskCard v-for="task in lane.tasks" :key="task.id" :task="task" />
+            <TaskCard
+              v-for="task in lane.tasks"
+              :key="task.id"
+              :task="task"
+              :claimable="canClaimCard(task)"
+              :claiming="claimingId === task.id"
+              @claim="claim(task)"
+            />
           </div>
         </section>
       </div>
 
+      <!-- Claim without opening the task — the one-handed path the board had,
+           inside every card nobody personally holds. -->
       <div v-else class="space-y-3">
-        <TaskCard v-for="task in shownTasks" :key="task.id" :task="task" />
+        <TaskCard
+          v-for="task in shownTasks"
+          :key="task.id"
+          :task="task"
+          :claimable="canClaimCard(task)"
+          :claiming="claimingId === task.id"
+          @claim="claim(task)"
+        />
       </div>
 
       <Button

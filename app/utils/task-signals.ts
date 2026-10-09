@@ -9,6 +9,7 @@ import {
   ClockIcon,
   EyeIcon,
   FlagIcon,
+  FlameIcon,
   PauseIcon,
   PlayIcon,
   SirenIcon,
@@ -165,11 +166,14 @@ export function clockSignals(task: SignalInput, nowMs = Date.now()): Signal[] {
   return out
 }
 
-/** Priority is a flag. Normal is the default and carries no chip at all. */
+/**
+ * Priority: a flame for Urgent (the one that cannot wait), a flag for High, a
+ * down arrow for Low. Normal is the default and carries no chip at all.
+ */
 export function prioritySignal(priority: TaskPriority): Signal | null {
   switch (priority) {
     case 'URGENT':
-      return { kind: 'priority', heat: 'late', label: 'Urgent', detail: 'Marked urgent: do this one first.', icon: FlagIcon }
+      return { kind: 'priority', heat: 'late', label: 'Urgent', detail: 'Marked urgent: do this one first.', icon: FlameIcon }
     case 'HIGH':
       return { kind: 'priority', heat: 'soon', label: 'High priority', detail: 'Marked high priority.', icon: FlagIcon }
     case 'LOW':

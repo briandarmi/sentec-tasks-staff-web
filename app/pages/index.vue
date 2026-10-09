@@ -97,13 +97,6 @@ function canClaimCard(task: TaskListItem) {
   return caps.canWork.value && isClaimable(task.status) && task.assignment?.kind !== 'STAFF'
 }
 
-function claimLabel(task: TaskListItem) {
-  const a = task.assignment
-  if (a?.kind === 'TEAM') return `Claim from ${a.teamName ?? 'the team'}`
-  if (a?.kind === 'DEPARTMENT') return `Claim from ${a.departmentName ?? 'the department'}`
-  return 'Claim this'
-}
-
 /**
  * The one-handed path: see the queue, take the job, keep walking — without
  * opening the task first. A 409 means somebody was faster; the reload makes
@@ -230,23 +223,18 @@ onMounted(load)
         <Button v-if="focus && tab === 'open'" variant="secondary" class="min-h-11" @click="focus = null">Show every open task</Button>
       </EmptyState>
 
+      <!-- Claim without opening the task — the one-handed path, inside the
+           card, on the queue where the work actually gets picked up. -->
       <div v-else class="space-y-3">
-        <div v-for="task in shown" :key="task.id" class="space-y-2">
-          <TaskCard :task="task" :mine="tab !== 'queue'" />
-          <!-- Claim without opening the task — the board's one-handed path,
-               here on the queue where the work actually gets picked up. -->
-          <Button
-            v-if="tab === 'queue' && canClaimCard(task)"
-            variant="secondary"
-            class="min-h-11 w-full"
-            :disabled="claimingId === task.id"
-            :aria-busy="claimingId === task.id"
-            @click="claim(task)"
-          >
-            <HandIcon class="size-5" />
-            {{ claimingId === task.id ? 'Claiming…' : claimLabel(task) }}
-          </Button>
-        </div>
+        <TaskCard
+          v-for="task in shown"
+          :key="task.id"
+          :task="task"
+          :mine="tab !== 'queue'"
+          :claimable="tab === 'queue' && canClaimCard(task)"
+          :claiming="claimingId === task.id"
+          @claim="claim(task)"
+        />
       </div>
     </template>
   </div>
