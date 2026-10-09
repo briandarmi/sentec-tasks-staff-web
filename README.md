@@ -394,6 +394,55 @@ sibling app byte-for-byte (`pnpm run check:shared`). Tested:
 the redirect itself needs the Nuxt runtime and was checked by typecheck and
 build only.
 
+## Seeding every task condition (2026-10-09)
+
+Two ways to see the whole traffic light at once, not just whatever the clock
+happens to say:
+
+- **The mock seeds it on boot.** `seedDemoData()` ends with nineteen
+  "live-clock" tasks (`IDS.liveTask.*`, plus a second project with one task)
+  timed from `Date.now()`: green, amber and red pick-up clocks; High in a team
+  pool and Urgent in a department pool; a task picked up late with ten minutes
+  left; escalated once and twice (with the policy's records, so the sweep
+  fires nothing more at boot); a Low-priority chore with no SLA at all; one on
+  hold with twenty minutes left; a scheduled start; a hard due date; a
+  submission on time with two proof photos; finished late; verified but picked
+  up late; a pending offer to Budi; a task owned by the deactivated spa
+  department; and one Budi is helping on. They sit alongside the dated seeds,
+  which tests pin and which therefore never move. Sign in as `leader@aston.example`
+  to see all of them, or as `staff@aston.example` for Budi's share (one of each
+  edge, the offer banner, the Helping chip).
+- **`scripts/seed-dev-tasks.mjs` does the same against a real API** — the dev
+  Lambda by default — through the staff endpoints only: create (every
+  priority, assignee kind, quantity, requester, checklist, scheduled start,
+  hard due date, one backdated activation in case the API allows it), claim and
+  start, hold, submit with proof photos, approve, request changes, cancel,
+  return to the pool, offer, helper, comment and checklist tick. Seventeen
+  conditions, each attempted on its own and reported. A **leader** of the
+  property can run it alone (claiming is staff/leader only; reviewing is
+  leader or admin). An **admin** cannot claim, so the staff-side conditions go
+  through a second, staff account — the "worker" — which the admin may create
+  on the first run:
+
+  ```bash
+  TASKS_EMAIL=you@property.example TASKS_PASSWORD=... \
+  TASKS_WORKER_EMAIL=tasks-seed-worker@example.com TASKS_WORKER_PASSWORD=... \
+  node scripts/seed-dev-tasks.mjs [--hotel <hotelRef>] [--cancel-previous] [--create-worker]
+  ```
+
+  `--create-worker` makes that staff member (busiest active department,
+  createTask on) when it does not exist; later runs only sign it in. The admin
+  then creates, assigns, cancels and reviews; the worker claims, works,
+  submits, returns and offers.
+
+  Items are chosen by what `POST /v1/tasks/preview` says they route to, so
+  every claim lands in the account's own department. Late, due-soon and
+  escalated states are the API's doing: with the Standard SLA they appear
+  within the hour. `--cancel-previous` moves the still-open tasks of earlier
+  runs (titles start with `[seed`) to the Cancelled column.
+  `tests/seed-dev-tasks.spec.ts` runs the same code against the in-browser
+  mock, so every call it makes is exercised before it touches dev.
+
 ## One traffic light (2026-10-08)
 
 The app was reworked so that someone with no training — a child, a new hire

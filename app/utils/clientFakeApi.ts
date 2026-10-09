@@ -987,10 +987,36 @@ export const IDS = {
     /** Escalated three times by the Standard policy yesterday; sits in the Maintenance pool. */
     leakEscalated: uid('c1', 15),
   },
+  /**
+   * Live-clock tasks (2026-10-09): one per traffic-light condition, timed
+   * from the moment the mock boots so green, amber and red always show
+   * together. Seeded at the end of seedDemoData; never pinned by tests.
+   */
+  liveTask: {
+    greenNew: uid('d1', 1),
+    soonNew: uid('d1', 2),
+    lateNew: uid('d1', 3),
+    highTeamPool: uid('d1', 4),
+    urgentDeptPool: uid('d1', 5),
+    budiGreen: uid('d1', 6),
+    budiPickedUpLate: uid('d1', 7),
+    escalatedLevel1: uid('d1', 8),
+    escalatedLevel2: uid('d1', 9),
+    lowNoClock: uid('d1', 10),
+    onHoldSoon: uid('d1', 11),
+    scheduledLater: uid('d1', 12),
+    hardDue: uid('d1', 13),
+    submittedOnTime: uid('d1', 14),
+    finishedLate: uid('d1', 15),
+    verifiedPickedUpLate: uid('d1', 16),
+    offerToBudi: uid('d1', 17),
+    inactiveDept: uid('d1', 18),
+    helpingBudi: uid('d1', 19),
+  },
   guest: { amelia: uid('c2', 1), marcus: uid('c2', 2) },
-  offer: { filterToMade: uid('c3', 1) },
-  project: { lobby: uid('c6', 1), poolDeck: uid('c6', 2) },
-  projectTask: { lobbyPaint: uid('c7', 1), lobbyLights: uid('c7', 2), lobbySignage: uid('c7', 3) },
+  offer: { filterToMade: uid('c3', 1), vipToBudi: uid('c3', 2) },
+  project: { lobby: uid('c6', 1), poolDeck: uid('c6', 2), rooftop: uid('c6', 3) },
+  projectTask: { lobbyPaint: uid('c7', 1), lobbyLights: uid('c7', 2), lobbySignage: uid('c7', 3), rooftopArt: uid('c7', 4) },
   template: { nightlyMinibar: uid('c8', 1), mondayFilters: uid('c8', 2), budiRounds: uid('c8', 3) },
 } as const
 
@@ -2701,6 +2727,285 @@ function seedDemoData() {
     taskEscalations.push({ hotelRef: H, taskId: IDS.task.leakEscalated, ...record })
     seedHistoryRow(IDS.task.leakEscalated, null, 'NEW', escalationDescription(record), record.appliedAt)
   }
+
+  // ── Live-clock tasks (2026-10-09). One task per condition the staff app can
+  // show, staged relative to the moment the mock boots, so the demo always has
+  // green, amber and red side by side — the dated seeds above are pinned by
+  // tests and never move. Housekeeping, Front Office and F&B run on the 24/7
+  // default schedule, so their deadlines are plain wall-clock sums of the SLA
+  // budgets (Standard 15/45, Scheduled 120/480, as seedTaskRow chains them);
+  // Maintenance (Engineering Hours) is used only where the work has stopped.
+  // The escalation sweep runs before every request, so escalated seeds record
+  // exactly the steps that are due at boot and nothing more.
+  const LIVE_NOW = Date.now()
+  const ago = (minutes: number) => new Date(LIVE_NOW - minutes * 60_000).toISOString()
+  const ahead = (minutes: number) => new Date(LIVE_NOW + minutes * 60_000).toISOString()
+  const L = IDS.liveTask
+  const liveChecklist = (taskId: Id, labels: string[], doneBy: Id | null, doneCount: number, at: string) => {
+    labels.forEach((label, index) => {
+      const done = index < doneCount
+      checklistItems.push({ id: newId(), hotelRef: H, taskId, sort: index, label, isDone: done, doneBy: done ? doneBy : null, doneAt: done ? at : null, assignedStaffId: null, assignedStaffName: null, assignedBy: null, assignedAt: null, note: null, createdAt: at, updatedAt: at })
+    })
+  }
+
+  // Green: a Butler request with nearly two hours to pick up.
+  seedTaskRow({
+    id: L.greenNew, hotelRef: H, status: 'NEW', title: 'Extra towels', description: 'Two bath towels and a bath mat',
+    sourceProduct: 'sentec-butler', sourceChannel: 'guest', itemRef: IDS.item.towels, quantity: 2, roomNumber: '1510',
+    requesterName: 'Hana Sato', visitRef: 'V-88140', slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(10),
+  })
+  taskContextEntries.push({ id: newId(), hotelRef: H, taskId: L.greenNew, sourceAppCode: 'sentec-butler', label: 'Butler request', value: 'BTLR-88470', url: null, sort: 0 })
+
+  // Amber: eight minutes left on the pick-up clock.
+  seedTaskRow({
+    id: L.soonNew, hotelRef: H, status: 'NEW', title: 'Luggage to room', description: 'Three bags at the bell desk',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: '0804', requesterName: 'Daniel Okafor',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpFrontOffice,
+    activationDate: ago(7),
+  })
+  seedHistoryRow(L.soonNew, IDS.staff.sari, 'NEW', null, ago(7))
+
+  // Red: pick-up deadline missed 25 minutes ago, no policy watching it.
+  seedTaskRow({
+    id: L.lateNew, hotelRef: H, status: 'NEW', title: 'Extra pillows', description: 'Two firm pillows',
+    sourceProduct: 'sentec-butler', sourceChannel: 'guest', itemRef: IDS.item.towels, roomNumber: '1407', quantity: 2,
+    requesterName: 'Priya Nair', visitRef: 'V-88151', slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(40),
+  })
+
+  // Amber by priority alone: a High-priority job in the HK Morning Shift pool with time to spare.
+  seedTaskRow({
+    id: L.highTeamPool, hotelRef: H, status: 'NEW', title: 'Deep clean — floor 9 corridor', description: 'Carpet spill outside 0912',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: 'Floor 9', priority: 'HIGH',
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(20),
+  })
+  seedAssignmentRow(L.highTeamPool, 'TEAM', { teamId: IDS.team.hkMorning }, IDS.staff.sari, null, true, ago(20))
+  seedHistoryRow(L.highTeamPool, IDS.staff.sari, 'NEW', null, ago(20))
+
+  // Red by priority alone: Urgent, sitting in the F&B department pool.
+  seedTaskRow({
+    id: L.urgentDeptPool, hotelRef: H, status: 'NEW', title: 'Allergy meal replacement', description: 'Nut allergy — the tray must not go up as served',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.inRoomDining, roomNumber: '1206', priority: 'URGENT',
+    requesterRef: IDS.guest.marcus, requesterName: 'Marcus Reid', visitRef: 'V-88104',
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpFnb,
+    activationDate: ago(15),
+  })
+  seedAssignmentRow(L.urgentDeptPool, 'DEPARTMENT', { hotelDepartmentId: IDS.dept.smtpFnb }, IDS.staff.sari, 'Kitchen to confirm the substitute first', true, ago(15))
+  seedHistoryRow(L.urgentDeptPool, IDS.staff.sari, 'NEW', null, ago(15))
+
+  // Green, Budi's: picked up on time, hours left, two of four steps done, Made helping.
+  seedTaskRow({
+    id: L.budiGreen, hotelRef: H, status: 'IN_PROGRESS', title: 'Carpet shampoo', description: 'Whole room after the long stay',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.roomCleaning, roomNumber: '1101',
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(60), responseDuration: 12, responseSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(L.budiGreen, 'STAFF', { staffId: IDS.staff.budi }, IDS.staff.budi, null, true, ago(48))
+  seedHistoryRow(L.budiGreen, IDS.staff.sari, 'NEW', null, ago(60))
+  seedHistoryRow(L.budiGreen, IDS.staff.budi, 'IN_PROGRESS', null, ago(48))
+  liveChecklist(L.budiGreen, ['Move the furniture', 'Pre-treat the stains', 'Shampoo and extract', 'Dry and reset the room'], IDS.staff.budi, 2, ago(48))
+  taskCollaborators.push({ id: newId(), hotelRef: H, taskId: L.budiGreen, staffId: IDS.staff.made, staffName: null, addedBy: IDS.staff.budi, isActive: true, createdAt: ago(30) })
+  taskComments.push({ id: newId(), hotelRef: H, taskId: L.budiGreen, staffId: IDS.staff.sari, comment: 'Guest is back at 18:00 — plenty of time, but leave the windows open.', createdAt: ago(40), staffName: null })
+
+  // Red verdict on a running task: picked up 25 minutes after its pick-up deadline, ten minutes left to finish.
+  seedTaskRow({
+    id: L.budiPickedUpLate, hotelRef: H, status: 'IN_PROGRESS', title: 'Replace bathroom amenities', description: 'Full set — the guest complained twice',
+    sourceProduct: 'sentec-butler', sourceChannel: 'guest', roomNumber: '0915', requesterName: 'Lena Fischer', visitRef: 'V-88133',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(50), responseDuration: 40, responseSlaStatus: 'BREACHED',
+  })
+  seedAssignmentRow(L.budiPickedUpLate, 'STAFF', { staffId: IDS.staff.budi }, IDS.staff.budi, null, true, ago(10))
+  seedHistoryRow(L.budiPickedUpLate, IDS.staff.budi, 'IN_PROGRESS', null, ago(10))
+
+  // Escalated once: unclaimed, pick-up deadline five minutes gone, the
+  // Standard policy's first step fired; the halfway step is not due yet.
+  seedTaskRow({
+    id: L.escalatedLevel1, hotelRef: H, status: 'NEW', title: 'Taxi booking for 14:00', description: 'Guest in 0312 needs a car to the airport',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: '0312', requesterName: 'Tomás Herrera',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpFrontOffice,
+    activationDate: ago(20), escalationPolicyId: IDS.policy.smtpStandard, escalationLevel: 1, escalatedAt: ago(5),
+  })
+  seedHistoryRow(L.escalatedLevel1, IDS.staff.agus, 'NEW', null, ago(20))
+  {
+    const record: TaskEscalation = { hotelRef: H, taskId: L.escalatedLevel1, appliedAt: ago(5), policyId: IDS.policy.smtpStandard, stepId: IDS.step.stdResponse, level: 1, trigger: { kind: 'RESPONSE_OVERDUE', value: 0 }, applied: [], skipped: [], recipients: [IDS.staff.sari] }
+    taskEscalations.push(record)
+    seedHistoryRow(L.escalatedLevel1, null, 'NEW', escalationDescription(record), record.appliedAt)
+  }
+
+  // Escalated twice: past the pick-up deadline and past halfway to the
+  // finish deadline, so the priority was bumped HIGH → URGENT; 25 minutes
+  // remain before the third step would fire.
+  seedTaskRow({
+    id: L.escalatedLevel2, hotelRef: H, status: 'NEW', title: 'Water leak from ceiling', description: 'Dripping over the bed in 1004 — bucket placed',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.plumbing, roomNumber: '1004', priority: 'URGENT',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(35), escalationPolicyId: IDS.policy.smtpStandard, escalationLevel: 2, escalatedAt: ago(5),
+  })
+  seedHistoryRow(L.escalatedLevel2, IDS.staff.sari, 'NEW', null, ago(35))
+  for (const record of [
+    { hotelRef: H, taskId: L.escalatedLevel2, appliedAt: ago(20), policyId: IDS.policy.smtpStandard, stepId: IDS.step.stdResponse, level: 1, trigger: { kind: 'RESPONSE_OVERDUE', value: 0 }, applied: [], skipped: [], recipients: [IDS.staff.sari] },
+    { hotelRef: H, taskId: L.escalatedLevel2, appliedAt: ago(5), policyId: IDS.policy.smtpStandard, stepId: IDS.step.stdHalfway, level: 2, trigger: { kind: 'PERCENT_OF_RESOLUTION', value: 50 }, applied: [{ type: 'bumpPriority', before: 'HIGH', after: 'URGENT' }], skipped: [], recipients: [] },
+  ] as TaskEscalation[]) {
+    taskEscalations.push(record)
+    seedHistoryRow(L.escalatedLevel2, null, 'NEW', escalationDescription(record), record.appliedAt)
+  }
+
+  // No clock at all: a Low-priority chore with no SLA, so the card has no edge and no chip but the flag.
+  {
+    const chore = seedTaskRow({
+      id: L.lowNoClock, hotelRef: H, status: 'IN_PROGRESS', title: 'Polish the brass door handles', description: 'Lobby and lift lobby, both floors',
+      sourceProduct: 'sentec-tasks', sourceChannel: 'staff', locationId: IDS.location.lobby, priority: 'LOW',
+      slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+      activationDate: ago(180),
+    })
+    chore.slaId = null
+    chore.responseDueAt = null
+    chore.resolutionDueAt = null
+    chore.responseSlaMinutes = null
+    chore.resolutionSlaMinutes = null
+    seedAssignmentRow(L.lowNoClock, 'STAFF', { staffId: IDS.staff.budi }, IDS.staff.sari, 'Whenever the floor is quiet', true, ago(170))
+    seedHistoryRow(L.lowNoClock, IDS.staff.sari, 'NEW', null, ago(180))
+    seedHistoryRow(L.lowNoClock, IDS.staff.budi, 'IN_PROGRESS', null, ago(150))
+  }
+
+  // Amber, on hold: parked by Sari with twenty minutes left on the finish clock.
+  seedTaskRow({
+    id: L.onHoldSoon, hotelRef: H, status: 'PENDING', title: 'Airport pickup — flight delayed', description: 'Driver on standby; new ETA pending',
+    sourceProduct: 'sentec-butler', sourceChannel: 'guest', itemRef: IDS.item.transfer, roomNumber: '0702', requesterName: 'Wei Zhang', visitRef: 'V-88128',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpFrontOffice,
+    activationDate: ago(40), responseDuration: 10, responseSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(L.onHoldSoon, 'STAFF', { staffId: IDS.staff.sari }, IDS.staff.agus, null, true, ago(30))
+  seedHistoryRow(L.onHoldSoon, IDS.staff.agus, 'NEW', null, ago(40))
+  seedHistoryRow(L.onHoldSoon, IDS.staff.sari, 'IN_PROGRESS', null, ago(30))
+  seedHistoryRow(L.onHoldSoon, IDS.staff.sari, 'PENDING', 'Waiting for the new arrival time', ago(15))
+
+  // Scheduled: created now, starts in three hours, waits in the HK Morning Shift pool.
+  seedTaskRow({
+    id: L.scheduledLater, hotelRef: H, status: 'NEW', title: 'Turndown — floor 15', description: 'Evening turndown, rooms 1501-1512',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.turndown, roomNumber: 'Floor 15',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ahead(180), createdAt: ago(10),
+  })
+  seedAssignmentRow(L.scheduledLater, 'TEAM', { teamId: IDS.team.hkMorning }, IDS.staff.sari, null, true, ago(10))
+  seedHistoryRow(L.scheduledLater, IDS.staff.sari, 'NEW', null, ago(10))
+
+  // A hard due date on top of the SLA, five hours out.
+  {
+    const cake = seedTaskRow({
+      id: L.hardDue, hotelRef: H, status: 'NEW', title: 'Birthday cake to room', description: 'Candles and a card from the hotel — before the dinner reservation',
+      sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.inRoomDining, roomNumber: '1808', quantity: 1,
+      requesterRef: IDS.guest.amelia, requesterName: 'Amelia Chen', visitRef: 'V-88121',
+      slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpFnb,
+      activationDate: ago(30),
+    })
+    cake.dueAt = ahead(300)
+    seedHistoryRow(L.hardDue, IDS.staff.sari, 'NEW', null, ago(30))
+  }
+
+  // A second active project with one task of Budi's, amber: fifteen minutes
+  // left to finish. Its own project, because the lobby's three tasks and
+  // their progress are pinned by tests/api-fidelity.spec.ts.
+  projects.push({
+    id: IDS.project.rooftop, hotelRef: H, name: 'Rooftop bar opening', description: 'Dress the rooftop bar before Friday\'s soft launch.',
+    startDate: '2026-10-05', endDate: '2026-10-16', status: 'ACTIVE', completedAt: null, createdBy: IDS.staff.agus, createdAt: ago(4 * 1440), updatedAt: ago(4 * 1440),
+  })
+  projectMembers.push(
+    { projectId: IDS.project.rooftop, staffId: IDS.staff.sari, level: 'MANAGER', source: 'MANUAL', addedBy: IDS.staff.agus, addedAt: ago(4 * 1440) },
+    { projectId: IDS.project.rooftop, staffId: IDS.staff.budi, level: 'MEMBER', source: 'MANUAL', addedBy: IDS.staff.sari, addedAt: ago(4 * 1440) },
+  )
+  seedTaskRow({
+    id: IDS.projectTask.rooftopArt, hotelRef: H, status: 'IN_PROGRESS', title: 'Hang the artwork in the rooftop bar', description: 'Three pieces, positions marked on the wall',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: 'Rooftop bar',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping, projectId: IDS.project.rooftop,
+    activationDate: ago(45), responseDuration: 5, responseSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(IDS.projectTask.rooftopArt, 'STAFF', { staffId: IDS.staff.budi }, IDS.staff.sari, null, true, ago(40))
+  seedHistoryRow(IDS.projectTask.rooftopArt, IDS.staff.sari, 'NEW', null, ago(45))
+  seedHistoryRow(IDS.projectTask.rooftopArt, IDS.staff.budi, 'IN_PROGRESS', null, ago(40))
+
+  // In review, on time: submitted by Budi with two proof photos, waiting on Sari.
+  seedTaskRow({
+    id: L.submittedOnTime, hotelRef: H, status: 'SUBMITTED', title: 'Restock minibar', description: 'Standard set plus two sparkling waters',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', itemRef: IDS.item.minibar, roomNumber: '1312',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(90), responseDuration: 6, resolutionDuration: 36, responseSlaStatus: 'ON_TIME', resolutionSlaStatus: 'ON_TIME',
+    completionNote: 'Restocked and logged. One water was short in the pantry — noted for the morning order.',
+    submittedBy: IDS.staff.budi, submittedAt: ago(54),
+  })
+  seedAssignmentRow(L.submittedOnTime, 'STAFF', { staffId: IDS.staff.budi }, IDS.staff.budi, null, true, ago(84))
+  seedHistoryRow(L.submittedOnTime, IDS.staff.sari, 'NEW', null, ago(90))
+  seedHistoryRow(L.submittedOnTime, IDS.staff.budi, 'IN_PROGRESS', null, ago(84))
+  seedHistoryRow(L.submittedOnTime, IDS.staff.budi, 'SUBMITTED', 'Restocked and logged. One water was short in the pantry — noted for the morning order.', ago(54))
+  for (const n of [1, 2]) {
+    const photo = { id: newId(), hotelRef: H, taskId: L.submittedOnTime, staffId: IDS.staff.budi, filetype: 'PHOTO' as const, filepath: `https://media.sentec-tasks.example/signed/proof-1312-${n}.jpg`, isRemoved: false, createdAt: ago(56 - n) }
+    taskAttachments.push(photo)
+    attachmentStorageKeys.set(photo.id, `hotels/${H}/uploads/${uid('d5', n)}.jpg`)
+  }
+
+  // Finished late: Joko took most of yesterday on it.
+  seedTaskRow({
+    id: L.finishedLate, hotelRef: H, status: 'FINISHED', title: 'Fix the wobbly desk chair', description: 'Base cracked — replaced from stores',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: '0509',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(1440), responseDuration: 12, resolutionDuration: 95, responseSlaStatus: 'ON_TIME', resolutionSlaStatus: 'BREACHED',
+  })
+  seedAssignmentRow(L.finishedLate, 'STAFF', { staffId: IDS.staff.joko }, IDS.staff.joko, null, true, ago(1428))
+  seedHistoryRow(L.finishedLate, IDS.staff.sari, 'NEW', null, ago(1440))
+  seedHistoryRow(L.finishedLate, IDS.staff.joko, 'IN_PROGRESS', null, ago(1428))
+  seedHistoryRow(L.finishedLate, IDS.staff.joko, 'FINISHED', 'Chair base replaced; old one to the workshop.', ago(1345))
+
+  // Verified, but picked up late: the finish was on time once it started.
+  seedTaskRow({
+    id: L.verifiedPickedUpLate, hotelRef: H, status: 'VERIFIED', title: 'Replace shower curtain', description: 'Mould on the hem',
+    sourceProduct: 'sentec-butler', sourceChannel: 'guest', roomNumber: '0611', requesterName: 'Sofia Rossi', visitRef: 'V-88119',
+    slaId: IDS.sla.smtpStandard, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(600), responseDuration: 25, resolutionDuration: 55, responseSlaStatus: 'BREACHED', resolutionSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(L.verifiedPickedUpLate, 'STAFF', { staffId: IDS.staff.made }, IDS.staff.made, null, true, ago(575))
+  seedHistoryRow(L.verifiedPickedUpLate, IDS.staff.made, 'IN_PROGRESS', null, ago(575))
+  seedHistoryRow(L.verifiedPickedUpLate, IDS.staff.made, 'FINISHED', null, ago(545))
+  seedHistoryRow(L.verifiedPickedUpLate, IDS.staff.sari, 'VERIFIED', null, ago(500))
+
+  // Sari's task with a pending offer to Budi, so his inbox has something to answer.
+  seedTaskRow({
+    id: L.offerToBudi, hotelRef: H, status: 'IN_PROGRESS', title: 'Welcome amenity for VIP arrival', description: 'Fruit, flowers and the GM\'s card in 2001 before 15:00',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: '2001', requesterName: 'Mr and Mrs Lim',
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpFrontOffice,
+    activationDate: ago(30), responseDuration: 3, responseSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(L.offerToBudi, 'STAFF', { staffId: IDS.staff.sari }, IDS.staff.sari, null, true, ago(27))
+  seedHistoryRow(L.offerToBudi, IDS.staff.sari, 'NEW', null, ago(30))
+  seedHistoryRow(L.offerToBudi, IDS.staff.sari, 'IN_PROGRESS', null, ago(27))
+  taskOffers.push({
+    id: IDS.offer.vipToBudi, hotelRef: H, taskId: L.offerToBudi,
+    fromStaff: IDS.staff.sari, toStaff: IDS.staff.budi,
+    note: 'Can you take this one? I am on the desk until 15:00.',
+    state: 'PENDING', decidedAt: null, createdAt: ago(12),
+  })
+
+  // Owned by a department the hotel has since deactivated: the badge says so.
+  seedTaskRow({
+    id: L.inactiveDept, hotelRef: H, status: 'NEW', title: 'Spa towel restock', description: 'Left over from the spa handover',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: 'Spa',
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpSpa,
+    activationDate: ago(5),
+  })
+  seedHistoryRow(L.inactiveDept, IDS.staff.agus, 'NEW', null, ago(5))
+
+  // Joko's task with Budi helping — Budi sees it under Helping, read-only otherwise.
+  seedTaskRow({
+    id: L.helpingBudi, hotelRef: H, status: 'IN_PROGRESS', title: 'Move furniture for carpet fitting', description: 'Clear 1203 before the fitters arrive',
+    sourceProduct: 'sentec-tasks', sourceChannel: 'staff', roomNumber: '1203',
+    slaId: IDS.sla.smtpScheduled, hotelDepartmentId: IDS.dept.smtpHousekeeping,
+    activationDate: ago(40), responseDuration: 8, responseSlaStatus: 'ON_TIME',
+  })
+  seedAssignmentRow(L.helpingBudi, 'STAFF', { staffId: IDS.staff.joko }, IDS.staff.sari, null, true, ago(32))
+  seedHistoryRow(L.helpingBudi, IDS.staff.sari, 'NEW', null, ago(40))
+  seedHistoryRow(L.helpingBudi, IDS.staff.joko, 'IN_PROGRESS', null, ago(32))
+  taskCollaborators.push({ id: newId(), hotelRef: H, taskId: L.helpingBudi, staffId: IDS.staff.budi, staffName: null, addedBy: IDS.staff.sari, isActive: true, createdAt: ago(25) })
 
   // ── Templates. Two shared (admin-made) schedules and Budi's own weekday
   // rounds; the mock worker fills nextRunAt at boot and creates tasks lazily.
