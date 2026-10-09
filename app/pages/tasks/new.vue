@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowLeftIcon, CircleDashedIcon, FolderKanbanIcon, LockIcon, MinusIcon, PlusIcon, RepeatIcon, Trash2Icon, UserRoundIcon, UsersIcon, WandSparklesIcon } from '@lucide/vue'
+import { CircleDashedIcon, FolderKanbanIcon, LockIcon, MinusIcon, PlusIcon, RepeatIcon, Trash2Icon, UserRoundIcon, UsersIcon, WandSparklesIcon } from '@lucide/vue'
 import { useTasksApi, type StaffCreateTaskPayload, type TaskPreview } from '~/composables/useTasksApi'
 import { useCaps } from '~/composables/useCaps'
 import { useSession } from '~/composables/useSession'
@@ -14,7 +14,6 @@ import { HEAT_TONE, prioritySignal } from '~/utils/task-signals'
 definePageMeta({ title: 'New task' })
 
 const route = useRoute()
-const router = useRouter()
 const api = useTasksApi()
 const caps = useCaps()
 const session = useSession()
@@ -449,14 +448,6 @@ onMounted(load)
 
 <template>
   <div class="space-y-4">
-    <button
-      type="button"
-      class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
-      @click="router.back()"
-    >
-      <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
-    </button>
-
     <EmptyState
       v-if="!caps.canCreateTask.value"
       :icon="LockIcon"
@@ -763,11 +754,11 @@ onMounted(load)
                 </div>
                 <div class="flex justify-between gap-2">
                   <dt class="text-muted-foreground">Pick up by</dt>
-                  <dd class="font-medium tabular-nums">{{ formatAbsolute(preview.task.responseDueAt) }}</dd>
+                  <dd class="font-bold tabular-nums">{{ formatAbsolute(preview.task.responseDueAt) }}</dd>
                 </div>
                 <div class="flex justify-between gap-2">
                   <dt class="text-muted-foreground">Finish by</dt>
-                  <dd class="font-medium tabular-nums">{{ formatAbsolute(preview.task.resolutionDueAt) }}</dd>
+                  <dd class="font-bold tabular-nums">{{ formatAbsolute(preview.task.resolutionDueAt) }}</dd>
                 </div>
                 <!-- Preview-only: the API names the policy the task would get
                      (rule's, else SLA's, else the hotel default); absent when none. -->

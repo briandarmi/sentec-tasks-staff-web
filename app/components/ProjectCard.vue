@@ -53,7 +53,7 @@ const progress = computed(() => props.project.progress)
       <Progress :model-value="progress.percent" :aria-label="`${progress.percent}% done`" />
     </div>
 
-    <p v-if="dates" class="mt-3 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+    <p v-if="dates" class="mt-3 flex items-center gap-1.5 text-xs font-bold text-muted-foreground">
       <CalendarDaysIcon class="size-3.5" aria-hidden="true" /> {{ dates }}
     </p>
   </NuxtLink>

@@ -88,6 +88,18 @@ const sourceBadge = computed(() => {
 const createdBy = computed(() => (task.value ? sourceApps.nameOf(task.value.sourceProduct) : null))
 
 /**
+ * The facts strip under the header — department, catalog item, quantity,
+ * category — is rendered only when at least one of its badges would be:
+ * an empty strip is a blank band of card padding. Keep these four tests in
+ * step with the `v-if`s on the badges themselves.
+ */
+const hasFacts = computed(() => {
+  const t = task.value
+  if (!t) return false
+  return Boolean(t.department || (t.itemName && t.itemName !== t.title) || (t.quantity && t.quantity > 1) || t.categoryName)
+})
+
+/**
  * Claim is offered when nobody personally holds the task: unassigned, or
  * sitting in a pool (whose membership the server checks — a non-member gets
  * the real 403 naming the pool). A person's assignment is never stolen via
@@ -332,7 +344,7 @@ onMounted(load)
             </Badge>
           </div>
           <p class="text-xs font-medium text-muted-foreground">
-            {{ taskRef(task.id) }} · opened {{ relativeTime(task.createdAt) }}
+            {{ taskRef(task.id) }} · opened <span class="font-bold">{{ relativeTime(task.createdAt) }}</span>
           </p>
           <!-- A project task has left the hotel board; the chip is the way back
                to where its siblings are. -->
@@ -345,7 +357,7 @@ onMounted(load)
             <span class="truncate">Project · {{ task.project.name }}</span>
           </NuxtLink>
         </CardHeader>
-        <CardContent class="flex flex-wrap gap-1.5">
+        <CardContent v-if="hasFacts" class="flex flex-wrap gap-1.5">
           <!-- A department the hotel has since retired still owns its old
                tasks; say so rather than show a name nobody can pick any more. -->
           <Badge v-if="task.department" variant="outline" class="min-h-7">{{ task.department.name }}{{ task.department.isActive === false ? ' (inactive)' : '' }}</Badge>
@@ -432,7 +444,7 @@ onMounted(load)
       <SubmitPanel :task="task" :can-submit="isMine || isHelper" @updated="applyDetail" />
 
       <Card>
-        <CardContent class="space-y-3 pt-6 text-sm">
+        <CardContent class="space-y-3 text-sm">
           <div class="flex items-center gap-2">
             <UserRoundIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
             <span class="text-muted-foreground">Assignee</span>
@@ -476,22 +488,22 @@ onMounted(load)
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">{{ CLOCK_WORDS.response }}</span>
             <span
-              class="ml-auto font-medium tabular-nums"
-              :class="task.responseSlaStatus === 'BREACHED' ? 'font-bold text-danger-tint-foreground' : ''"
+              class="ml-auto font-bold tabular-nums"
+              :class="task.responseSlaStatus === 'BREACHED' ? 'text-danger-tint-foreground' : ''"
             >{{ formatAbsolute(task.responseDueAt) }}</span>
           </div>
           <div v-if="task.resolutionDueAt" class="flex items-center gap-2">
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">{{ CLOCK_WORDS.resolution }}</span>
             <span
-              class="ml-auto font-medium tabular-nums"
-              :class="task.resolutionSlaStatus === 'BREACHED' ? 'font-bold text-danger-tint-foreground' : ''"
+              class="ml-auto font-bold tabular-nums"
+              :class="task.resolutionSlaStatus === 'BREACHED' ? 'text-danger-tint-foreground' : ''"
             >{{ formatAbsolute(task.resolutionDueAt) }}</span>
           </div>
           <div v-if="task.dueAt" class="flex items-center gap-2">
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">Due</span>
-            <span class="ml-auto font-medium tabular-nums">{{ formatAbsolute(task.dueAt) }}</span>
+            <span class="ml-auto font-bold tabular-nums">{{ formatAbsolute(task.dueAt) }}</span>
           </div>
           <p v-if="task.notes" class="rounded-lg bg-muted/60 px-3 py-2 text-foreground">{{ task.notes }}</p>
         </CardContent>

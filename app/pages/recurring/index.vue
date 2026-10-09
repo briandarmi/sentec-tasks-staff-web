@@ -153,25 +153,27 @@ onMounted(load)
 
 <template>
   <div class="space-y-4">
-    <button
-      type="button"
-      class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
-      @click="router.back()"
-    >
-      <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
-    </button>
+    <StickyListHeader>
+      <button
+        type="button"
+        class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+        @click="router.back()"
+      >
+        <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
+      </button>
 
-    <div class="flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <h2 class="text-xl font-bold tracking-tight">Repeats</h2>
-        <p class="text-sm text-muted-foreground">
-          Tasks you set to repeat. Each run makes a fresh task on the schedule{{ tenant?.timezone ? `, in ${tenant.timezone} time` : '' }}.
-        </p>
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <h2 class="text-xl font-bold tracking-tight">Repeats</h2>
+          <p class="text-sm text-muted-foreground">
+            Tasks you set to repeat. Each run makes a fresh task on the schedule{{ tenant?.timezone ? `, in ${tenant.timezone} time` : '' }}.
+          </p>
+        </div>
+        <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
+          <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
+        </Button>
       </div>
-      <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-        <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
-      </Button>
-    </div>
+    </StickyListHeader>
 
     <Alert v-if="errorMessage" variant="destructive">
       <AlertTitle>Something went wrong</AlertTitle>
@@ -198,11 +200,11 @@ onMounted(load)
             <CardTitle class="text-base leading-snug">{{ template.name }}</CardTitle>
             <Badge :variant="template.isActive ? 'secondary' : 'outline'" class="shrink-0 text-xs">{{ template.isActive ? 'Active' : 'Paused' }}</Badge>
           </div>
-          <p class="flex items-center gap-1.5 text-sm font-medium text-foreground/85">
+          <p class="flex items-center gap-1.5 text-sm font-bold text-foreground/85">
             <RepeatIcon class="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
             {{ recurrenceSummary(template.recurrence) }}
           </p>
-          <p v-if="recurrenceWindowLabel(template.recurrence)" class="text-xs text-muted-foreground">{{ recurrenceWindowLabel(template.recurrence) }}</p>
+          <p v-if="recurrenceWindowLabel(template.recurrence)" class="text-xs font-bold text-muted-foreground">{{ recurrenceWindowLabel(template.recurrence) }}</p>
         </CardHeader>
         <CardContent class="space-y-3 text-sm">
           <!-- The worker paused it and said why. This is the one line that must not be missed. -->
@@ -215,11 +217,11 @@ onMounted(load)
           <dl class="space-y-1.5">
             <div class="flex justify-between gap-2">
               <dt class="text-muted-foreground">Next run</dt>
-              <dd class="font-medium tabular-nums">{{ template.isActive && template.nextRunAt ? formatDateTime(template.nextRunAt) : '—' }}</dd>
+              <dd class="font-bold tabular-nums">{{ template.isActive && template.nextRunAt ? formatDateTime(template.nextRunAt) : '—' }}</dd>
             </div>
             <div class="flex justify-between gap-2">
               <dt class="text-muted-foreground">Last run</dt>
-              <dd class="font-medium tabular-nums">
+              <dd class="font-bold tabular-nums">
                 <template v-if="template.lastRunAt">
                   {{ formatDateTime(template.lastRunAt) }}
                   <NuxtLink v-if="template.lastTaskId" :to="`/tasks/${template.lastTaskId}`" class="ml-1 text-primary underline-offset-2 hover:underline">{{ taskRef(template.lastTaskId) }}</NuxtLink>

@@ -101,7 +101,7 @@ onMounted(load)
                 <Badge variant="destructive" class="text-xs">{{ levelLabel(record.level) }}</Badge>
                 <span class="truncate text-xs font-medium text-foreground">{{ triggerLabel(record.trigger.kind, record.trigger.value) }}</span>
               </p>
-              <span class="shrink-0 text-xs text-muted-foreground" :title="formatDateTime(record.appliedAt)">{{ relativeTime(record.appliedAt) }}</span>
+              <span class="shrink-0 text-xs font-bold text-muted-foreground" :title="formatDateTime(record.appliedAt)">{{ relativeTime(record.appliedAt) }}</span>
             </div>
             <ul class="space-y-0.5 pl-0.5 text-xs">
               <li v-for="(applied, index) in record.applied" :key="`a${index}`" class="text-foreground">

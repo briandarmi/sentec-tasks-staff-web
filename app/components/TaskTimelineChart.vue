@@ -125,14 +125,14 @@ const summary = computed(() => {
       </template>
     </div>
 
-    <div class="flex justify-between text-xs tabular-nums text-muted-foreground" aria-hidden="true">
+    <div class="flex justify-between text-xs font-bold tabular-nums text-muted-foreground" aria-hidden="true">
       <span>{{ formatAxisTime(model.start, span) }}</span>
       <span>{{ formatAxisTime(model.end, span) }}</span>
     </div>
 
     <p v-if="model.scheduled" class="flex items-center gap-1.5 text-sm text-muted-foreground">
       <CalendarClockIcon class="size-4" aria-hidden="true" />
-      Starts at {{ formatClockTime(task.activationDate) }}. The clock has not started yet.
+      Starts at <span class="font-bold">{{ formatClockTime(task.activationDate) }}</span>. The clock has not started yet.
     </p>
 
     <!-- Legend: phases with their durations, then each target with its verdict. -->
@@ -140,7 +140,7 @@ const summary = computed(() => {
       <li v-for="phase in model.phases" :key="`legend-${phase.status}-${phase.from}`" class="flex items-center gap-1.5">
         <span class="size-2.5 rounded-full" :class="statusSignal(phase.status).dot" />
         <span class="font-semibold text-foreground">{{ statusSignal(phase.status).label }}</span>
-        <span class="tabular-nums text-muted-foreground">{{ formatDuration(phase.minutes) }}{{ phase.current ? ' so far' : '' }}</span>
+        <span class="font-bold tabular-nums text-muted-foreground">{{ formatDuration(phase.minutes) }}{{ phase.current ? ' so far' : '' }}</span>
       </li>
     </ul>
 
@@ -148,7 +148,7 @@ const summary = computed(() => {
       <li v-for="marker in targetMarkers" :key="`target-${marker.kind}`" class="flex items-center gap-1.5">
         <span class="h-3.5 w-0.5 rounded-full" :class="tickClass(marker)" />
         <span class="text-muted-foreground">{{ markerLabel(marker) }}</span>
-        <span class="font-semibold tabular-nums text-foreground">{{ formatClockTime(new Date(marker.at).toISOString()) }}</span>
+        <span class="font-bold tabular-nums text-foreground">{{ formatClockTime(new Date(marker.at).toISOString()) }}</span>
         <template v-if="markerOutcome(marker)">
           <component :is="markerOutcome(marker)!.icon" class="size-3.5" :class="markerOutcome(marker)!.tone" />
           <span class="font-medium" :class="markerOutcome(marker)!.tone">{{ markerOutcome(marker)!.text }}</span>

@@ -129,7 +129,7 @@ async function sendBack() {
       <!-- The sign-off line: who, when (clock time — reviewers reason in shift
            time, not "3h ago"), and the verdict the clock already reached. -->
       <CardDescription class="text-sm">
-        Submitted by {{ submitterName }}<template v-if="task.submittedAt"> · {{ formatClockTime(task.submittedAt) }}</template><span
+        Submitted by {{ submitterName }}<template v-if="task.submittedAt"> · <span class="font-bold">{{ formatClockTime(task.submittedAt) }}</span></template><span
           v-if="verdict"
           class="font-semibold"
           :class="verdict.cls"

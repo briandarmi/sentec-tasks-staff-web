@@ -15,7 +15,7 @@ const caps = useCaps()
 
 /**
  * One status per call — GET /v1/projects?status= takes exactly one and is
- * not paginated. The chip lives in the URL so a filtered view survives a
+ * not paginated. The tab lives in the URL so a filtered view survives a
  * refresh and the back button from a project page. Admins see every project
  * at the hotel; everyone else sees the ones they belong to.
  */
@@ -140,35 +140,35 @@ async function create() {
 
 <template>
   <div class="space-y-4">
-    <div class="flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <h2 class="text-xl font-bold tracking-tight">Projects</h2>
-        <p class="text-sm text-muted-foreground">
-          {{ caps.isAdmin.value ? 'Every project at this property.' : 'The projects you are part of.' }}
-          Their tasks live here, not on the hotel board.
-        </p>
+    <StickyListHeader flush>
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <h2 class="text-xl font-bold tracking-tight">Projects</h2>
+          <p class="text-sm text-muted-foreground">
+            {{ caps.isAdmin.value ? 'Every project at this property.' : 'The projects you are part of.' }}
+            Their tasks live here, not on the hotel board.
+          </p>
+        </div>
+        <div class="flex items-center gap-1">
+          <Button v-if="caps.canCreateProject.value" @click="openCreate">
+            <PlusIcon class="h-4 w-4" /> New
+          </Button>
+          <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
+            <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
+          </Button>
+        </div>
       </div>
-      <div class="flex items-center gap-1">
-        <Button v-if="caps.canCreateProject.value" @click="openCreate">
-          <PlusIcon class="h-4 w-4" /> New
-        </Button>
-        <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-          <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
-        </Button>
-      </div>
-    </div>
 
-    <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-      <FilterChip
-        v-for="option in PROJECT_STATUSES"
-        :key="option"
-        :active="status === option"
-        :aria-pressed="status === option"
-        :icon="projectStatusMeta(option).icon"
-        :label="projectStatusMeta(option).label"
-        @click="setStatus(option)"
-      />
-    </div>
+      <!-- One status at a time, as the same tab rail My work has: three
+           options, all visible, the rail ending where the block does. -->
+      <Tabs :model-value="status" @update:model-value="value => setStatus(value as ProjectStatus)">
+        <TabsList class="grid w-full grid-cols-3">
+          <TabsTrigger v-for="option in PROJECT_STATUSES" :key="option" :value="option" class="min-h-11 px-2">
+            <component :is="projectStatusMeta(option).icon" aria-hidden="true" /> {{ projectStatusMeta(option).label }}
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
+    </StickyListHeader>
 
     <Alert v-if="errorMessage" variant="destructive">
       <AlertTitle>Something went wrong</AlertTitle>

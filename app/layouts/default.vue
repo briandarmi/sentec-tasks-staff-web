@@ -21,10 +21,14 @@ const title = computed(() => (route.meta.title as string | undefined) ?? 'Sentec
   <div class="flex min-h-svh flex-col bg-muted/20">
     <AppTopBar :title="title" />
 
-    <main class="mx-auto w-full max-w-lg flex-1 px-4 pb-24 pt-4">
+    <!-- pb-36: room for the bottom bar (56px) plus the floating New-task
+         button above it (16px gap, 56px tall, 16px clearance), so the last
+         card and the Load-more button scroll clear of both. -->
+    <main class="mx-auto w-full max-w-lg flex-1 px-4 pb-36 pt-4">
       <NuxtPage :key="pageKey" />
     </main>
 
     <BottomNav />
+    <CreateTaskFab />
   </div>
 </template>

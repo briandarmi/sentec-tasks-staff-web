@@ -79,18 +79,18 @@ onMounted(load)
           <dl class="space-y-1.5">
             <div v-if="data.unclaimedMinutes > 0" class="flex justify-between gap-2">
               <dt class="text-muted-foreground">Unclaimed</dt>
-              <dd class="font-medium tabular-nums">{{ formatMinutes(data.unclaimedMinutes) }}</dd>
+              <dd class="font-bold tabular-nums">{{ formatMinutes(data.unclaimedMinutes) }}</dd>
             </div>
             <div v-if="data.pooledMinutes > 0" class="flex justify-between gap-2">
               <dt class="text-muted-foreground">In a pool</dt>
-              <dd class="font-medium tabular-nums">{{ formatMinutes(data.pooledMinutes) }}</dd>
+              <dd class="font-bold tabular-nums">{{ formatMinutes(data.pooledMinutes) }}</dd>
             </div>
             <div v-for="holder in holders" :key="holder.staffId" class="flex justify-between gap-2">
               <dt class="min-w-0 truncate text-muted-foreground">
                 {{ holderName(holder) }}
                 <span v-if="holder.holds > 1" class="text-xs">· {{ holder.holds }} holds</span>
               </dt>
-              <dd class="shrink-0 font-medium tabular-nums">{{ formatMinutes(holder.minutes) }}</dd>
+              <dd class="shrink-0 font-bold tabular-nums">{{ formatMinutes(holder.minutes) }}</dd>
             </div>
             <p v-if="!holders.length && data.unclaimedMinutes === 0 && data.pooledMinutes === 0" class="text-xs text-muted-foreground">Nothing to split yet.</p>
           </dl>

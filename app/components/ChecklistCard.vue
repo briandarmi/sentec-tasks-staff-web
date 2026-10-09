@@ -277,7 +277,7 @@ async function addSteps() {
               <!-- Meta line: who did it, who holds it, the note — only what is set. -->
               <span class="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                 <span v-if="item.isDone && item.doneAt">
-                  Done<template v-if="whoIs(item.doneBy)"> by {{ whoIs(item.doneBy) }}</template> · {{ formatDateTime(item.doneAt) }}
+                  Done<template v-if="whoIs(item.doneBy)"> by {{ whoIs(item.doneBy) }}</template> · <span class="font-bold">{{ formatDateTime(item.doneAt) }}</span>
                 </span>
                 <span v-if="item.assignedStaffId" class="font-medium" :class="item.assignedStaffId === session.userId.value ? 'text-primary' : ''">
                   {{ item.assignedStaffId === session.userId.value ? 'Yours' : displayName(item.assignedStaffName) }}

@@ -133,7 +133,7 @@ const sourceBadge = computed(() => {
 
       <div class="mt-3 flex items-center justify-between gap-2">
         <span class="truncate text-xs font-medium text-muted-foreground">
-          {{ taskRef(task.id) }} · {{ relativeTime(task.createdAt) }}
+          {{ taskRef(task.id) }} · <span class="font-bold">{{ relativeTime(task.createdAt) }}</span>
         </span>
         <div class="flex items-center gap-1.5">
           <Avatar v-if="assigneeName" class="size-7" :title="assigneeName">

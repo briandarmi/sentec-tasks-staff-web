@@ -80,25 +80,27 @@ onMounted(load)
 
 <template>
   <div class="space-y-4">
-    <button
-      type="button"
-      class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
-      @click="router.back()"
-    >
-      <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
-    </button>
+    <StickyListHeader>
+      <button
+        type="button"
+        class="flex min-h-11 items-center gap-1.5 rounded text-sm font-semibold text-muted-foreground active:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+        @click="router.back()"
+      >
+        <ArrowLeftIcon class="size-5" aria-hidden="true" /> Back
+      </button>
 
-    <div class="flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <h2 class="text-xl font-bold tracking-tight">
-          Offers<template v-if="offers.length"> ({{ offers.length }})</template>
-        </h2>
-        <p class="text-sm text-muted-foreground">Tasks colleagues want to hand to you. They move only if you accept.</p>
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <h2 class="text-xl font-bold tracking-tight">
+            Offers<template v-if="offers.length"> ({{ offers.length }})</template>
+          </h2>
+          <p class="text-sm text-muted-foreground">Tasks colleagues want to hand to you. They move only if you accept.</p>
+        </div>
+        <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
+          <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
+        </Button>
       </div>
-      <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" @click="load">
-        <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
-      </Button>
-    </div>
+    </StickyListHeader>
 
     <Alert v-if="loadError" variant="destructive">
       <AlertTitle>Could not load offers</AlertTitle>
@@ -131,7 +133,7 @@ onMounted(load)
             {{ offer.taskTitle }}
           </NuxtLink>
           <!-- One docket line: who, and how long it has been waiting on you. -->
-          <p class="text-sm text-muted-foreground">From {{ fromName(offer) }} · {{ relativeTime(offer.createdAt) }}</p>
+          <p class="text-sm text-muted-foreground">From {{ fromName(offer) }} · <span class="font-bold">{{ relativeTime(offer.createdAt) }}</span></p>
           <p v-if="offer.note" class="rounded-lg bg-muted/60 px-3 py-2 text-sm text-foreground">“{{ offer.note }}”</p>
           <div class="flex gap-2 pt-1">
             <Button

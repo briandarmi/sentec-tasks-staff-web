@@ -26,6 +26,7 @@ import { formatLocalDate } from '~/utils/recurrence'
 import { projectLevelLabel, projectRights, projectStatusMeta } from '~/utils/project-ui'
 import { displayName, formatDateTime, initials } from '~/utils/task-ui'
 import { statusSignal } from '~/utils/task-signals'
+import { SELECT_EMPTY, fromSelectValue, toSelectValue } from '~/utils/select-empty'
 
 definePageMeta({ title: 'Project' })
 
@@ -106,7 +107,8 @@ async function loadBoard() {
   try {
     const res = await api.getProjectBoard(id.value)
     board.value = { ...res, columns: res.columns ?? [] }
-    if (board.value.columns.length && !board.value.columns.some(c => c.id === activeColumnId.value)) activeColumnId.value = board.value.columns[0]!.id
+    // A pick that no longer names a column falls back to "All statuses" (the default).
+    if (activeColumnId.value && !board.value.columns.some(c => c.id === activeColumnId.value)) activeColumnId.value = ''
   }
   catch {
     // A property without a provisioned board still has the list and members.
@@ -135,6 +137,7 @@ async function act(fn: () => Promise<unknown>, then?: () => Promise<unknown>) {
 
 // ── board ────────────────────────────────────────────────────────────────────
 
+/** '' is "All statuses": every card on the board, the default. */
 const activeColumnId = ref('')
 const columns = computed(() => board.value?.columns ?? [])
 const countByColumn = computed(() => {
@@ -142,7 +145,7 @@ const countByColumn = computed(() => {
   for (const task of tasks.value) if (task.columnId) counts.set(task.columnId, (counts.get(task.columnId) ?? 0) + 1)
   return counts
 })
-const columnTasks = computed(() => tasks.value.filter(t => t.columnId === activeColumnId.value))
+const columnTasks = computed(() => (activeColumnId.value ? tasks.value.filter(t => t.columnId === activeColumnId.value) : tasks.value))
 
 const movingTask = ref<TaskListItem | null>(null)
 const moveOpen = computed({ get: () => movingTask.value !== null, set: (open: boolean) => { if (!open) movingTask.value = null } })
@@ -516,12 +519,12 @@ onMounted(load)
           <div v-if="dates" class="flex items-center gap-2">
             <CalendarDaysIcon class="h-4 w-4 shrink-0 text-muted-foreground" />
             <span class="text-muted-foreground">Dates</span>
-            <span class="ml-auto font-medium tabular-nums">{{ dates }}</span>
+            <span class="ml-auto font-bold tabular-nums">{{ dates }}</span>
           </div>
           <div v-if="project.completedAt" class="flex items-center gap-2">
             <span class="h-4 w-4" />
             <span class="text-muted-foreground">Completed</span>
-            <span class="ml-auto font-medium tabular-nums">{{ formatDateTime(project.completedAt) }}</span>
+            <span class="ml-auto font-bold tabular-nums">{{ formatDateTime(project.completedAt) }}</span>
           </div>
         </CardContent>
       </Card>
@@ -575,20 +578,24 @@ onMounted(load)
           description="Boards are provisioned per property. The Tasks tab still lists everything."
         />
         <template v-else>
-          <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1" role="tablist" aria-label="Board columns">
-            <FilterChip
-              v-for="column in columns"
-              :key="column.id"
-              role="tab"
-              :aria-selected="column.id === activeColumnId"
-              :active="column.id === activeColumnId"
-              :icon="column.status ? statusSignal(column.status).icon : undefined"
-              :dot="column.status ? undefined : 'bg-muted-foreground/40'"
-              :label="column.name"
-              :count="countByColumn.get(column.id) ?? 0"
-              @click="activeColumnId = column.id"
-            />
-          </div>
+          <!-- One column at a time, as the same select the Tasks page uses
+               for its Status: every column in view at once with its count,
+               nothing hiding off the right edge. -->
+          <Select :model-value="toSelectValue(activeColumnId)" @update:model-value="value => activeColumnId = fromSelectValue(value)">
+            <SelectTrigger id="board-column" size="sm" class="h-11 w-full" aria-label="Board column">
+              <SelectValue placeholder="All statuses" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="SELECT_EMPTY">
+                <LayoutListIcon aria-hidden="true" /> All statuses
+              </SelectItem>
+              <SelectItem v-for="column in columns" :key="column.id" :value="column.id">
+                <component :is="column.status ? statusSignal(column.status).icon : LayoutListIcon" aria-hidden="true" />
+                {{ column.name }}
+                <span class="tabular-nums text-muted-foreground">({{ countByColumn.get(column.id) ?? 0 }})</span>
+              </SelectItem>
+            </SelectContent>
+          </Select>
           <div v-if="columnTasks.length" class="space-y-3">
             <div v-for="task in columnTasks" :key="task.id" class="space-y-2">
               <TaskCard :task="task" :mine="task.assignment?.kind === 'STAFF' && task.assignment.staffId === session.userId.value" />
@@ -603,7 +610,7 @@ onMounted(load)
               </Button>
             </div>
           </div>
-          <p v-else class="select-none py-12 text-center text-sm text-muted-foreground/60">Nothing in this column</p>
+          <p v-else class="select-none py-12 text-center text-sm text-muted-foreground/60">{{ activeColumnId ? 'Nothing in this column' : 'Nothing on the board yet' }}</p>
         </template>
       </template>
 
@@ -700,7 +707,7 @@ onMounted(load)
               <span class="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                 <span>{{ projectLevelLabel(member.level) }}</span>
                 <span v-if="member.source === 'AUTO'" class="rounded-full bg-muted px-1.5 font-medium">auto</span>
-                <span>· since {{ formatDateTime(member.addedAt) }}</span>
+                <span>· since <span class="font-bold">{{ formatDateTime(member.addedAt) }}</span></span>
               </span>
             </span>
             <template v-if="rights.canEditMembers">

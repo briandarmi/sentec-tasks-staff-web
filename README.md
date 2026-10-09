@@ -138,11 +138,11 @@ so the app wears the Sentinel Tech icon mark in Sentinel Blue.
 | Route         | What it is                                                      |
 | ------------- | --------------------------------------------------------------- |
 | `/`           | My work — assigned to me, plus my department's unclaimed queue   |
-| `/tasks`      | List and board in one (since 2026-10-09): two selects side by side — Status lists the property's columns (a pick is the API's `columnId` filter; every option carries a live total; plain statuses where no board exists) and Show narrows to To claim / Mine / Helping / Picked up late / Late with server totals. A Sort select orders the rows — most urgent first (default), highest priority, pick-up deadline, finish deadline, newest, oldest, by status, by room, or grouped by source app (one lane per originating app, most urgent lane first); the API's own orders drive the cursor, the rest apply over the loaded rows. Filters and the sort live in the URL, paging is keyset; one-tap Claim inside every card nobody personally holds, a tonal button tinted in the card's traffic-light colour |
+| `/tasks`      | List and board in one (since 2026-10-09). Everything above the cards — the count, the search, the selects — is one compact `StickyListHeader` block that sticks under the top bar and ends in a rule (2026-10-09; `/`, `/projects`, `/offers` and `/recurring` wrap their headings and filters in the same component), so the controls stay in reach while the list scrolls. Two selects side by side, no labels above them (the empty options name the axis) — Status lists the property's columns (a pick is the API's `columnId` filter; every option carries a live total; plain statuses where no board exists) and Show narrows to To claim / Mine / Helping / Picked up late / Late with server totals. An icon-only Sort select beside the search (the trigger wears the current order's icon) orders the rows — most urgent first (default), highest priority, pick-up deadline, finish deadline, newest, oldest, by status, by room, or grouped by source app (one lane per originating app, most urgent lane first); the API's own orders drive the cursor, the rest apply over the loaded rows. Filters and the sort live in the URL, paging is keyset; one-tap Claim inside every card nobody personally holds, a tonal button tinted in the card's traffic-light colour |
 | `/tasks/[id]` | Detail: room-first header, project chip, claim (pool-aware), assign, return, delegate, helpers, checklist steps (tick / note / hand over / add / remove), submit / review (with the other pending reviews), move, "who held it" time split, comment, attach & upload |
 | `/tasks/new`  | Raise a task, with a live preview off the API's own resolver; start from a shared template; "Repeat" turns it into a recurring task; `?projectId=` raises it inside a project |
 | `/board`      | Redirects to `/tasks` — the board merged into the list on 2026-10-09 |
-| `/projects`   | Projects I belong to (every project, for admins), one status at a time, with progress, late and needs-manager flags; leaders and admins open new ones |
+| `/projects`   | Projects I belong to (every project, for admins), one status at a time on a tab rail, with progress, late and needs-manager flags; leaders and admins open new ones |
 | `/projects/[id]` | One project: header and progress, edit / complete / cancel / reopen / hand over for the manager or an admin; Board (the property's columns, the project's cards), Tasks (new, add existing, remove) and Members (levels, auto-joined, add / remove) |
 | `/recurring`  | "Repeats": my recurring tasks — schedule, next and last run, pause / resume, edit, archive; the scheduler's `lastError` when it paused one |
 | `/offers`     | Delegation offers waiting on my accept or decline               |
@@ -167,8 +167,9 @@ staff need before they may raise work at all.
   filter is *clamped* to their own id, and an out-of-scope task detail is the
   same 404 a missing one gets. **Project tasks are left out of the default
   list and the hotel board**; they show under Mine / Helping, in offers, in
-  detail, and in the project itself. The list's "What shows here" says all of
-  this in the viewer's terms.
+  detail, and in the project itself. The list's "What shows here" info button
+  beside the heading opens a dialog that says all of this in the viewer's
+  terms.
 - **Checklist steps.** `TaskDetail.checklist` is the only read. Tick / untick
   with an optional note (≤ 2000 chars; absent keeps it, null clears it,
   unticking keeps it); add up to 50 steps of ≤ 200 chars; remove; hand a step
@@ -475,8 +476,11 @@ it, all in `app/utils/task-signals.ts` (this app's own; the shared
   names, which the admin console and the API share.
 
 Sizes follow from the same goal: no text under 12px, every tap target at
-least 44px (`FilterChip` for every filter strip, 56px bottom-nav tabs with a
-tinted pill behind the active icon, 56px New-task action, 44px form radios
+least 44px (44px selects and tab rails for every filter — the scrolling
+`FilterChip` strips were retired on 2026-10-09 — 56px bottom-nav tabs with a
+tinted pill behind the active icon, a 56px floating New-task button above the
+bar at bottom-right (`CreateTaskFab`, since 2026-10-09; gone on the new-task
+page and without the create permission), 44px form radios
 with the icon and tint they will produce), card titles 16px. The home screen
 counts the red and amber open tasks in two tappable chips above the tabs.
 Signal chips are `SignalChip` (28px, not targets); the detail banner is

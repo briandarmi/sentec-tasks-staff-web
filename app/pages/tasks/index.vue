@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Component } from 'vue'
-import { AlarmClockIcon, CalendarArrowDownIcon, CalendarArrowUpIcon, ClockAlertIcon, DoorOpenIcon, FilterIcon, FilterXIcon, FlagIcon, FlameIcon, HandIcon, LayersIcon, LayoutListIcon, ListOrderedIcon, RefreshCwIcon, SearchIcon, TimerIcon, UserRoundIcon, UsersIcon } from '@lucide/vue'
+import { AlarmClockIcon, CalendarArrowDownIcon, CalendarArrowUpIcon, ClockAlertIcon, DoorOpenIcon, FilterIcon, FilterXIcon, FlagIcon, FlameIcon, HandIcon, InfoIcon, LayersIcon, LayoutListIcon, ListOrderedIcon, RefreshCwIcon, SearchIcon, TimerIcon, UserRoundIcon, UsersIcon } from '@lucide/vue'
 import { useTasksApi, type TaskQuery } from '~/composables/useTasksApi'
 import { useSession } from '~/composables/useSession'
 import { useCaps } from '~/composables/useCaps'
@@ -349,7 +349,7 @@ interface Chip { value: string, label: string, icon: Component, countKey?: strin
 
 /** The fallback strip for a property without a board; each chip wears its pill's icon. */
 const STATUS_TABS: Chip[] = [
-  { value: '', label: 'All', icon: LayoutListIcon },
+  { value: '', label: 'All statuses', icon: LayoutListIcon },
   { value: 'NEW', label: STATUS_SIGNAL.NEW.label, icon: STATUS_SIGNAL.NEW.icon },
   { value: 'IN_PROGRESS', label: STATUS_SIGNAL.IN_PROGRESS.label, icon: STATUS_SIGNAL.IN_PROGRESS.icon },
   // Leaders read this as their review queue; staff as "waiting on review".
@@ -357,6 +357,13 @@ const STATUS_TABS: Chip[] = [
   { value: 'FINISHED', label: STATUS_SIGNAL.FINISHED.label, icon: STATUS_SIGNAL.FINISHED.icon },
   { value: 'VERIFIED', label: STATUS_SIGNAL.VERIFIED.label, icon: STATUS_SIGNAL.VERIFIED.icon },
 ]
+
+/**
+ * "What shows here" is an info button beside the heading that opens a dialog,
+ * not a disclosure under it: the text is read once, then never again, so it
+ * should not hold a line of the list's vertical space on a phone.
+ */
+const scopeInfoOpen = ref(false)
 
 /**
  * What the list covers, in the viewer's terms — the [DR-15] rule as of
@@ -382,43 +389,70 @@ const activeColumnName = computed(() => columns.value.find(col => columnActive(c
 
 <template>
   <div class="space-y-4">
-    <div class="flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <!-- The count is the heading: "32 Tasks" says what the subtitle used
-             to, in two words. Plain "Tasks" only until the first page lands. -->
-        <h2 class="text-xl font-bold tracking-tight">
-          {{ isLoading && tasks.length === 0 ? 'Tasks' : `${totalCount} ${totalCount === 1 ? 'Task' : 'Tasks'}` }}
-        </h2>
-        <details class="text-sm text-muted-foreground">
-          <summary class="min-h-8 cursor-pointer select-none font-semibold text-primary-tint-foreground">What shows here</summary>
-          <p class="mt-1 leading-relaxed">{{ scopeDescription }}</p>
-        </details>
+    <!-- Three rows of 44px, no stacked labels: on a phone the sticky block
+         must leave most of the screen to the cards it filters. -->
+    <StickyListHeader>
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex min-w-0 items-center gap-1">
+          <!-- The count is the heading: "32 Tasks" says what the subtitle used
+               to, in two words. Plain "Tasks" only until the first page lands. -->
+          <h2 class="text-xl font-bold tracking-tight">
+            {{ isLoading && tasks.length === 0 ? 'Tasks' : `${totalCount} ${totalCount === 1 ? 'Task' : 'Tasks'}` }}
+          </h2>
+          <Button size="icon" variant="ghost" aria-label="What shows here" title="What shows here" @click="scopeInfoOpen = true">
+            <InfoIcon class="size-5" />
+          </Button>
+        </div>
+        <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" title="Refresh" @click="load">
+          <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
+        </Button>
       </div>
-      <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" title="Refresh" @click="load">
-        <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
-      </Button>
-    </div>
 
-    <div class="relative">
-      <SearchIcon class="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-      <Input v-model="search" placeholder="Search room or title" aria-label="Search the loaded tasks" class="h-12 rounded-xl pl-11 text-base" />
-    </div>
+      <!-- Search, then the order beside it as an icon-only select: it
+           rearranges the rows, it does not narrow them, so it sits apart from
+           the two filters below. The trigger wears the current order's icon;
+           the menu spells every order out. Clear filters joins the row only
+           while there is something to clear. -->
+      <div class="flex items-center gap-2">
+        <div class="relative min-w-0 flex-1">
+          <SearchIcon class="pointer-events-none absolute left-3 top-1/2 size-5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <!-- 16px type on purpose: iOS zooms into any smaller input on focus. -->
+          <Input v-model="search" placeholder="Search room or title" aria-label="Search the loaded tasks" class="h-11 pl-10 text-base" />
+        </div>
+        <Select :model-value="sortKey" @update:model-value="value => setFilter('sort', String(value ?? '') === 'urgency' ? '' : String(value ?? ''))">
+          <SelectTrigger id="filter-sort" size="sm" class="h-11 shrink-0 px-2.5" aria-label="Sort" :title="`Sort: ${sort.label}`">
+            <SelectValue>
+              <component :is="sort.icon" class="size-5 text-foreground" aria-hidden="true" />
+              <span class="sr-only">{{ sort.label }}</span>
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent align="end">
+            <SelectItem v-for="option in sortOptions" :key="option.value" :value="option.value">
+              <component :is="option.icon" aria-hidden="true" />
+              {{ option.label }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <Button v-if="hasFilters" size="icon" variant="secondary" class="shrink-0" aria-label="Clear filters" title="Clear filters" @click="clearFilters">
+          <FilterXIcon class="size-5" />
+        </Button>
+      </div>
 
-    <!-- Two selects side by side: where the work stands (the board's columns,
-         each with its live total — or the plain statuses where the property
-         has no board) and whose it is / how its clocks stand. Every option in
-         view at once, nothing hiding off the right edge. -->
-    <div class="grid grid-cols-2 gap-2">
-      <div class="space-y-1">
-        <Label for="filter-status" class="text-xs font-semibold text-muted-foreground">Status</Label>
+      <!-- Two selects side by side: where the work stands (the board's columns,
+           each with its live total — or the plain statuses where the property
+           has no board) and whose it is / how its clocks stand. Every option in
+           view at once, nothing hiding off the right edge. No labels above
+           them: the empty options name the axis ("All statuses", "Everything")
+           and the trigger carries the name for assistive tech. -->
+      <div class="grid grid-cols-2 gap-2">
         <Select :model-value="toSelectValue(statusSelectValue)" @update:model-value="value => onStatusSelect(fromSelectValue(value))">
-          <SelectTrigger id="filter-status" class="h-12 w-full rounded-xl">
-            <SelectValue placeholder="All" />
+          <SelectTrigger id="filter-status" size="sm" class="h-11 w-full" aria-label="Status">
+            <SelectValue placeholder="All statuses" />
           </SelectTrigger>
           <SelectContent>
             <template v-if="columns.length">
               <SelectItem :value="SELECT_EMPTY">
-                <LayoutListIcon aria-hidden="true" /> All
+                <LayoutListIcon aria-hidden="true" /> All statuses
               </SelectItem>
               <SelectItem v-for="col in columns" :key="col.id" :value="col.id">
                 <component :is="col.status ? statusSignal(col.status).icon : LayoutListIcon" aria-hidden="true" />
@@ -435,12 +469,9 @@ const activeColumnName = computed(() => columns.value.find(col => columnActive(c
             </template>
           </SelectContent>
         </Select>
-      </div>
 
-      <div class="space-y-1">
-        <Label for="filter-scope" class="text-xs font-semibold text-muted-foreground">Show</Label>
         <Select :model-value="toSelectValue(scope)" @update:model-value="value => setFilter('scope', fromSelectValue(value))">
-          <SelectTrigger id="filter-scope" class="h-12 w-full rounded-xl">
+          <SelectTrigger id="filter-scope" size="sm" class="h-11 w-full" aria-label="Show">
             <SelectValue placeholder="Everything" />
           </SelectTrigger>
           <SelectContent>
@@ -455,29 +486,18 @@ const activeColumnName = computed(() => columns.value.find(col => columnActive(c
           </SelectContent>
         </Select>
       </div>
-    </div>
+    </StickyListHeader>
 
-    <!-- The order, as a select of its own: it rearranges the rows, it does
-         not narrow them, so it sits apart from the two filters above. -->
-    <div class="flex items-end gap-2">
-      <div class="min-w-0 flex-1 space-y-1">
-        <Label for="filter-sort" class="text-xs font-semibold text-muted-foreground">Sort</Label>
-        <Select :model-value="sortKey" @update:model-value="value => setFilter('sort', String(value ?? '') === 'urgency' ? '' : String(value ?? ''))">
-          <SelectTrigger id="filter-sort" class="h-12 w-full rounded-xl">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="option in sortOptions" :key="option.value" :value="option.value">
-              <component :is="option.icon" aria-hidden="true" />
-              {{ option.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <Button v-if="hasFilters" variant="secondary" class="h-12 shrink-0" @click="clearFilters">
-        <FilterXIcon class="size-5" /> Clear filters
-      </Button>
-    </div>
+    <!-- A one-paragraph read: no footer, no rules, the corner X is the only
+         way out. -->
+    <Dialog v-model:open="scopeInfoOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader :divided="false">
+          <DialogTitle>What shows here</DialogTitle>
+          <DialogDescription class="leading-relaxed">{{ scopeDescription }}</DialogDescription>
+        </DialogHeader>
+      </DialogContent>
+    </Dialog>
 
     <Alert v-if="errorMessage" variant="destructive">
       <AlertTitle>Something went wrong</AlertTitle>

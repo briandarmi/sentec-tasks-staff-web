@@ -124,85 +124,90 @@ onMounted(load)
 
 <template>
   <div class="space-y-4">
-    <div class="flex items-start justify-between gap-2">
-      <div class="min-w-0">
-        <h2 class="text-xl font-bold tracking-tight">
-          {{ session.displayName.value ? `Hi, ${session.displayName.value.split(' ')[0]}` : 'My work' }}
-        </h2>
-        <p class="text-sm text-muted-foreground">Your tasks at {{ session.activeHotel.value?.name ?? 'this property' }}.</p>
+    <!-- The offers banner rides inside on purpose: it is a demand for an answer,
+         and it should not scroll away. `flush`: the tabs are the last row, their
+         rail is the block's bottom edge. -->
+    <StickyListHeader flush>
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <h2 class="text-xl font-bold tracking-tight">
+            {{ session.displayName.value ? `Hi, ${session.displayName.value.split(' ')[0]}` : 'My work' }}
+          </h2>
+          <p class="text-sm text-muted-foreground">Your tasks at {{ session.activeHotel.value?.name ?? 'this property' }}.</p>
+        </div>
+        <div class="flex items-center gap-1">
+          <Button size="icon" variant="ghost" class="relative" aria-label="Offers" title="Offers" @click="navigateTo('/offers')">
+            <InboxIcon class="size-5" />
+            <span
+              v-if="offerCount > 0"
+              class="absolute right-0 top-0 flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-xs font-bold text-primary-foreground"
+            >
+              {{ offerCount }}
+            </span>
+          </Button>
+          <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" title="Refresh" @click="load">
+            <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
+          </Button>
+        </div>
       </div>
-      <div class="flex items-center gap-1">
-        <Button size="icon" variant="ghost" class="relative" aria-label="Offers" title="Offers" @click="navigateTo('/offers')">
-          <InboxIcon class="size-5" />
-          <span
-            v-if="offerCount > 0"
-            class="absolute right-0 top-0 flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-xs font-bold text-primary-foreground"
-          >
-            {{ offerCount }}
-          </span>
-        </Button>
-        <Button size="icon" variant="ghost" :disabled="isLoading" aria-label="Refresh" title="Refresh" @click="load">
-          <RefreshCwIcon class="size-5" :class="isLoading ? 'animate-spin' : ''" />
-        </Button>
+
+      <!-- The traffic light, counted: red and amber open tasks, as chips that
+           narrow the list. Absent when everything is calm. -->
+      <div v-if="lateCount || soonCount" class="flex flex-wrap gap-2" aria-label="What needs you">
+        <button
+          v-if="lateCount"
+          type="button"
+          class="flex min-h-11 items-center gap-2 rounded-full border px-4 text-sm font-bold transition-shadow focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+          :class="[HEAT_TONE.late.band, focus === 'late' ? 'ring-[3px] ring-destructive/30' : '']"
+          :aria-pressed="focus === 'late'"
+          @click="toggleFocus('late')"
+        >
+          <ClockAlertIcon class="size-5" aria-hidden="true" />
+          {{ lateCount }} {{ lateCount === 1 ? 'needs' : 'need' }} you now
+        </button>
+        <button
+          v-if="soonCount"
+          type="button"
+          class="flex min-h-11 items-center gap-2 rounded-full border px-4 text-sm font-bold transition-shadow focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
+          :class="[HEAT_TONE.soon.band, focus === 'soon' ? 'ring-[3px] ring-warning/30' : '']"
+          :aria-pressed="focus === 'soon'"
+          @click="toggleFocus('soon')"
+        >
+          <ClockIcon class="size-5" aria-hidden="true" />
+          {{ soonCount }} due soon
+        </button>
       </div>
-    </div>
 
-    <!-- The traffic light, counted: red and amber open tasks, as chips that
-         narrow the list. Absent when everything is calm. -->
-    <div v-if="lateCount || soonCount" class="flex flex-wrap gap-2" aria-label="What needs you">
-      <button
-        v-if="lateCount"
-        type="button"
-        class="flex min-h-11 items-center gap-2 rounded-full border px-4 text-sm font-bold transition-shadow focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
-        :class="[HEAT_TONE.late.band, focus === 'late' ? 'ring-[3px] ring-destructive/30' : '']"
-        :aria-pressed="focus === 'late'"
-        @click="toggleFocus('late')"
+      <!-- Offers demand an answer — the sender is waiting on it. A badge on an
+           icon is easy to walk past; a banner is not. -->
+      <NuxtLink
+        v-if="offerCount > 0"
+        to="/offers"
+        class="flex min-h-12 items-center gap-3 rounded-xl border border-primary/30 bg-primary-tint/60 px-4 py-3 transition-colors active:bg-primary-tint focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
       >
-        <ClockAlertIcon class="size-5" aria-hidden="true" />
-        {{ lateCount }} {{ lateCount === 1 ? 'needs' : 'need' }} you now
-      </button>
-      <button
-        v-if="soonCount"
-        type="button"
-        class="flex min-h-11 items-center gap-2 rounded-full border px-4 text-sm font-bold transition-shadow focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
-        :class="[HEAT_TONE.soon.band, focus === 'soon' ? 'ring-[3px] ring-warning/30' : '']"
-        :aria-pressed="focus === 'soon'"
-        @click="toggleFocus('soon')"
-      >
-        <ClockIcon class="size-5" aria-hidden="true" />
-        {{ soonCount }} due soon
-      </button>
-    </div>
+        <InboxIcon class="size-5 shrink-0 text-primary-tint-foreground" aria-hidden="true" />
+        <span class="min-w-0 flex-1 text-sm font-semibold text-foreground">
+          {{ offerCount === 1 ? 'A colleague wants to hand you a task' : `${offerCount} colleagues want to hand you tasks` }}
+        </span>
+        <span class="flex shrink-0 items-center gap-0.5 text-sm font-bold text-primary-tint-foreground">
+          Review <ChevronRightIcon class="size-4" aria-hidden="true" />
+        </span>
+      </NuxtLink>
 
-    <!-- Offers demand an answer — the sender is waiting on it. A badge on an
-         icon is easy to walk past; a banner is not. -->
-    <NuxtLink
-      v-if="offerCount > 0"
-      to="/offers"
-      class="flex min-h-12 items-center gap-3 rounded-xl border border-primary/30 bg-primary-tint/60 px-4 py-3 transition-colors active:bg-primary-tint focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary-tint"
-    >
-      <InboxIcon class="size-5 shrink-0 text-primary-tint-foreground" aria-hidden="true" />
-      <span class="min-w-0 flex-1 text-sm font-semibold text-foreground">
-        {{ offerCount === 1 ? 'A colleague wants to hand you a task' : `${offerCount} colleagues want to hand you tasks` }}
-      </span>
-      <span class="flex shrink-0 items-center gap-0.5 text-sm font-bold text-primary-tint-foreground">
-        Review <ChevronRightIcon class="size-4" aria-hidden="true" />
-      </span>
-    </NuxtLink>
-
-    <Tabs v-model="tab">
-      <TabsList class="grid w-full grid-cols-3">
-        <TabsTrigger value="open" class="min-h-11 px-2">
-          <PlayIcon aria-hidden="true" /> Open ({{ openTasks.length }})
-        </TabsTrigger>
-        <TabsTrigger value="queue" class="min-h-11 px-2">
-          <HandIcon aria-hidden="true" /> To claim ({{ claimable.length }})
-        </TabsTrigger>
-        <TabsTrigger value="done" class="min-h-11 px-2">
-          <CheckIcon aria-hidden="true" /> Done ({{ doneTasks.length }})
-        </TabsTrigger>
-      </TabsList>
-    </Tabs>
+      <Tabs v-model="tab">
+        <TabsList class="grid w-full grid-cols-3">
+          <TabsTrigger value="open" class="min-h-11 px-2">
+            <PlayIcon aria-hidden="true" /> Open ({{ openTasks.length }})
+          </TabsTrigger>
+          <TabsTrigger value="queue" class="min-h-11 px-2">
+            <HandIcon aria-hidden="true" /> To claim ({{ claimable.length }})
+          </TabsTrigger>
+          <TabsTrigger value="done" class="min-h-11 px-2">
+            <CheckIcon aria-hidden="true" /> Done ({{ doneTasks.length }})
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
+    </StickyListHeader>
 
     <Alert v-if="errorMessage" variant="destructive">
       <AlertTitle>Something went wrong</AlertTitle>

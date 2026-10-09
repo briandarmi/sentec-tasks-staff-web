@@ -83,7 +83,7 @@ const entries = computed<Entry[]>(() => {
           </template>
           <template v-else>{{ entry.actor }}</template>
         </p>
-        <span class="shrink-0 text-xs text-muted-foreground">{{ relativeTime(entry.at) }}</span>
+        <span class="shrink-0 text-xs font-bold text-muted-foreground">{{ relativeTime(entry.at) }}</span>
       </div>
       <p v-if="entry.kind === 'comment'" class="mt-1 rounded-lg bg-muted/60 px-3 py-2 text-sm text-foreground">{{ entry.text }}</p>
       <p v-else-if="entry.text" class="mt-0.5 text-xs text-muted-foreground">{{ entry.text }}</p>
